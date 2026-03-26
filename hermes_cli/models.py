@@ -795,6 +795,35 @@ def list_available_providers() -> list[dict[str, str]]:
             "aliases": alias_list,
             "authenticated": has_creds,
         })
+
+    # Append named custom providers from config.yaml custom_providers list.
+    # These are shown in the interactive `hermes model` menu (hermes_cli/main.py)
+    # but were missing from this function, causing /model to omit them.
+    try:
+        from hermes_cli.config import load_config as _load_cfg
+        _cfg = _load_cfg() or {}
+        _custom_providers_cfg = _cfg.get("custom_providers") or []
+        if isinstance(_custom_providers_cfg, list):
+            for _entry in _custom_providers_cfg:
+                if not isinstance(_entry, dict):
+                    continue
+                _name = _entry.get("name", "").strip()
+                _base_url = _entry.get("base_url", "").strip()
+                if not _name or not _base_url:
+                    continue
+                _pid = "custom:" + _name.lower().replace(" ", "-")
+                _short_url = _base_url.replace("https://", "").replace("http://", "").rstrip("/")
+                _saved_model = _entry.get("model", "")
+                _model_hint = f" — {_saved_model}" if _saved_model else ""
+                result.append({
+                    "id": _pid,
+                    "label": f"{_name} ({_short_url}){_model_hint}",
+                    "aliases": [],
+                    "authenticated": True,  # presence in config.yaml implies configured
+                })
+    except Exception:
+        pass
+
     return result
 
 

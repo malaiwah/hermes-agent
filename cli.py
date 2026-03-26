@@ -3875,6 +3875,11 @@ class HermesCLI:
                     if is_active:
                         print(f"      model: {self.model} ← current")
                     print("      (use hermes model to change)")
+                elif p["id"].startswith("custom:"):
+                    # Named custom provider — label already contains endpoint + model hint
+                    if is_active:
+                        print(f"      model: {self.model} ← current")
+                    print(f"      (use /model {p['id']}:<model> to switch)")
                 else:
                     print("      (use hermes model to change)")
                 print()
