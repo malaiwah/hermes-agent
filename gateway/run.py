@@ -2497,6 +2497,9 @@ class GatewayRunner:
 
         if canonical == "provider":
             return await self._handle_provider_command(event)
+
+        if canonical == "models":
+            return await self._handle_models_command(event)
         
         if canonical == "personality":
             return await self._handle_personality_command(event)
@@ -4306,6 +4309,114 @@ class GatewayRunner:
         lines.append("Setup: `hermes setup`")
         return "\n".join(lines)
     
+    async def _handle_models_command(self, event: MessageEvent) -> str:
+        """Handle /models [provider|custom:name] — list available models."""
+        import yaml
+        from hermes_cli.models import (
+            normalize_provider,
+            provider_model_ids,
+            curated_models_for_provider,
+            _PROVIDER_LABELS,
+            fetch_api_models,
+        )
+
+        _TRUNCATE = 50
+
+        # ── Resolve current provider + model from config ──────────────────
+        current_provider = "openrouter"
+        current_model = ""
+        config_path = _hermes_home / "config.yaml"
+        try:
+            if config_path.exists():
+                with open(config_path, encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f) or {}
+                model_cfg = cfg.get("model", {})
+                if isinstance(model_cfg, dict):
+                    current_provider = model_cfg.get("provider", current_provider)
+                    current_model = model_cfg.get("model", "") or ""
+        except Exception:
+            pass
+
+        current_provider = normalize_provider(current_provider)
+
+        # ── Parse requested provider from args ────────────────────────────
+        arg = event.get_command_args().strip()
+        if arg:
+            requested = arg.lower()
+        else:
+            requested = current_provider
+
+        # ── Named custom provider: custom:lmstudio ────────────────────────
+        if requested.startswith("custom:"):
+            custom_name = requested[len("custom:"):].strip()
+            models: list[str] = []
+            base_url = ""
+            api_key = ""
+            try:
+                from hermes_cli.runtime_provider import _normalize_custom_provider_name
+                from hermes_cli.config import load_config as _load_cfg
+                _cfg = _load_cfg()
+                for entry in (_cfg.get("custom_providers") or []):
+                    if not isinstance(entry, dict):
+                        continue
+                    ename = _normalize_custom_provider_name(str(entry.get("name", "")))
+                    if ename == _normalize_custom_provider_name(custom_name):
+                        base_url = str(entry.get("base_url", "")).strip()
+                        api_key = str(entry.get("api_key", "") or "").strip()
+                        break
+            except Exception:
+                pass
+
+            if not base_url:
+                return f"No custom provider named `{custom_name}` found in config.\nCheck `~/.hermes/config.yaml` → `custom_providers`."
+
+            live = fetch_api_models(api_key, base_url)
+            if live:
+                models = live
+            if not models:
+                return f"Could not fetch models from `{base_url}/models`. The endpoint may not support model listing."
+
+            provider_label = f"custom:{custom_name}"
+            lines = [f"🤖 **Models for {provider_label}** ({len(models)} total)\n"]
+            shown = models[:_TRUNCATE]
+            for m in shown:
+                marker = " ← active" if m == current_model else ""
+                lines.append(f"`{m}`{marker}")
+            if len(models) > _TRUNCATE:
+                lines.append(f"\n_…and {len(models) - _TRUNCATE} more. Use `/model {provider_label}:<model-id>` to switch._")
+            else:
+                lines.append(f"\nUse `/model {provider_label}:<model-id>` to switch.")
+            return "\n".join(lines)
+
+        # ── Named provider ─────────────────────────────────────────────────
+        normalized = normalize_provider(requested)
+        provider_label = _PROVIDER_LABELS.get(normalized, normalized)
+        models = provider_model_ids(normalized)
+        if not models:
+            pairs = curated_models_for_provider(normalized)
+            models = [m for m, _ in pairs]
+
+        if not models:
+            return (
+                f"No model list available for `{normalized}`.\n"
+                "The provider may not support model listing or may not be configured."
+            )
+
+        total = len(models)
+        shown = models[:_TRUNCATE]
+        is_active_provider = (normalized == current_provider)
+
+        lines = [f"🤖 **Models for {provider_label}** ({total} total)\n"]
+        for m in shown:
+            marker = " ← active" if (is_active_provider and m == current_model) else ""
+            lines.append(f"`{m}`{marker}")
+
+        if total > _TRUNCATE:
+            lines.append(f"\n_…and {total - _TRUNCATE} more._")
+
+        lines.append(f"\nUse `/model {normalized}:<model-id>` to switch.")
+        return "\n".join(lines)
+
     async def _handle_personality_command(self, event: MessageEvent) -> str:
         """Handle /personality command - list or set a personality."""
         args = event.get_command_args().strip().lower()
