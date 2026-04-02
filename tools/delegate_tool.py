@@ -48,7 +48,7 @@ BLOCKED_TOOLSET_NAMES = frozenset([
 # Allowlist of toolsets that subagents CAN use
 # Set to None to inherit all parent toolsets (except blocked ones)
 # Configure via config.yaml: delegation.allowed_toolsets
-DEFAULT_ALLOWED_TOOLSETS = ["terminal", "file", "web", "mcp", "memory"]  # Added "memory" for read-only access
+DEFAULT_ALLOWED_TOOLSETS = ["terminal", "file", "web", "mcp", "browser", "memory"]
 
 # Configuration constants
 MAX_CONCURRENT_CHILDREN = 3
