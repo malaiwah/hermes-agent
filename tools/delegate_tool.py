@@ -18,11 +18,12 @@ never the child's intermediate tool calls or reasoning.
 
 import json
 import logging
-logger = logging.getLogger(__name__)
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 # Tools that children must never have access to
@@ -47,6 +48,11 @@ BLOCKED_TOOLSET_NAMES = frozenset([
 # Set to None to inherit all parent toolsets (except blocked ones)
 # Configure via config.yaml: delegation.allowed_toolsets
 DEFAULT_ALLOWED_TOOLSETS = ["terminal", "file", "web", "mcp"]  # Added "mcp" to enable MCP tools
+
+# Configuration constants
+MAX_CONCURRENT_CHILDREN = 3
+MAX_DEPTH = 2  # parent (0) -> child (1) -> grandchild rejected (2)
+DEFAULT_MAX_ITERATIONS = 50
 
 
 def check_delegate_requirements() -> bool:
@@ -801,7 +807,7 @@ DELEGATE_TASK_SCHEMA = {
 
 
 # --- Registry ---
-from tools.registry import registry
+from tools.registry import registry  # noqa: E402
 
 registry.register(
     name="delegate_task",
