@@ -474,6 +474,8 @@ class AIAgent:
         checkpoint_max_snapshots: int = 50,
         pass_session_id: bool = False,
         persist_session: bool = True,
+        _shared_memory_store=None,  # Share parent's memory store (for subagents)
+        _is_subagent=False,  # Mark as subagent for memory access control
     ):
         """
         Initialize the AI Agent.
@@ -1006,7 +1008,13 @@ class AIAgent:
         self._memory_flush_min_turns = 6
         self._turns_since_memory = 0
         self._iters_since_skill = 0
-        if not skip_memory:
+        
+        # Use shared memory store if provided (for subagents)
+        if _shared_memory_store is not None:
+            self._memory_store = _shared_memory_store
+            self._memory_enabled = getattr(_shared_memory_store, '_memory_enabled', True)
+            self._user_profile_enabled = getattr(_shared_memory_store, '_user_profile_enabled', True)
+        elif not skip_memory:
             try:
                 mem_config = _agent_cfg.get("memory", {})
                 self._memory_enabled = mem_config.get("memory_enabled", False)
