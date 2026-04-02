@@ -11,13 +11,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build image
+      - name: Build and push image
         run: |
-          docker build --network=host -t 10.15.0.6:3300/angelos/hermes-agent:latest .
-          docker tag 10.15.0.6:3300/angelos/hermes-agent:latest \
-                     10.15.0.6:3300/angelos/hermes-agent:${{ github.sha }}
-
-      - name: Push image
-        run: |
+          docker build --network=host \
+            --load \
+            -t 10.15.0.6:3300/angelos/hermes-agent:latest \
+            -t 10.15.0.6:3300/angelos/hermes-agent:${{ github.sha }} \
+            .
           docker push 10.15.0.6:3300/angelos/hermes-agent:latest
           docker push 10.15.0.6:3300/angelos/hermes-agent:${{ github.sha }}
