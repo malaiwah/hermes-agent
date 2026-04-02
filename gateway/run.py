@@ -7074,9 +7074,74 @@ def main():
     # Run the gateway - exit with code 1 if no platforms connected,
     # so systemd Restart=on-failure will retry on transient errors (e.g. DNS)
     success = asyncio.run(start_gateway(config))
+    # Clean up orphaned containers from previous runs before starting
+    _cleanup_orphaned_containers()
     if not success:
         sys.exit(1)
 
 
 if __name__ == "__main__":
     main()
+
+
+# =============================================================================
+# Container Cleanup - Prevent accumulation of orphaned containers
+# =============================================================================
+
+def _cleanup_orphaned_containers():
+    """Clean up exited hermes-* containers from previous runs.
+    
+    This prevents accumulation of stopped containers when Hermes
+    gateway crashes or restarts without proper cleanup.
+    """
+    import subprocess
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    try:
+        # Find all hermes-* containers (stopped or running)
+        cmd = [
+            "podman", "ps", "-a",
+            "--filter", "name=^hermes-",
+            "--format", "{{.ID}} {{.Status}}"
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        
+        if result.returncode != 0:
+            logger.debug("Could not list containers: %s", result.stderr)
+            return
+        
+        exited_count = 0
+        for line in result.stdout.strip().split('\n'):
+            if not line:
+                continue
+            parts = line.split()
+            if len(parts) >= 2:
+                container_id = parts[0]
+                status = parts[1]
+                
+                # Only clean up exited/failed/dead containers
+                if status.lower() in ['exited', 'dead', 'created']:
+                    try:
+                        subprocess.run(
+                            ["podman", "rm", "-f", container_id],
+                            capture_output=True,
+                            timeout=30
+                        )
+                        exited_count += 1
+                        logger.info("Cleaned up orphaned container: %s (%s)", 
+                                  container_id[:12], status)
+                    except Exception as e:
+                        logger.debug("Failed to remove container %s: %s", 
+                                   container_id[:12], e)
+        
+        if exited_count > 0:
+            logger.info("🧹 Startup cleanup: removed %d orphaned hermes-* containers", 
+                       exited_count)
+        else:
+            logger.debug("✅ No orphaned containers found")
+            
+    except FileNotFoundError:
+        logger.debug("Podman not found, skipping container cleanup")
+    except Exception as e:
+        logger.warning("Container cleanup failed: %s", e)
