@@ -30,9 +30,10 @@ logger = logging.getLogger(__name__)
 DELEGATE_BLOCKED_TOOLS = frozenset([
     "delegate_task",   # no recursive delegation
     "clarify",         # no user interaction
-    "memory",          # no writes to shared MEMORY.md
     "send_message",    # no cross-platform side effects
     "execute_code",    # children should reason step-by-step, not write scripts
+    # Note: "memory" removed - subagents have read-only memory access
+    # Memory writes are blocked in memory.py based on subagent_memory_mode
 ])
 
 # Toolsets that are stripped from subagents by default
@@ -40,19 +41,20 @@ DELEGATE_BLOCKED_TOOLS = frozenset([
 BLOCKED_TOOLSET_NAMES = frozenset([
     "delegation",  # delegate_task tool
     "clarify",     # clarify tool
-    "memory",      # memory tool (Hermes native + Honcho)
     "code_execution",  # execute_code tool
+    # Note: "memory" removed - subagents now have read-only memory access
 ])
 
 # Allowlist of toolsets that subagents CAN use
 # Set to None to inherit all parent toolsets (except blocked ones)
 # Configure via config.yaml: delegation.allowed_toolsets
-DEFAULT_ALLOWED_TOOLSETS = ["terminal", "file", "web", "mcp"]  # Added "mcp" to enable MCP tools
+DEFAULT_ALLOWED_TOOLSETS = ["terminal", "file", "web", "mcp", "memory"]  # Added "memory" for read-only access
 
 # Configuration constants
 MAX_CONCURRENT_CHILDREN = 3
 MAX_DEPTH = 2  # parent (0) -> child (1) -> grandchild rejected (2)
 DEFAULT_MAX_ITERATIONS = 50
+DEFAULT_SUBAGENT_MEMORY_MODE = "read_only"  # "read_only" | "full" | "none"
 
 
 def check_delegate_requirements() -> bool:
