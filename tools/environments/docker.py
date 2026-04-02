@@ -142,7 +142,7 @@ _SECURITY_ARGS = [
     "--cap-add", "CHOWN",
     "--cap-add", "FOWNER",
     "--security-opt", "no-new-privileges",
-    "--pids-limit", "256",
+
     "--tmpfs", "/tmp:rw,nosuid,size=512m",
     "--tmpfs", "/var/tmp:rw,noexec,nosuid,size=256m",
     "--tmpfs", "/run:rw,noexec,nosuid,size=64m",
@@ -150,6 +150,44 @@ _SECURITY_ARGS = [
 
 
 _storage_opt_ok: Optional[bool] = None  # cached result across instances
+
+_cgroup_limits_ok: Optional[bool] = None  # cached result across instances
+
+
+def _cgroup_limits_available() -> bool:
+    """Probe whether cgroup resource limits (--cpus, --memory) work.
+
+    In unprivileged LXC containers without cgroup controller delegation,
+    these flags cause container startup to fail. We test once with a
+    lightweight container and cache the result.
+    """
+    global _cgroup_limits_ok
+    if _cgroup_limits_ok is not None:
+        return _cgroup_limits_ok
+
+    docker_exe = find_docker()
+    if not docker_exe:
+        _cgroup_limits_ok = False
+        return False
+
+    try:
+        result = subprocess.run(
+            [docker_exe, "run", "--rm", "--cpus", "0.5", "--memory", "64m",
+             "docker.io/library/alpine:latest", "true"],
+            capture_output=True, text=True, timeout=30,
+        )
+        _cgroup_limits_ok = result.returncode == 0
+        if not _cgroup_limits_ok:
+            logger.warning(
+                "Cgroup resource limits (--cpus/--memory) not available in this "
+                "environment. Containers will run without CPU/memory limits. "
+                "To enable limits, delegate cgroup controllers to this container."
+            )
+    except Exception:
+        _cgroup_limits_ok = False
+        logger.warning("Cgroup limit probe failed; disabling resource limits.")
+
+    return _cgroup_limits_ok
 
 
 def _ensure_docker_available() -> None:
@@ -265,11 +303,11 @@ class DockerEnvironment(BaseEnvironment):
         # Fail fast if Docker is not available.
         _ensure_docker_available()
 
-        # Build resource limit args
+        # Build resource limit args (gated by cgroup availability probe)
         resource_args = []
-        if cpu > 0:
+        if cpu > 0 and _cgroup_limits_available():
             resource_args.extend(["--cpus", str(cpu)])
-        if memory > 0:
+        if memory > 0 and _cgroup_limits_available():
             resource_args.extend(["--memory", f"{memory}m"])
         if disk > 0 and sys.platform != "darwin":
             if self._storage_opt_supported():
