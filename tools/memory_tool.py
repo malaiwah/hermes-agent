@@ -442,15 +442,38 @@ def memory_tool(
     content: str = None,
     old_text: str = None,
     store: Optional[MemoryStore] = None,
+    is_subagent: bool = False,
+    subagent_memory_mode: str = "read_only",
 ) -> str:
     """
     Single entry point for the memory tool. Dispatches to MemoryStore methods.
-
+    
+    Subagent memory access modes:
+      - "read_only": Subagents can read/query memory but not write (add/replace/remove blocked)
+      - "full": Subagents have full read/write access (same as parent)
+      - "none": Subagents cannot access memory at all
+    
     Returns JSON string with results.
     """
     if store is None:
         return json.dumps({"success": False, "error": "Memory is not available. It may be disabled in config or this environment."}, ensure_ascii=False)
-
+    
+    # Enforce subagent memory access mode
+    if is_subagent and subagent_memory_mode != "full":
+        if action in ("add", "replace", "remove"):
+            if subagent_memory_mode == "none":
+                return json.dumps({
+                    "success": False,
+                    "error": f"Memory tool access denied for subagent (mode: {subagent_memory_mode}). "
+                             f"Only parent agent can write to memory."
+                }, ensure_ascii=False)
+            elif subagent_memory_mode == "read_only":
+                return json.dumps({
+                    "success": False,
+                    "error": f"Memory write operation blocked for subagent in read_only mode. "
+                             f"Action '{action}' not permitted. Subagents should return findings to parent agent instead."
+                }, ensure_ascii=False)
+    
     if target not in ("memory", "user"):
         return json.dumps({"success": False, "error": f"Invalid target '{target}'. Use 'memory' or 'user'."}, ensure_ascii=False)
 
@@ -539,7 +562,7 @@ MEMORY_SCHEMA = {
 
 
 # --- Registry ---
-from tools.registry import registry
+from tools.registry import registry  # noqa: E402
 
 registry.register(
     name="memory",
