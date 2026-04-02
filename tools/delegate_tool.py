@@ -34,10 +34,19 @@ DELEGATE_BLOCKED_TOOLS = frozenset([
     "execute_code",    # children should reason step-by-step, not write scripts
 ])
 
-MAX_CONCURRENT_CHILDREN = 3
-MAX_DEPTH = 2  # parent (0) -> child (1) -> grandchild rejected (2)
-DEFAULT_MAX_ITERATIONS = 50
-DEFAULT_TOOLSETS = ["terminal", "file", "web"]
+# Toolsets that are stripped from subagents by default
+# Can be overridden via config.yaml: delegation.allowed_toolsets
+BLOCKED_TOOLSET_NAMES = frozenset([
+    "delegation",  # delegate_task tool
+    "clarify",     # clarify tool
+    "memory",      # memory tool (Hermes native + Honcho)
+    "code_execution",  # execute_code tool
+])
+
+# Allowlist of toolsets that subagents CAN use
+# Set to None to inherit all parent toolsets (except blocked ones)
+# Configure via config.yaml: delegation.allowed_toolsets
+DEFAULT_ALLOWED_TOOLSETS = ["terminal", "file", "web", "mcp"]  # Added "mcp" to enable MCP tools
 
 
 def check_delegate_requirements() -> bool:
@@ -107,10 +116,8 @@ def _resolve_workspace_hint(parent_agent) -> Optional[str]:
 
 def _strip_blocked_tools(toolsets: List[str]) -> List[str]:
     """Remove toolsets that contain only blocked tools."""
-    blocked_toolset_names = {
-        "delegation", "clarify", "memory", "code_execution",
-    }
-    return [t for t in toolsets if t not in blocked_toolset_names]
+    # Use configurable blocked toolset names
+    return [t for t in toolsets if t not in BLOCKED_TOOLSET_NAMES]
 
 
 def _build_child_progress_callback(task_index: int, parent_agent, task_count: int = 1) -> Optional[callable]:
@@ -223,30 +230,19 @@ def _build_child_agent(
 
     # When no explicit toolsets given, inherit from parent's enabled toolsets
     # so disabled tools (e.g. web) don't leak to subagents.
-    # Note: enabled_toolsets=None means "all tools enabled" (the default),
-    # so we must derive effective toolsets from the parent's loaded tools.
-    parent_enabled = getattr(parent_agent, "enabled_toolsets", None)
-    if parent_enabled is not None:
-        parent_toolsets = set(parent_enabled)
-    elif parent_agent and hasattr(parent_agent, "valid_tool_names"):
-        # enabled_toolsets is None (all tools) — derive from loaded tool names
-        import model_tools
-        parent_toolsets = {
-            ts for name in parent_agent.valid_tool_names
-            if (ts := model_tools.get_toolset_for_tool(name)) is not None
-        }
-    else:
-        parent_toolsets = set(DEFAULT_TOOLSETS)
-
+    parent_toolsets = set(getattr(parent_agent, "enabled_toolsets", None) or DEFAULT_ALLOWED_TOOLSETS)
     if toolsets:
         # Intersect with parent — subagent must not gain tools the parent lacks
+        # Then apply allowlist
         child_toolsets = _strip_blocked_tools([t for t in toolsets if t in parent_toolsets])
-    elif parent_agent and parent_enabled is not None:
-        child_toolsets = _strip_blocked_tools(parent_enabled)
-    elif parent_toolsets:
-        child_toolsets = _strip_blocked_tools(sorted(parent_toolsets))
+        # Filter to allowed toolsets
+        child_toolsets = [t for t in child_toolsets if t in DEFAULT_ALLOWED_TOOLSETS]
+    elif parent_agent and getattr(parent_agent, "enabled_toolsets", None):
+        child_toolsets = _strip_blocked_tools(parent_agent.enabled_toolsets)
+        # Filter to allowed toolsets
+        child_toolsets = [t for t in child_toolsets if t in DEFAULT_ALLOWED_TOOLSETS]
     else:
-        child_toolsets = _strip_blocked_tools(DEFAULT_TOOLSETS)
+        child_toolsets = _strip_blocked_tools(DEFAULT_ALLOWED_TOOLSETS)
 
     workspace_hint = _resolve_workspace_hint(parent_agent)
     child_prompt = _build_child_system_prompt(goal, context, workspace_path=workspace_hint)
