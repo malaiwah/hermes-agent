@@ -11,6 +11,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Configure insecure registry
+        run: |
+          # Docker CLI talks to Podman socket — configure both sides
+          sudo mkdir -p /etc/docker /etc/containers/registries.conf.d
+          echo '{"insecure-registries": ["10.15.0.6:3300"]}' | sudo tee /etc/docker/daemon.json
+          printf '[[registry]]\nlocation = "10.15.0.6:3300"\ninsecure = true\n' | \
+            sudo tee /etc/containers/registries.conf.d/gitea.conf
+
       - name: Login to Gitea Registry
         run: |
           echo "${{ secrets.REGISTRY_TOKEN }}" | \
