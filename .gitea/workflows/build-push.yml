@@ -1,0 +1,28 @@
+name: Build and Push Image
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Login to Gitea Registry
+        run: |
+          echo "${{ secrets.REGISTRY_TOKEN }}" | \
+            docker login 10.15.0.6:3300 -u "${{ secrets.REGISTRY_USER }}" --password-stdin
+
+      - name: Build image
+        run: |
+          docker build --network=host -t 10.15.0.6:3300/angelos/hermes-agent:latest .
+          docker tag 10.15.0.6:3300/angelos/hermes-agent:latest \
+                     10.15.0.6:3300/angelos/hermes-agent:${{ github.sha }}
+
+      - name: Push image
+        run: |
+          docker push 10.15.0.6:3300/angelos/hermes-agent:latest
+          docker push 10.15.0.6:3300/angelos/hermes-agent:${{ github.sha }}
