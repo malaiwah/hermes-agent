@@ -306,7 +306,8 @@ def _build_child_agent(
         log_prefix=f"[subagent-{task_index}]",
         platform=parent_agent.platform,
         skip_context_files=True,
-        skip_memory=True,
+        skip_memory=False,  # Enable memory for subagents (read-only mode enforced in memory_tool.py)
+        subagent_memory_mode=DEFAULT_SUBAGENT_MEMORY_MODE,  # Pass read_only/full/none config
         clarify_callback=None,
         thinking_callback=child_thinking_cb,
         session_db=getattr(parent_agent, '_session_db', None),
@@ -317,6 +318,7 @@ def _build_child_agent(
         provider_sort=parent_agent.provider_sort,
         tool_progress_callback=child_progress_cb,
         iteration_budget=None,  # fresh budget per subagent
+        _is_subagent=True,  # Mark this agent as a subagent for memory/tool access control
     )
     child._print_fn = getattr(parent_agent, '_print_fn', None)
     # Set delegation depth so children can't spawn grandchildren
