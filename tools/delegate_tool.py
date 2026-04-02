@@ -319,6 +319,8 @@ def _build_child_agent(
         tool_progress_callback=child_progress_cb,
         iteration_budget=None,  # fresh budget per subagent
         _is_subagent=True,  # Mark this agent as a subagent for memory/tool access control
+        # Share parent's memory store (read-only access enforced in memory_tool.py)
+        _shared_memory_store=getattr(parent_agent, '_memory_store', None),
     )
     child._print_fn = getattr(parent_agent, '_print_fn', None)
     # Set delegation depth so children can't spawn grandchildren
