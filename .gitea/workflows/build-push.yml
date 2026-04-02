@@ -11,7 +11,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build and push image
+      - name: Install Podman remote
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq podman-remote >/dev/null 2>&1
+
+      - name: Build image
         env:
           DOCKER_BUILDKIT: "0"
         run: |
@@ -19,5 +23,13 @@ jobs:
             -t 10.15.0.6:3300/angelos/hermes-agent:latest \
             -t 10.15.0.6:3300/angelos/hermes-agent:${{ github.sha }} \
             .
-          docker push 10.15.0.6:3300/angelos/hermes-agent:latest
-          docker push 10.15.0.6:3300/angelos/hermes-agent:${{ github.sha }}
+
+      - name: Push image
+        run: |
+          podman-remote --url unix:///var/run/docker.sock login --tls-verify=false \
+            -u "${{ secrets.REGISTRY_USER }}" -p "${{ secrets.REGISTRY_TOKEN }}" \
+            10.15.0.6:3300
+          podman-remote --url unix:///var/run/docker.sock push --tls-verify=false \
+            10.15.0.6:3300/angelos/hermes-agent:latest
+          podman-remote --url unix:///var/run/docker.sock push --tls-verify=false \
+            10.15.0.6:3300/angelos/hermes-agent:${{ github.sha }}
