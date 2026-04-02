@@ -1791,7 +1791,8 @@ class AIAgent:
             prompt = self._SKILL_REVIEW_PROMPT
 
         def _run_review():
-            import contextlib, os as _os
+            import contextlib
+            import os as _os
             review_agent = None
             try:
                 with open(_os.devnull, "w") as _devnull, \
@@ -6205,6 +6206,8 @@ class AIAgent:
                     content=function_args.get("content"),
                     old_text=function_args.get("old_text"),
                     store=self._memory_store,
+                    is_subagent=getattr(self, '_is_subagent', False),
+                    subagent_memory_mode=getattr(self, 'subagent_memory_mode', 'read_only'),
                 )
                 tool_duration = time.time() - tool_start_time
                 if self.quiet_mode:
