@@ -580,7 +580,7 @@ class DockerEnvironment(BaseEnvironment):
             else:
                 logged_cmd.append(cmd[i])
                 i += 1
-        logger.debug("docker exec cmd: %s", " ".join(logged_cmd))
+        logger.warning("docker exec cmd: %s", " ".join(logged_cmd))
 
         try:
             _output_chunks = []
