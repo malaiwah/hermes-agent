@@ -540,6 +540,7 @@ class AIAgent:
         persist_session: bool = True,
         _shared_memory_store=None,  # Share parent's memory store (for subagents)
         _is_subagent=False,  # Mark as subagent for memory access control
+        subagent_memory_mode: str = "read_only",  # "read_only" | "full" | "none"
     ):
         """
         Initialize the AI Agent.
@@ -1031,6 +1032,9 @@ class AIAgent:
         self._turns_since_memory = 0
         self._iters_since_skill = 0
         
+        self._is_subagent = _is_subagent
+        self.subagent_memory_mode = subagent_memory_mode
+
         # Use shared memory store if provided (for subagents)
         if _shared_memory_store is not None:
             self._memory_store = _shared_memory_store
