@@ -282,6 +282,7 @@ class DockerEnvironment(BaseEnvironment):
         forward_env: list[str] | None = None,
         env: dict | None = None,
         network: bool = True,
+        docker_network: str | None = None,
         host_cwd: str = None,
         auto_mount_cwd: bool = False,
     ):
@@ -319,6 +320,8 @@ class DockerEnvironment(BaseEnvironment):
                 )
         if not network:
             resource_args.append("--network=none")
+        elif docker_network:
+            resource_args.extend(["--network", docker_network])
 
         # Persistent workspace via bind mounts from a configurable host directory
         # (TERMINAL_SANDBOX_DIR, default ~/.hermes/sandboxes/). Non-persistent
