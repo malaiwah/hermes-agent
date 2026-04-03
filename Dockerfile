@@ -26,7 +26,7 @@ RUN chmod +x /opt/hermes/docker/entrypoint.sh \
 # ── Podman-remote shim ───────────────────────────────────────────────────────
 # Bridges DOCKER_HOST env var to podman-remote --url flag
 
-RUN printf '#!/bin/sh\nexec /usr/bin/podman-remote --url "${DOCKER_HOST:-unix:///var/run/docker.sock}" "$@"\n' \
+RUN printf '#!/bin/sh\nprintf "%%s podman-remote-shim: %%s\\n" "$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)" "$*" >> /opt/data/logs/shim.log 2>/dev/null\nexec /usr/bin/podman-remote --url "${DOCKER_HOST:-unix:///var/run/docker.sock}" "$@"\n' \
     > /usr/local/bin/docker && chmod +x /usr/local/bin/docker
 
 # ── Runtime ──────────────────────────────────────────────────────────────────

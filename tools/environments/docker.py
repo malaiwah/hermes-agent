@@ -555,6 +555,22 @@ class DockerEnvironment(BaseEnvironment):
             cmd.extend(["-e", f"{key}={exec_env[key]}"])
         cmd.extend([self._container_id, "bash", "-lc", exec_command])
 
+        # Log the exact exec command with secret values masked
+        _SENSITIVE = {"TOKEN", "KEY", "SECRET", "PASSWORD", "CREDENTIAL", "PASSWD"}
+        def _mask(k, v):
+            return "***" if any(s in k.upper() for s in _SENSITIVE) else v
+        logged_cmd = []
+        i = 0
+        while i < len(cmd):
+            if cmd[i] == "-e" and i + 1 < len(cmd) and "=" in cmd[i + 1]:
+                k, _, v = cmd[i + 1].partition("=")
+                logged_cmd.extend(["-e", f"{k}={_mask(k, v)}"])
+                i += 2
+            else:
+                logged_cmd.append(cmd[i])
+                i += 1
+        logger.warning("docker exec cmd: %s", " ".join(logged_cmd))
+
         try:
             _output_chunks = []
             proc = subprocess.Popen(
