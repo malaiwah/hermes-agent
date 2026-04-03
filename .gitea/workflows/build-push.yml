@@ -16,10 +16,8 @@ jobs:
           sudo apt-get update -qq && sudo apt-get install -y -qq podman-remote >/dev/null 2>&1
 
       - name: Build image
-        env:
-          DOCKER_BUILDKIT: "0"
         run: |
-          docker build --network=host \
+          podman-remote --url unix:///var/run/docker.sock build --network=host \
             -t 10.15.0.6:3300/angelos/hermes-agent:latest \
             -t 10.15.0.6:3300/angelos/hermes-agent:${{ github.sha }} \
             .
