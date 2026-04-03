@@ -7,6 +7,9 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -25,9 +28,10 @@ jobs:
       - name: Push image
         run: |
           podman-remote --url unix:///var/run/docker.sock login --tls-verify=false \
-            -u "${{ secrets.REGISTRY_USER }}" -p "${{ secrets.REGISTRY_TOKEN }}" \
+            -u "${{ gitea.actor }}" -p "${{ secrets.GITEA_TOKEN }}" \
             10.15.0.6:3300
           podman-remote --url unix:///var/run/docker.sock push --tls-verify=false \
             10.15.0.6:3300/angelos/hermes-agent:latest
           podman-remote --url unix:///var/run/docker.sock push --tls-verify=false \
             10.15.0.6:3300/angelos/hermes-agent:${{ github.sha }}
+
