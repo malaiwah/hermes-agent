@@ -1141,8 +1141,10 @@ class AIAgent:
         _model_cfg = _agent_cfg.get("model", {})
         if isinstance(_model_cfg, dict):
             _config_context_length = _model_cfg.get("context_length")
+            self._config_extra_body = _model_cfg.get("extra_body") or {}
         else:
             _config_context_length = None
+            self._config_extra_body = {}
         if _config_context_length is not None:
             try:
                 _config_context_length = int(_config_context_length)
@@ -5332,6 +5334,9 @@ class AIAgent:
         # Nous Portal product attribution
         if _is_nous:
             extra_body["tags"] = ["product=hermes-agent"]
+
+        if getattr(self, "_config_extra_body", None):
+            extra_body.update(self._config_extra_body)
 
         if extra_body:
             api_kwargs["extra_body"] = extra_body
