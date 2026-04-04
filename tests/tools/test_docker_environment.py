@@ -42,6 +42,7 @@ def _make_dummy_env(**kwargs):
         task_id=kwargs.get("task_id", "test-task"),
         volumes=kwargs.get("volumes", []),
         network=kwargs.get("network", True),
+        docker_network=kwargs.get("docker_network", ""),
         host_cwd=kwargs.get("host_cwd"),
         auto_mount_cwd=kwargs.get("auto_mount_cwd", False),
     )
@@ -131,6 +132,36 @@ def test_auto_mount_host_cwd_adds_volume(monkeypatch, tmp_path):
     assert run_calls, "docker run should have been called"
     run_args_str = " ".join(run_calls[0][0])
     assert f"{project_dir}:/workspace" in run_args_str
+
+
+def test_docker_network_adds_named_network_arg(monkeypatch):
+    """A configured Docker network should be passed through to docker run."""
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    calls = _mock_subprocess_run(monkeypatch)
+
+    _make_dummy_env(docker_network="hermes-net")
+
+    run_calls = [c for c in calls if isinstance(c[0], list) and len(c[0]) >= 2 and c[0][1] == "run"]
+    assert run_calls, "docker run should have been called"
+    run_args = run_calls[0][0]
+    assert "--network" in run_args
+    assert "hermes-net" in run_args
+    assert "--network=none" not in run_args
+
+
+def test_network_false_overrides_named_docker_network(monkeypatch):
+    """Explicit network disablement should win over a named Docker network."""
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    calls = _mock_subprocess_run(monkeypatch)
+
+    _make_dummy_env(network=False, docker_network="hermes-net")
+
+    run_calls = [c for c in calls if isinstance(c[0], list) and len(c[0]) >= 2 and c[0][1] == "run"]
+    assert run_calls, "docker run should have been called"
+    run_args = run_calls[0][0]
+    assert "--network=none" in run_args
+    assert "--network" not in run_args
+    assert "hermes-net" not in run_args
 
 
 def test_auto_mount_disabled_by_default(monkeypatch, tmp_path):

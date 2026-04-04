@@ -211,6 +211,7 @@ class DockerEnvironment(BaseEnvironment):
         volumes: list = None,
         forward_env: list[str] | None = None,
         network: bool = True,
+        docker_network: str = "",
         host_cwd: str = None,
         auto_mount_cwd: bool = False,
     ):
@@ -245,8 +246,11 @@ class DockerEnvironment(BaseEnvironment):
                     "Docker storage driver does not support per-container disk limits "
                     "(requires overlay2 on XFS with pquota). Container will run without disk quota."
                 )
+        docker_network = docker_network.strip()
         if not network:
             resource_args.append("--network=none")
+        elif docker_network:
+            resource_args.extend(["--network", docker_network])
 
         # Persistent workspace via bind mounts from a configurable host directory
         # (TERMINAL_SANDBOX_DIR, default ~/.hermes/sandboxes/). Non-persistent

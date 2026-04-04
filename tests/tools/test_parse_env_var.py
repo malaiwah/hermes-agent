@@ -1,6 +1,7 @@
 """Tests for _parse_env_var and _get_env_config env-var validation."""
 
 import json
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -38,6 +39,14 @@ class TestParseEnvVar:
             config = _tt_mod._get_env_config()
             assert config["docker_forward_env"] == ["GITHUB_TOKEN", "NPM_TOKEN"]
 
+    def test_get_env_config_reads_docker_network(self):
+        with patch.dict("os.environ", {
+            "TERMINAL_ENV": "docker",
+            "TERMINAL_DOCKER_NETWORK": "hermes-net",
+        }, clear=False):
+            config = _tt_mod._get_env_config()
+            assert config["docker_network"] == "hermes-net"
+
     def test_create_environment_passes_docker_forward_env(self):
         fake_env = object()
         with patch.object(_tt_mod, "_DockerEnvironment", return_value=fake_env) as mock_docker:
@@ -51,6 +60,60 @@ class TestParseEnvVar:
 
         assert result is fake_env
         assert mock_docker.call_args.kwargs["forward_env"] == ["GITHUB_TOKEN"]
+
+    def test_create_environment_passes_docker_network(self):
+        fake_env = object()
+        with patch.object(_tt_mod, "_DockerEnvironment", return_value=fake_env) as mock_docker:
+            result = _tt_mod._create_environment(
+                "docker",
+                image="python:3.11",
+                cwd="/root",
+                timeout=180,
+                container_config={"docker_network": "hermes-net"},
+            )
+
+        assert result is fake_env
+        assert mock_docker.call_args.kwargs["docker_network"] == "hermes-net"
+
+    def test_terminal_tool_passes_docker_network_into_container_config(self, monkeypatch):
+        captured = {}
+        fake_env = SimpleNamespace(execute=lambda command, **kwargs: {"output": "ok", "returncode": 0})
+
+        monkeypatch.setattr(_tt_mod, "_active_environments", {})
+        monkeypatch.setattr(_tt_mod, "_last_activity", {})
+        monkeypatch.setattr(_tt_mod, "_start_cleanup_thread", lambda: None)
+        monkeypatch.setattr(
+            _tt_mod,
+            "_get_env_config",
+            lambda: {
+                "env_type": "docker",
+                "docker_image": "python:3.11",
+                "docker_network": "hermes-net",
+                "docker_volumes": [],
+                "docker_mount_cwd_to_workspace": False,
+                "cwd": "/root",
+                "host_cwd": None,
+                "timeout": 180,
+                "container_cpu": 1,
+                "container_memory": 5120,
+                "container_disk": 51200,
+                "container_persistent": True,
+                "modal_mode": "auto",
+            },
+        )
+
+        def _fake_create_environment(**kwargs):
+            captured.update(kwargs)
+            return fake_env
+
+        monkeypatch.setattr(_tt_mod, "_create_environment", _fake_create_environment)
+
+        result = json.loads(
+            _tt_mod.terminal_tool("echo ok", task_id="docker-network-test", force=True)
+        )
+
+        assert result["exit_code"] == 0
+        assert captured["container_config"]["docker_network"] == "hermes-net"
 
     def test_falls_back_to_default(self):
         with patch.dict("os.environ", {}, clear=False):
