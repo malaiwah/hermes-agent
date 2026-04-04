@@ -8,6 +8,7 @@ import pytest
 from model_tools import (
     handle_function_call,
     get_all_tool_names,
+    get_tool_definitions,
     get_toolset_for_tool,
     _AGENT_LOOP_TOOLS,
     _LEGACY_TOOLSET_MAP,
@@ -90,6 +91,26 @@ class TestAgentLoopTools:
     def test_no_regular_tools_in_set(self):
         assert "web_search" not in _AGENT_LOOP_TOOLS
         assert "terminal" not in _AGENT_LOOP_TOOLS
+
+    def test_send_user_message_only_exposed_on_interactive_platforms(self):
+        cli_tools = get_tool_definitions(
+            enabled_toolsets=["user_updates"],
+            quiet_mode=True,
+            platform="cli",
+        )
+        api_tools = get_tool_definitions(
+            enabled_toolsets=["user_updates"],
+            quiet_mode=True,
+            platform="api_server",
+        )
+        default_tools = get_tool_definitions(
+            enabled_toolsets=["user_updates"],
+            quiet_mode=True,
+        )
+
+        assert [t["function"]["name"] for t in cli_tools] == ["send_user_message"]
+        assert api_tools == []
+        assert default_tools == []
 
 
 # =========================================================================

@@ -918,6 +918,7 @@ class AIAgent:
             enabled_toolsets=enabled_toolsets,
             disabled_toolsets=disabled_toolsets,
             quiet_mode=self.quiet_mode,
+            platform=self.platform,
         )
         
         # Show tool configuration and store valid tool names for validation
@@ -6179,7 +6180,7 @@ class AIAgent:
                     print(f"  📞 Tool {i}: {name}({list(args.keys())}) - {args_preview}")
 
         for tc, name, args in parsed_calls:
-            if self.tool_progress_callback:
+            if self.tool_progress_callback and name != "send_user_message":
                 try:
                     preview = _build_tool_preview(name, args)
                     self.tool_progress_callback("tool.started", name, preview, args)
@@ -6367,7 +6368,7 @@ class AIAgent:
             self._current_tool = function_name
             self._touch_activity(f"executing tool: {function_name}")
 
-            if self.tool_progress_callback:
+            if self.tool_progress_callback and function_name != "send_user_message":
                 try:
                     preview = _build_tool_preview(function_name, function_args)
                     self.tool_progress_callback("tool.started", function_name, preview, function_args)

@@ -236,6 +236,7 @@ def get_tool_definitions(
     enabled_toolsets: List[str] = None,
     disabled_toolsets: List[str] = None,
     quiet_mode: bool = False,
+    platform: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     Get tool definitions for model API calls with toolset-based filtering.
@@ -246,6 +247,7 @@ def get_tool_definitions(
         enabled_toolsets: Only include tools from these toolsets.
         disabled_toolsets: Exclude tools from these toolsets (if enabled_toolsets is None).
         quiet_mode: Suppress status prints.
+        platform: Runtime platform hint used for context-sensitive tool filtering.
 
     Returns:
         Filtered list of OpenAI-format tool definitions.
@@ -301,6 +303,32 @@ def get_tool_definitions(
 
     # Ask the registry for schemas (only returns tools whose check_fn passes)
     filtered_tools = registry.get_definitions(tools_to_include, quiet=quiet_mode)
+
+    # Interactive in-session messaging is only meaningful when Hermes has a
+    # live session surface that can route updates back to the current user.
+    # Keep it out of non-interactive/default contexts so the model does not
+    # waste turns on a tool that will deterministically fail at runtime.
+    interactive_message_platforms = {
+        "acp",
+        "cli",
+        "discord",
+        "dingtalk",
+        "email",
+        "feishu",
+        "homeassistant",
+        "matrix",
+        "mattermost",
+        "signal",
+        "slack",
+        "telegram",
+        "wecom",
+        "whatsapp",
+    }
+    if platform not in interactive_message_platforms:
+        filtered_tools = [
+            td for td in filtered_tools
+            if td.get("function", {}).get("name") != "send_user_message"
+        ]
 
     # The set of tool names that actually passed check_fn filtering.
     # Use this (not tools_to_include) for any downstream schema that references
