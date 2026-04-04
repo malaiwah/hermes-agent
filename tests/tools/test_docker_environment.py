@@ -1,4 +1,5 @@
 import logging
+import threading
 from io import StringIO
 import subprocess
 import sys
@@ -219,7 +220,9 @@ def test_non_persistent_cleanup_removes_container(monkeypatch):
 
     # Should have stop and rm calls via Popen
     stop_cmds = [c for c in popen_cmds if container_id in str(c) and "stop" in str(c)]
+    rm_cmds = [c for c in popen_cmds if container_id in str(c) and "rm -f" in str(c)]
     assert len(stop_cmds) >= 1, f"cleanup() should schedule docker stop for {container_id}"
+    assert len(rm_cmds) >= 1, f"cleanup() should schedule docker rm -f for {container_id}"
 
 
 class _FakePopen:
@@ -310,6 +313,53 @@ def test_start_persistent_exec_builds_interactive_docker_exec(monkeypatch):
     assert kwargs["stdin"] == subprocess.PIPE
     assert kwargs["stdout"] == subprocess.PIPE
     assert kwargs["stderr"] == subprocess.PIPE
+
+
+def test_persistent_exec_session_streams_callbacks_and_exit():
+    stdout_lines = []
+    stderr_lines = []
+    exit_codes = []
+
+    class _FakeProcess:
+        def __init__(self):
+            self.stdin = StringIO()
+            self.stdout = StringIO("hello\nworld\n")
+            self.stderr = StringIO("warn\n")
+            self.pid = 4321
+            self.returncode = None
+            self.terminated = False
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            self.returncode = 0
+            return 0
+
+        def terminate(self):
+            self.terminated = True
+            self.returncode = 0
+
+        def kill(self):
+            self.returncode = -9
+
+    process = _FakeProcess()
+    session = docker_env.PersistentDockerExecSession(process)
+    done = threading.Event()
+
+    session.read_loop(
+        stdout_handler=stdout_lines.append,
+        stderr_handler=stderr_lines.append,
+        exit_handler=lambda code: (exit_codes.append(code), done.set()),
+    )
+    assert done.wait(timeout=1.0)
+
+    session.write_line("{\"jsonrpc\":\"2.0\"}")
+    assert process.stdin.getvalue().endswith("\n")
+    assert stdout_lines == ["hello", "world"]
+    assert stderr_lines == ["warn"]
+    assert exit_codes == [0]
+    assert session.is_session_alive() is False
 
 def test_execute_prefers_shell_env_over_hermes_dotenv(monkeypatch):
     env = _make_execute_only_env(["GITHUB_TOKEN"])

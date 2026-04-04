@@ -272,3 +272,167 @@ def test_background_subagent_protocol_error_stops_session(manager, monkeypatch):
     assert status["status"] == "error"
     context = manager.render_turn_context("session-1")
     assert "protocol_error" in context
+
+
+def test_background_subagent_max_lifetime_times_out_and_nudges(manager, monkeypatch):
+    exec_session = FakeExecSession()
+    environment = FakeEnvironment(exec_session)
+    monkeypatch.setattr(manager, "_create_environment", lambda **kwargs: environment)
+
+    spawned = manager.spawn_subagent(
+        owner_session_id="session-1",
+        purpose="Lifetime bounded",
+        initial_task="Start work",
+        cwd="/workspace",
+    )
+    record = manager._get_owned_record("session-1", spawned["id"])
+    assert record is not None
+    record.max_lifetime_at = bg._now() - 1
+
+    manager._sweep_once()
+
+    status = manager.get_status(owner_session_id="session-1", subagent_id=spawned["id"])
+    assert status["status"] == "timed_out"
+    assert status["terminal_reason"] == "max_lifetime_exceeded"
+    context = manager.render_turn_context("session-1")
+    assert "max_lifetime_exceeded" in context
+    assert environment.cleanup_called is True
+
+
+def test_background_subagent_tools_reject_wrong_owner(manager, monkeypatch):
+    exec_session = FakeExecSession()
+    environment = FakeEnvironment(exec_session)
+    monkeypatch.setattr(manager, "_create_environment", lambda **kwargs: environment)
+
+    spawned = manager.spawn_subagent(
+        owner_session_id="session-1",
+        purpose="Owner scoped",
+        initial_task="Start work",
+        cwd="/workspace",
+    )
+    subagent_id = spawned["id"]
+
+    for result in (
+        manager.get_status(owner_session_id="session-2", subagent_id=subagent_id),
+        manager.send_message(owner_session_id="session-2", subagent_id=subagent_id, message="hello"),
+        manager.poll_subagent(owner_session_id="session-2", subagent_id=subagent_id),
+        manager.stop_subagent(owner_session_id="session-2", subagent_id=subagent_id),
+    ):
+        assert result["success"] is False
+        assert "Unknown background subagent" in result["error"]
+
+
+def test_background_subagent_stop_sends_cancel_and_cleans_up(manager, monkeypatch):
+    exec_session = FakeExecSession()
+    environment = FakeEnvironment(exec_session)
+    monkeypatch.setattr(manager, "_create_environment", lambda **kwargs: environment)
+
+    spawned = manager.spawn_subagent(
+        owner_session_id="session-1",
+        purpose="Stop me",
+        initial_task="Start work",
+        cwd="/workspace",
+    )
+
+    stopped = manager.stop_subagent(
+        owner_session_id="session-1",
+        subagent_id=spawned["id"],
+        reason="done",
+    )
+
+    assert stopped["success"] is True
+    assert stopped["status"] == "stopped"
+    assert environment.cleanup_called is True
+    cancel_methods = [msg["method"] for msg in exec_session.writes if msg.get("method") == "session/cancel"]
+    assert cancel_methods == ["session/cancel"]
+
+
+def test_background_subagent_poll_since_seq_returns_incremental_events(manager, monkeypatch):
+    exec_session = FakeExecSession()
+    environment = FakeEnvironment(exec_session)
+    monkeypatch.setattr(manager, "_create_environment", lambda **kwargs: environment)
+
+    spawned = manager.spawn_subagent(
+        owner_session_id="session-1",
+        purpose="Incremental polling",
+        initial_task="Inspect failing tests",
+        cwd="/workspace",
+    )
+    subagent_id = spawned["id"]
+
+    first_poll = manager.poll_subagent(owner_session_id="session-1", subagent_id=subagent_id)
+    assert first_poll["events"]
+    assert first_poll["unread_count"] == 0
+    last_seq = first_poll["events"][-1]["seq"]
+
+    exec_session.complete_prompt()
+
+    manager.send_message(
+        owner_session_id="session-1",
+        subagent_id=subagent_id,
+        message="Inspect the Docker environment next",
+    )
+    second_poll = manager.poll_subagent(
+        owner_session_id="session-1",
+        subagent_id=subagent_id,
+        since_seq=last_seq,
+    )
+    assert second_poll["events"]
+    assert all(event["seq"] > last_seq for event in second_poll["events"])
+
+
+def test_background_subagent_inbound_permission_request_gets_response(manager, monkeypatch):
+    exec_session = FakeExecSession()
+    environment = FakeEnvironment(exec_session)
+    monkeypatch.setattr(manager, "_create_environment", lambda **kwargs: environment)
+
+    manager.spawn_subagent(
+        owner_session_id="session-1",
+        purpose="Permission checks",
+        initial_task="Start work",
+        cwd="/workspace",
+    )
+
+    exec_session.emit_raw_stdout(
+        json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 99,
+                "method": "session/request_permission",
+                "params": {"tool": "terminal"},
+            }
+        )
+    )
+
+    assert exec_session.client_responses
+    response = exec_session.client_responses[-1]
+    assert response["id"] == 99
+    assert response["result"]["outcome"]["outcome"] == "allow_once"
+
+
+def test_background_subagent_unsupported_inbound_method_returns_jsonrpc_error(manager, monkeypatch):
+    exec_session = FakeExecSession()
+    environment = FakeEnvironment(exec_session)
+    monkeypatch.setattr(manager, "_create_environment", lambda **kwargs: environment)
+
+    manager.spawn_subagent(
+        owner_session_id="session-1",
+        purpose="Unsupported inbound",
+        initial_task="Start work",
+        cwd="/workspace",
+    )
+
+    exec_session.emit_raw_stdout(
+        json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 101,
+                "method": "session/run_tool",
+                "params": {"tool": "terminal"},
+            }
+        )
+    )
+
+    response = exec_session.client_responses[-1]
+    assert response["id"] == 101
+    assert response["error"]["code"] == -32601

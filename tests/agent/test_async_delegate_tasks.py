@@ -207,3 +207,132 @@ def test_async_delegate_max_duration_interrupts_and_nudges(manager, monkeypatch)
     assert "maximum runtime" in context
 
     run_gate.set()
+
+
+def test_async_delegate_limits_enforced(manager, monkeypatch):
+    monkeypatch.setattr("tools.delegate_tool._load_config", lambda: {"max_iterations": 50})
+    monkeypatch.setattr(
+        "tools.delegate_tool._resolve_delegation_profile",
+        lambda cfg, profile: {"name": profile or "", "toolsets": ["terminal"], "memory": "none", "provider_tools": False, "terminal": {"backend": "docker"}},
+    )
+
+    run_gate = threading.Event()
+
+    def _make_child():
+        child = FakeChild()
+        child._delegate_terminal_overrides = {"env_type": "docker"}
+        return child
+
+    monkeypatch.setattr("tools.delegate_tool._build_child_agent", lambda **kwargs: _make_child())
+    monkeypatch.setattr(
+        "tools.delegate_tool._run_single_child",
+        lambda **kwargs: (run_gate.wait(timeout=2), {"task_index": 0, "status": "completed", "summary": "done", "api_calls": 1, "duration_seconds": 1.0})[1],
+    )
+
+    parent = SimpleNamespace(session_id="session-1", _delegate_depth=0, _current_workspace="/tmp")
+    first = manager.spawn(
+        owner_session_id="session-1",
+        parent_agent=parent,
+        goal="One",
+        toolsets=["terminal"],
+        profile=None,
+        creds={},
+    )
+    second = manager.spawn(
+        owner_session_id="session-1",
+        parent_agent=parent,
+        goal="Two",
+        toolsets=["terminal"],
+        profile=None,
+        creds={},
+    )
+    assert first["success"] is True
+    assert second["success"] is True
+
+    limited = manager.spawn(
+        owner_session_id="session-1",
+        parent_agent=parent,
+        goal="Three",
+        toolsets=["terminal"],
+        profile=None,
+        creds={},
+    )
+    assert limited["success"] is False
+    assert "limit reached" in limited["error"].lower()
+    assert len(limited["active_delegates"]) == 2
+    run_gate.set()
+
+
+def test_async_delegate_failure_sets_error_and_nudges(manager, monkeypatch, tmp_path):
+    child = FakeChild()
+
+    monkeypatch.setattr("tools.delegate_tool._load_config", lambda: {"max_iterations": 50})
+    monkeypatch.setattr(
+        "tools.delegate_tool._resolve_delegation_profile",
+        lambda cfg, profile: {"name": profile or "", "toolsets": ["terminal"], "memory": "none", "provider_tools": False, "terminal": {"backend": "docker"}},
+    )
+    monkeypatch.setattr("tools.delegate_tool._build_child_agent", lambda **kwargs: child)
+    monkeypatch.setattr(
+        "tools.delegate_tool._run_single_child",
+        lambda **kwargs: {"task_index": 0, "status": "error", "error": "boom", "api_calls": 1, "duration_seconds": 1.0},
+    )
+
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    parent = SimpleNamespace(session_id="session-1", _delegate_depth=0, _current_workspace=str(workspace_root))
+
+    spawned = manager.spawn(
+        owner_session_id="session-1",
+        parent_agent=parent,
+        goal="Failing task",
+        context="",
+        toolsets=["terminal"],
+        profile=None,
+        creds={},
+    )
+
+    deadline = time.time() + 2
+    record = manager._records[spawned["id"]]
+    while time.time() < deadline and record.is_alive():
+        time.sleep(0.05)
+    if record.thread:
+        record.thread.join(timeout=0.5)
+
+    assert record.status == "error"
+    contents = Path(spawned["output_file"]).read_text(encoding="utf-8")
+    assert "Error: boom" in contents
+    context = manager.render_turn_context("session-1")
+    assert "failed: boom" in context
+
+
+def test_async_delegate_non_docker_preserves_terminal_overrides(manager, monkeypatch):
+    child = FakeChild()
+    child._delegate_terminal_overrides = {"env_type": "local", "cwd": "/tmp/existing"}
+    run_gate = threading.Event()
+
+    monkeypatch.setattr("tools.delegate_tool._load_config", lambda: {"max_iterations": 50})
+    monkeypatch.setattr(
+        "tools.delegate_tool._resolve_delegation_profile",
+        lambda cfg, profile: {"name": profile or "", "toolsets": ["terminal"], "memory": "none", "provider_tools": False, "terminal": {"backend": "local"}},
+    )
+    monkeypatch.setattr("tools.delegate_tool._build_child_agent", lambda **kwargs: child)
+    monkeypatch.setattr(
+        "tools.delegate_tool._run_single_child",
+        lambda **kwargs: (run_gate.wait(timeout=2), {"task_index": 0, "status": "completed", "summary": "done", "api_calls": 1, "duration_seconds": 1.0})[1],
+    )
+
+    parent = SimpleNamespace(session_id="session-1", _delegate_depth=0, _current_workspace="/tmp")
+    spawned = manager.spawn(
+        owner_session_id="session-1",
+        parent_agent=parent,
+        goal="Local task",
+        toolsets=["terminal"],
+        profile=None,
+        creds={},
+    )
+
+    assert spawned["success"] is True
+    assert child._delegate_terminal_overrides["env_type"] == "local"
+    assert child._delegate_terminal_overrides["cwd"] == "/tmp/existing"
+    assert "docker_mount_cwd_to_workspace" not in child._delegate_terminal_overrides
+    run_gate.set()
