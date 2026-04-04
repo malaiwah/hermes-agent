@@ -1,12 +1,11 @@
 FROM debian:13.4
 
 # ── System dependencies ──────────────────────────────────────────────────────
-# Added gnupg for GPG email signing support
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         build-essential nodejs npm python3 python3-pip ripgrep ffmpeg gcc \
-        python3-dev libffi-dev podman-remote gnupg && \
+        python3-dev libffi-dev podman-remote && \
     rm -rf /var/lib/apt/lists/*
 
 # ── Application source (includes oikos patches) ─────────────────────────────
