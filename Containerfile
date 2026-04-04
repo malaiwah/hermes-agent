@@ -2,10 +2,10 @@ FROM debian:13.4
 
 # ── System dependencies ──────────────────────────────────────────────────────
 
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-        build-essential nodejs npm python3 python3-pip ripgrep ffmpeg gcc \
-        python3-dev libffi-dev podman-remote && \
+RUN apt-get update && \\\
+    apt-get install -y --no-install-recommends \\\
+        build-essential nodejs npm python3 python3-pip ripgrep ffmpeg gcc \\\
+        python3-dev libffi-dev podman-remote gnupg && \\\
     rm -rf /var/lib/apt/lists/*
 
 # ── Application source (includes oikos patches) ─────────────────────────────
