@@ -38,6 +38,7 @@ MAX_CONCURRENT_CHILDREN = 3
 MAX_DEPTH = 2  # parent (0) -> child (1) -> grandchild rejected (2)
 DEFAULT_MAX_ITERATIONS = 50
 DEFAULT_TOOLSETS = ["terminal", "file", "web"]
+DEFAULT_WORKSPACE_VISIBILITY = "inherit"
 
 
 def check_delegate_requirements() -> bool:
@@ -45,7 +46,11 @@ def check_delegate_requirements() -> bool:
     return True
 
 
-def _build_child_system_prompt(goal: str, context: Optional[str] = None) -> str:
+def _build_child_system_prompt(
+    goal: str,
+    context: Optional[str] = None,
+    workspace_note: Optional[str] = None,
+) -> str:
     """Build a focused system prompt for a child agent."""
     parts = [
         "You are a focused subagent working on a specific delegated task.",
@@ -54,6 +59,8 @@ def _build_child_system_prompt(goal: str, context: Optional[str] = None) -> str:
     ]
     if context and context.strip():
         parts.append(f"\nCONTEXT:\n{context}")
+    if workspace_note and workspace_note.strip():
+        parts.append(f"\n{workspace_note.strip()}")
     parts.append(
         "\nComplete this task using the tools available to you. "
         "When finished, provide a clear, concise summary of:\n"
@@ -65,6 +72,42 @@ def _build_child_system_prompt(goal: str, context: Optional[str] = None) -> str:
         "parent agent as a summary."
     )
     return "\n".join(parts)
+
+
+def _configure_child_workspace(child, task_index: int, task_cfg: Dict[str, Any], delegation_cfg: Dict[str, Any]):
+    """Resolve workspace visibility for a delegated child and attach task overrides."""
+    from tools.subagent_workspace import (
+        build_workspace_overrides,
+        resolve_parent_workspace_root,
+        resolve_terminal_backend,
+    )
+
+    visibility = task_cfg.get("workspace_visibility")
+    mappings = task_cfg.get("workspace_mappings")
+    if mappings is None:
+        mappings = delegation_cfg.get("workspace_mappings")
+    if visibility is None:
+        visibility = delegation_cfg.get("workspace_visibility", DEFAULT_WORKSPACE_VISIBILITY)
+    if (visibility in (None, "", "inherit")) and mappings:
+        visibility = "mapped"
+
+    plan = build_workspace_overrides(
+        visibility=visibility,
+        mappings=mappings,
+        workspace_root=resolve_parent_workspace_root(),
+        child_token=f"subagent-{task_index}-{getattr(child, 'session_id', '') or task_index}",
+        backend=resolve_terminal_backend(),
+    )
+
+    child._delegate_task_id = getattr(child, "session_id", None)
+    child._delegate_task_env_overrides = plan.get("task_env_overrides")
+    prompt_note = plan.get("prompt_note", "").strip()
+    if prompt_note:
+        child.ephemeral_system_prompt = _build_child_system_prompt(
+            task_cfg["goal"],
+            task_cfg.get("context"),
+            prompt_note,
+        )
 
 
 def _strip_blocked_tools(toolsets: List[str]) -> List[str]:
@@ -271,7 +314,14 @@ def _run_single_child(
                                 list(model_tools._last_resolved_tool_names))
 
     try:
-        result = child.run_conversation(user_message=goal)
+        child_task_id = getattr(child, "_delegate_task_id", None) or getattr(child, "session_id", None)
+        child_env_overrides = getattr(child, "_delegate_task_env_overrides", None)
+        if child_task_id and child_env_overrides:
+            from tools.terminal_tool import register_task_env_overrides
+
+            register_task_env_overrides(child_task_id, child_env_overrides)
+
+        result = child.run_conversation(user_message=goal, task_id=child_task_id)
 
         # Flush any remaining batched progress to gateway
         if child_progress_cb and hasattr(child_progress_cb, '_flush'):
@@ -380,6 +430,16 @@ def _run_single_child(
         }
 
     finally:
+        child_task_id = getattr(child, "_delegate_task_id", None) or getattr(child, "session_id", None)
+        child_env_overrides = getattr(child, "_delegate_task_env_overrides", None)
+        if child_task_id and child_env_overrides:
+            try:
+                from tools.terminal_tool import clear_task_env_overrides
+
+                clear_task_env_overrides(child_task_id)
+            except Exception:
+                logger.debug("Failed to clear delegated task env overrides", exc_info=True)
+
         # Restore the parent's tool names so the process-global is correct
         # for any subsequent execute_code calls or other consumers.
         import model_tools
@@ -404,6 +464,8 @@ def delegate_task(
     goal: Optional[str] = None,
     context: Optional[str] = None,
     toolsets: Optional[List[str]] = None,
+    workspace_visibility: Optional[str] = None,
+    workspace_mappings: Optional[List[Dict[str, Any]]] = None,
     tasks: Optional[List[Dict[str, Any]]] = None,
     max_iterations: Optional[int] = None,
     parent_agent=None,
@@ -449,7 +511,13 @@ def delegate_task(
     if tasks and isinstance(tasks, list):
         task_list = tasks[:MAX_CONCURRENT_CHILDREN]
     elif goal and isinstance(goal, str) and goal.strip():
-        task_list = [{"goal": goal, "context": context, "toolsets": toolsets}]
+        task_list = [{
+            "goal": goal,
+            "context": context,
+            "toolsets": toolsets,
+            "workspace_visibility": workspace_visibility,
+            "workspace_mappings": workspace_mappings,
+        }]
     else:
         return json.dumps({"error": "Provide either 'goal' (single task) or 'tasks' (batch)."})
 
@@ -488,9 +556,16 @@ def delegate_task(
                 override_api_key=creds["api_key"],
                 override_api_mode=creds["api_mode"],
             )
+            if "workspace_visibility" not in t and workspace_visibility is not None:
+                t["workspace_visibility"] = workspace_visibility
+            if "workspace_mappings" not in t and workspace_mappings is not None:
+                t["workspace_mappings"] = workspace_mappings
+            _configure_child_workspace(child, i, t, cfg)
             # Override with correct parent tool names (before child construction mutated global)
             child._delegate_saved_tool_names = _parent_tool_names
             children.append((i, t, child))
+    except ValueError as exc:
+        return json.dumps({"error": str(exc)})
     finally:
         # Authoritative restore: reset global to parent's tool names after all children built
         _model_tools._last_resolved_tool_names = _parent_tool_names
@@ -721,6 +796,8 @@ DELEGATE_TASK_SCHEMA = {
         "- Subagents CANNOT call: delegate_task, clarify, memory, send_message, "
         "execute_code.\n"
         "- Each subagent gets its own terminal session (separate working directory and state).\n"
+        "- workspace_visibility defaults to 'inherit'. Use 'full_ro', 'temp_rw', "
+        "or 'mapped' when you need stricter filesystem isolation in Docker sandboxes.\n"
         "- Results are always returned as an array, one entry per task."
     ),
     "parameters": {
@@ -753,6 +830,45 @@ DELEGATE_TASK_SCHEMA = {
                     "full-stack tasks."
                 ),
             },
+            "workspace_visibility": {
+                "type": "string",
+                "enum": ["inherit", "full_rw", "full_ro", "temp_rw", "mapped"],
+                "description": (
+                    "Filesystem visibility for the child sandbox. "
+                    "'inherit' keeps the current backend behavior. "
+                    "'full_rw' mounts the full parent workspace at /workspace read-write. "
+                    "'full_ro' mounts it read-only. "
+                    "'temp_rw' creates a fresh writable subdirectory inside the parent workspace "
+                    "and mounts only that at /workspace. "
+                    "'mapped' exposes only the paths listed in workspace_mappings."
+                ),
+            },
+            "workspace_mappings": {
+                "type": "array",
+                "description": (
+                    "Used only with workspace_visibility='mapped'. "
+                    "Each mapping source must stay inside the parent workspace. "
+                    "target defaults under /workspace and read_only defaults to false."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "source": {
+                            "type": "string",
+                            "description": "Workspace-relative or absolute path inside the parent workspace.",
+                        },
+                        "target": {
+                            "type": "string",
+                            "description": "Path inside the child sandbox under /workspace.",
+                        },
+                        "read_only": {
+                            "type": "boolean",
+                            "description": "Mount this mapping read-only.",
+                        },
+                    },
+                    "required": ["source"],
+                },
+            },
             "tasks": {
                 "type": "array",
                 "items": {
@@ -765,6 +881,24 @@ DELEGATE_TASK_SCHEMA = {
                             "items": {"type": "string"},
                             "description": "Toolsets for this specific task",
                         },
+                        "workspace_visibility": {
+                            "type": "string",
+                            "enum": ["inherit", "full_rw", "full_ro", "temp_rw", "mapped"],
+                            "description": "Workspace visibility for this task's sandbox.",
+                        },
+                        "workspace_mappings": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "source": {"type": "string"},
+                                    "target": {"type": "string"},
+                                    "read_only": {"type": "boolean"},
+                                },
+                                "required": ["source"],
+                            },
+                            "description": "Workspace mappings for this task when workspace_visibility='mapped'.",
+                        },
                     },
                     "required": ["goal"],
                 },
@@ -772,7 +906,8 @@ DELEGATE_TASK_SCHEMA = {
                 "description": (
                     "Batch mode: up to 3 tasks to run in parallel. Each gets "
                     "its own subagent with isolated context and terminal session. "
-                    "When provided, top-level goal/context/toolsets are ignored."
+                    "When provided, top-level goal/context are ignored. "
+                    "Top-level toolsets and workspace visibility settings act as defaults."
                 ),
             },
             "max_iterations": {
@@ -799,6 +934,8 @@ registry.register(
         goal=args.get("goal"),
         context=args.get("context"),
         toolsets=args.get("toolsets"),
+        workspace_visibility=args.get("workspace_visibility"),
+        workspace_mappings=args.get("workspace_mappings"),
         tasks=args.get("tasks"),
         max_iterations=args.get("max_iterations"),
         parent_agent=kw.get("parent_agent")),

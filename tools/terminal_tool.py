@@ -433,6 +433,11 @@ def register_task_env_overrides(task_id: str, overrides: Dict[str, Any]):
         - modal_image: str -- Path to Dockerfile or Docker Hub image name
         - docker_image: str -- Docker image name
         - cwd: str -- Working directory inside the sandbox
+        - host_cwd: str -- Host workspace root for Docker bind mounting
+        - docker_mount_cwd_to_workspace: bool -- Mount host_cwd at /workspace
+        - docker_volumes: list[str] -- Explicit Docker bind mounts for this task
+        - docker_forward_env: list[str] -- Additional env vars to forward
+        - docker_network: str -- Docker network override
 
     Args:
         task_id: The rollout's unique task identifier
@@ -1021,8 +1026,19 @@ def terminal_tool(
                                 "container_disk": config.get("container_disk", 51200),
                                 "container_persistent": config.get("container_persistent", True),
                                 "modal_mode": config.get("modal_mode", "auto"),
-                                "docker_volumes": config.get("docker_volumes", []),
-                                "docker_mount_cwd_to_workspace": config.get("docker_mount_cwd_to_workspace", False),
+                                "docker_volumes": overrides.get("docker_volumes", config.get("docker_volumes", [])),
+                                "docker_mount_cwd_to_workspace": overrides.get(
+                                    "docker_mount_cwd_to_workspace",
+                                    config.get("docker_mount_cwd_to_workspace", False),
+                                ),
+                                "docker_forward_env": overrides.get(
+                                    "docker_forward_env",
+                                    config.get("docker_forward_env", []),
+                                ),
+                                "docker_network": overrides.get(
+                                    "docker_network",
+                                    config.get("docker_network", None),
+                                ),
                             }
 
                         local_config = None
@@ -1040,7 +1056,7 @@ def terminal_tool(
                             container_config=container_config,
                             local_config=local_config,
                             task_id=effective_task_id,
-                            host_cwd=config.get("host_cwd"),
+                            host_cwd=overrides.get("host_cwd", config.get("host_cwd")),
                         )
                     except ImportError as e:
                         return json.dumps({

@@ -237,6 +237,8 @@ def load_cli_config() -> Dict[str, Any]:
             "provider": "",    # Subagent provider override (empty = inherit parent provider)
             "base_url": "",    # Direct OpenAI-compatible endpoint for subagents
             "api_key": "",     # API key for delegation.base_url (falls back to OPENAI_API_KEY)
+            "workspace_visibility": "inherit",
+            "workspace_mappings": [],
         },
     }
     

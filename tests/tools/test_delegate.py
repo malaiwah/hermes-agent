@@ -61,6 +61,8 @@ class TestDelegateRequirements(unittest.TestCase):
         self.assertIn("tasks", props)
         self.assertIn("context", props)
         self.assertIn("toolsets", props)
+        self.assertIn("workspace_visibility", props)
+        self.assertIn("workspace_mappings", props)
         self.assertIn("max_iterations", props)
         self.assertEqual(props["tasks"]["maxItems"], 3)
 
@@ -249,6 +251,48 @@ class TestDelegateTask(unittest.TestCase):
             self.assertEqual(kwargs["provider"], parent.provider)
             self.assertEqual(kwargs["api_mode"], parent.api_mode)
 
+    def test_workspace_visibility_registers_child_task_overrides(self):
+        parent = _make_mock_parent(depth=0)
+
+        with patch.dict(os.environ, {
+            "TERMINAL_ENV": "docker",
+            "TERMINAL_CWD": "/tmp/delegate-workspace",
+        }, clear=False), \
+            patch("run_agent.AIAgent") as MockAgent, \
+            patch("tools.terminal_tool.register_task_env_overrides") as mock_register, \
+            patch("tools.terminal_tool.clear_task_env_overrides") as mock_clear, \
+            patch("pathlib.Path.exists", return_value=True), \
+            patch("pathlib.Path.is_dir", return_value=True):
+            mock_child = MagicMock()
+            mock_child.session_id = "child-session"
+            mock_child.run_conversation.return_value = {
+                "final_response": "done",
+                "completed": True,
+                "api_calls": 1,
+                "messages": [],
+            }
+            MockAgent.return_value = mock_child
+
+            result = json.loads(
+                delegate_task(
+                    goal="Inspect the repo",
+                    workspace_visibility="full_ro",
+                    parent_agent=parent,
+                )
+            )
+
+            assert result["results"][0]["status"] == "completed"
+            mock_child.run_conversation.assert_called_once_with(
+                user_message="Inspect the repo",
+                task_id="child-session",
+            )
+            mock_register.assert_called_once()
+            registered_task_id, registered_overrides = mock_register.call_args.args
+            assert registered_task_id == "child-session"
+            assert registered_overrides["cwd"] == "/workspace"
+            assert registered_overrides["docker_volumes"] == ["/private/tmp/delegate-workspace:/workspace:ro"]
+            mock_clear.assert_called_once_with("child-session")
+
 
 class TestToolNamePreservation(unittest.TestCase):
     """Verify _last_resolved_tool_names is restored after subagent runs."""
@@ -333,7 +377,7 @@ class TestToolNamePreservation(unittest.TestCase):
         with patch("run_agent.AIAgent") as MockAgent:
             mock_child = MagicMock()
 
-            def capture_and_return(user_message):
+            def capture_and_return(user_message, task_id=None):
                 captured["saved"] = list(mock_child._delegate_saved_tool_names)
                 return {"final_response": "ok", "completed": True, "api_calls": 1}
 
