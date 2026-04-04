@@ -439,6 +439,11 @@ def fetch_endpoint_model_metadata(
     if alternate and alternate not in candidates:
         candidates.append(alternate)
 
+    # Fall back to LITELLM_KEY env var (used when called from cost-estimation
+    # paths that don't have the configured api_key in scope)
+    if not api_key:
+        import os as _os
+        api_key = _os.environ.get("LITELLM_KEY", "")
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     last_error: Optional[Exception] = None
 
