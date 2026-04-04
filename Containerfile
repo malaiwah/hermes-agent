@@ -1,6 +1,7 @@
 FROM debian:13.4
 
 # ── System dependencies ──────────────────────────────────────────────────────
+# Added gnupg for GPG email signing support (run #46 retry)
 
 RUN apt-get update && \\\
     apt-get install -y --no-install-recommends \\\
