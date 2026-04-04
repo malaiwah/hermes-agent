@@ -178,6 +178,26 @@ def test_auto_mount_skipped_when_workspace_already_mounted(monkeypatch, tmp_path
     assert run_args_str.count(":/workspace") == 1
 
 
+def test_explicit_read_only_workspace_mount_is_preserved(monkeypatch, tmp_path):
+    """An explicit read-only /workspace bind should be passed through unchanged."""
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    calls = _mock_subprocess_run(monkeypatch)
+
+    _make_dummy_env(
+        cwd="/workspace",
+        volumes=[f"{project_dir}:/workspace:ro"],
+    )
+
+    run_calls = [c for c in calls if isinstance(c[0], list) and len(c[0]) >= 2 and c[0][1] == "run"]
+    assert run_calls, "docker run should have been called"
+    run_args_str = " ".join(run_calls[0][0])
+    assert f"{project_dir}:/workspace:ro" in run_args_str
+    assert run_args_str.count(":/workspace") == 1
+
+
 def test_auto_mount_replaces_persistent_workspace_bind(monkeypatch, tmp_path):
     """Persistent mode should still prefer the configured host cwd at /workspace."""
     project_dir = tmp_path / "my-project"

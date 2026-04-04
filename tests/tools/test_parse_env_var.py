@@ -1,6 +1,7 @@
 """Tests for _parse_env_var and _get_env_config env-var validation."""
 
 import json
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -51,6 +52,62 @@ class TestParseEnvVar:
 
         assert result is fake_env
         assert mock_docker.call_args.kwargs["forward_env"] == ["GITHUB_TOKEN"]
+
+    def test_terminal_tool_applies_task_specific_docker_workspace_overrides(self, monkeypatch, tmp_path):
+        captured = {}
+        fake_env = SimpleNamespace(execute=lambda command, **kwargs: {"output": "ok", "returncode": 0})
+
+        monkeypatch.setattr(_tt_mod, "_active_environments", {})
+        monkeypatch.setattr(_tt_mod, "_last_activity", {})
+        monkeypatch.setattr(_tt_mod, "_start_cleanup_thread", lambda: None)
+        monkeypatch.setattr(
+            _tt_mod,
+            "_get_env_config",
+            lambda: {
+                "env_type": "docker",
+                "docker_image": "python:3.11",
+                "docker_volumes": [],
+                "docker_mount_cwd_to_workspace": False,
+                "docker_forward_env": [],
+                "docker_network": None,
+                "cwd": "/root",
+                "host_cwd": None,
+                "timeout": 180,
+                "container_cpu": 1,
+                "container_memory": 5120,
+                "container_disk": 51200,
+                "container_persistent": True,
+                "modal_mode": "auto",
+            },
+        )
+
+        def _fake_create_environment(**kwargs):
+            captured.update(kwargs)
+            return fake_env
+
+        monkeypatch.setattr(_tt_mod, "_create_environment", _fake_create_environment)
+
+        _tt_mod.register_task_env_overrides(
+            "workspace-override-test",
+            {
+                "cwd": "/workspace",
+                "host_cwd": str(tmp_path),
+                "docker_mount_cwd_to_workspace": False,
+                "docker_volumes": [f"{tmp_path}:/workspace:ro"],
+            },
+        )
+
+        try:
+            result = json.loads(
+                _tt_mod.terminal_tool("echo ok", task_id="workspace-override-test", force=True)
+            )
+        finally:
+            _tt_mod.clear_task_env_overrides("workspace-override-test")
+
+        assert result["exit_code"] == 0
+        assert captured["cwd"] == "/workspace"
+        assert captured["host_cwd"] == str(tmp_path)
+        assert captured["container_config"]["docker_volumes"] == [f"{tmp_path}:/workspace:ro"]
 
     def test_falls_back_to_default(self):
         with patch.dict("os.environ", {}, clear=False):
