@@ -362,6 +362,7 @@ def load_cli_config() -> Dict[str, Any]:
         "container_disk": "TERMINAL_CONTAINER_DISK",
         "container_persistent": "TERMINAL_CONTAINER_PERSISTENT",
         "docker_volumes": "TERMINAL_DOCKER_VOLUMES",
+        "docker_network": "TERMINAL_DOCKER_NETWORK",
         "docker_mount_cwd_to_workspace": "TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE",
         "sandbox_dir": "TERMINAL_SANDBOX_DIR",
         # Persistent shell (non-local backends)

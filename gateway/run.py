@@ -126,6 +126,7 @@ if _config_path.exists():
                 "container_disk": "TERMINAL_CONTAINER_DISK",
                 "container_persistent": "TERMINAL_CONTAINER_PERSISTENT",
                 "docker_volumes": "TERMINAL_DOCKER_VOLUMES",
+                "docker_network": "TERMINAL_DOCKER_NETWORK",
                 "sandbox_dir": "TERMINAL_SANDBOX_DIR",
                 "persistent_shell": "TERMINAL_PERSISTENT_SHELL",
             }
