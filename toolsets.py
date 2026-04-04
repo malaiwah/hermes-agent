@@ -52,6 +52,8 @@ _HERMES_CORE_TOOLS = [
     "session_search",
     # Clarifying questions
     "clarify",
+    # Natural-language progress updates to the current user
+    "send_user_message",
     # Code execution + delegation
     "execute_code", "delegate_task",
     # Cronjob management
@@ -179,6 +181,12 @@ TOOLSETS = {
         "tools": ["clarify"],
         "includes": []
     },
+
+    "user_updates": {
+        "description": "Send short natural-language progress updates to the current user without ending the turn",
+        "tools": ["send_user_message"],
+        "includes": []
+    },
     
     "code_execution": {
         "description": "Run Python scripts that call tools programmatically (reduces LLM round trips)",
@@ -237,13 +245,14 @@ TOOLSETS = {
             "browser_vision", "browser_console",
             "todo", "memory",
             "session_search",
+            "send_user_message",
             "execute_code", "delegate_task",
         ],
         "includes": []
     },
 
     "hermes-api-server": {
-        "description": "OpenAI-compatible API server — full agent tools accessible via HTTP (no interactive UI tools like clarify or send_message)",
+        "description": "OpenAI-compatible API server — full agent tools accessible via HTTP (no interactive UI tools like clarify, send_user_message, or send_message)",
         "tools": [
             # Web
             "web_search", "web_extract",

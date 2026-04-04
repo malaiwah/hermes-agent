@@ -55,6 +55,10 @@ class TestHermesApiServerToolset:
         tools = resolve_toolset("hermes-api-server")
         assert "send_message" not in tools
 
+    def test_toolset_excludes_send_user_message(self):
+        tools = resolve_toolset("hermes-api-server")
+        assert "send_user_message" not in tools
+
     def test_toolset_excludes_text_to_speech(self):
         tools = resolve_toolset("hermes-api-server")
         assert "text_to_speech" not in tools

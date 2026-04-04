@@ -2371,6 +2371,7 @@ class HermesCLI:
                 checkpoints_enabled=self.checkpoints_enabled,
                 checkpoint_max_snapshots=self.checkpoint_max_snapshots,
                 pass_session_id=self.pass_session_id,
+                message_callback=self._on_agent_message,
                 tool_progress_callback=self._on_tool_progress,
                 tool_start_callback=self._on_tool_start if self._inline_diffs_enabled else None,
                 tool_complete_callback=self._on_tool_complete if self._inline_diffs_enabled else None,
@@ -5566,6 +5567,16 @@ class HermesCLI:
         from agent.display import get_tool_emoji
         emoji = get_tool_emoji(tool_name, default="⚡")
         _cprint(f"  ┊ {emoji} preparing {tool_name}…")
+
+    def _on_agent_message(self, text: str) -> None:
+        """Render an in-session user-facing update from the agent."""
+        if not text:
+            return
+        if getattr(self, "_stream_box_opened", False):
+            self._flush_stream()
+            self._stream_box_opened = False
+        self._close_reasoning_box()
+        _cprint(f"  ┊ 💬 {text}")
 
     # ====================================================================
     # Tool progress callback (audio cues for voice mode)

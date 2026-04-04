@@ -6554,6 +6554,21 @@ class GatewayRunner:
             except Exception as _e:
                 logger.debug("status_callback error (%s): %s", event_type, _e)
 
+        def _message_callback_sync(message: str) -> None:
+            if not _status_adapter or not message:
+                return
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    _status_adapter.send(
+                        _status_chat_id,
+                        message,
+                        metadata=_status_thread_metadata,
+                    ),
+                    _loop_for_step,
+                )
+            except Exception as _e:
+                logger.debug("message_callback error: %s", _e)
+
         def run_sync():
             # The conditional re-assignment of `message` further below
             # (prepending model-switch notes) makes Python treat it as a
@@ -6687,6 +6702,7 @@ class GatewayRunner:
             agent.tool_progress_callback = progress_callback if tool_progress_enabled else None
             agent.step_callback = _step_callback_sync if _hooks_ref.loaded_hooks else None
             agent.stream_delta_callback = _stream_delta_cb
+            agent.message_callback = _message_callback_sync
             agent.status_callback = _status_callback_sync
             agent.reasoning_config = reasoning_config
 
