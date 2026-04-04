@@ -1489,6 +1489,24 @@ class TestRunConversation:
         assert messages[0]["role"] == "system"
         assert "BG roster" in messages[0]["content"]
 
+    def test_background_context_combines_acp_and_async_delegate_sections(self, agent):
+        class _Mgr:
+            def __init__(self, text):
+                self.text = text
+
+            def render_turn_context(self, session_id):
+                return self.text
+
+        agent.session_id = "session-123"
+        with (
+            patch("agent.background_subagents.get_background_subagent_manager", return_value=_Mgr("ACP roster")),
+            patch("agent.async_delegate_tasks.get_async_delegate_manager", return_value=_Mgr("Async delegate roster")),
+        ):
+            text = agent._build_background_subagent_context()
+
+        assert "ACP roster" in text
+        assert "Async delegate roster" in text
+
     def test_tool_calls_then_stop(self, agent):
         self._setup_agent(agent)
         tc = _mock_tool_call(name="web_search", arguments="{}", call_id="c1")

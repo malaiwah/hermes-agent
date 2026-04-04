@@ -331,6 +331,24 @@ class TestRootLevelProviderOverride:
         assert "provider" not in result  # root key still cleaned up
 
 
+class TestDelegationDefaults:
+    def test_load_cli_config_keeps_async_and_background_subagent_defaults(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        import cli
+
+        monkeypatch.setattr(cli, "_hermes_home", hermes_home)
+        cfg = cli.load_cli_config()
+
+        delegation = cfg["delegation"]
+        assert delegation["max_iterations"] == 45
+        assert delegation["default_toolsets"] == ["terminal", "file", "web"]
+        assert delegation["async_subagents"]["enabled"] is True
+        assert delegation["background_subagents"]["default_agent_kind"] == "opencode"
+
+
 class TestProviderResolution:
     def test_api_key_is_string_or_none(self):
         cli = _make_cli()

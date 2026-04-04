@@ -45,6 +45,7 @@ def _make_mock_parent(depth=0):
     parent.providers_order = None
     parent.provider_sort = None
     parent._session_db = None
+    parent.session_id = "parent-session"
     parent._delegate_depth = depth
     parent._active_children = []
     parent._active_children_lock = threading.Lock()
@@ -64,6 +65,7 @@ class TestDelegateRequirements(unittest.TestCase):
         self.assertIn("toolsets", props)
         self.assertIn("profile", props)
         self.assertIn("max_iterations", props)
+        self.assertIn("async", props)
         self.assertEqual(props["tasks"]["maxItems"], 3)
 
 
@@ -132,6 +134,48 @@ class TestDelegateTask(unittest.TestCase):
         parent = _make_mock_parent()
         result = json.loads(delegate_task(tasks=[{"context": "no goal here"}], parent_agent=parent))
         self.assertIn("error", result)
+
+    def test_async_mode_rejects_batch(self):
+        parent = _make_mock_parent()
+        result = json.loads(delegate_task(
+            tasks=[{"goal": "one"}],
+            async_mode=True,
+            parent_agent=parent,
+        ))
+        self.assertIn("error", result)
+        self.assertIn("single-task", result["error"])
+
+    @patch("agent.async_delegate_tasks.get_async_delegate_manager")
+    def test_async_mode_dispatches_to_background_manager(self, mock_get_manager):
+        manager = MagicMock()
+        manager.spawn.return_value = {
+            "success": True,
+            "mode": "async",
+            "id": "async-delegate-123",
+            "output_file": "/tmp/out.md",
+        }
+        mock_get_manager.return_value = manager
+        parent = _make_mock_parent()
+
+        result = json.loads(delegate_task(
+            goal="Investigate flaky tests",
+            context="Only report likely causes",
+            toolsets=["terminal", "file"],
+            profile="friendly",
+            async_mode=True,
+            parent_agent=parent,
+        ))
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["mode"], "async")
+        manager.spawn.assert_called_once()
+
+    def test_async_mode_requires_parent_session_id(self):
+        parent = _make_mock_parent()
+        parent.session_id = ""
+        result = json.loads(delegate_task(goal="Investigate", async_mode=True, parent_agent=parent))
+        self.assertIn("error", result)
+        self.assertIn("session_id", result["error"])
 
     @patch("tools.delegate_tool._run_single_child")
     def test_single_task_mode(self, mock_run):

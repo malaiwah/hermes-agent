@@ -448,6 +448,14 @@ DEFAULT_CONFIG = {
         "profiles": {},    # optional named child capability profiles (toolsets, memory, terminal)
         "max_iterations": 50,  # per-subagent iteration cap (each subagent gets its own budget,
                                # independent of the parent's max_iterations)
+        "async_subagents": {
+            "enabled": True,
+            "max_per_session": 2,
+            "max_global": 4,
+            "idle_timeout_seconds": 900,
+            "max_duration_seconds": 1800,
+            "output_dir": ".hermes-async-delegates",
+        },
         "background_subagents": {
             "enabled": True,
             "max_per_session": 3,

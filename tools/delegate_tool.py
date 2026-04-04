@@ -651,6 +651,7 @@ def delegate_task(
     context: Optional[str] = None,
     toolsets: Optional[List[str]] = None,
     profile: Optional[str] = None,
+    async_mode: bool = False,
     tasks: Optional[List[Dict[str, Any]]] = None,
     max_iterations: Optional[int] = None,
     parent_agent=None,
@@ -691,6 +692,31 @@ def delegate_task(
         creds = _resolve_delegation_credentials(cfg, parent_agent)
     except ValueError as exc:
         return json.dumps({"error": str(exc)})
+
+    if async_mode:
+        if tasks and isinstance(tasks, list):
+            return json.dumps({
+                "error": "delegate_task(async=true) currently supports single-task mode only.",
+            })
+        if not goal or not isinstance(goal, str) or not goal.strip():
+            return json.dumps({"error": "delegate_task(async=true) requires a non-empty goal."})
+        from agent.async_delegate_tasks import get_async_delegate_manager
+
+        owner_session_id = str(getattr(parent_agent, "session_id", "") or "").strip()
+        if not owner_session_id:
+            return json.dumps({"error": "delegate_task(async=true) requires a parent session_id."})
+
+        result = get_async_delegate_manager().spawn(
+            owner_session_id=owner_session_id,
+            parent_agent=parent_agent,
+            goal=goal,
+            context=context or "",
+            toolsets=list(toolsets or []),
+            profile=profile,
+            max_iterations=effective_max_iter,
+            creds=creds,
+        )
+        return json.dumps(result, ensure_ascii=False)
 
     # Normalize to task list
     if tasks and isinstance(tasks, list):
@@ -958,7 +984,11 @@ DELEGATE_TASK_SCHEMA = {
         "TWO MODES (one of 'goal' or 'tasks' is required):\n"
         "1. Single task: provide 'goal' (+ optional context, toolsets)\n"
         "2. Batch (parallel): provide 'tasks' array with up to 3 items. "
-        "All run concurrently and results are returned together.\n\n"
+        "All run concurrently and results are returned together.\n"
+        "3. Async background: provide 'goal' with 'async'=true to launch a "
+        "single delegated subagent that keeps running after this tool call returns. "
+        "Its progress/summary are written to a workspace temp file and its status "
+        "appears in later turn context.\n\n"
         "WHEN TO USE delegate_task:\n"
         "- Reasoning-heavy subtasks (debugging, code review, research synthesis)\n"
         "- Tasks that would flood your context with intermediate data\n"
@@ -1048,6 +1078,14 @@ DELEGATE_TASK_SCHEMA = {
                     "Only set lower for simple tasks."
                 ),
             },
+            "async": {
+                "type": "boolean",
+                "description": (
+                    "When true, launch a single delegated subagent in the background "
+                    "and return immediately with its tracking info and workspace output file. "
+                    "Async mode currently supports only the single-task goal/context form."
+                ),
+            },
         },
         "required": [],
     },
@@ -1066,6 +1104,7 @@ registry.register(
         context=args.get("context"),
         toolsets=args.get("toolsets"),
         profile=args.get("profile"),
+        async_mode=bool(args.get("async", False)),
         tasks=args.get("tasks"),
         max_iterations=args.get("max_iterations"),
         parent_agent=kw.get("parent_agent")),

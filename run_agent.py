@@ -5688,8 +5688,16 @@ class AIAgent:
             return ""
         try:
             from agent.background_subagents import get_background_subagent_manager
+            from agent.async_delegate_tasks import get_async_delegate_manager
 
-            return get_background_subagent_manager().render_turn_context(owner_session_id)
+            parts = []
+            subagent_context = get_background_subagent_manager().render_turn_context(owner_session_id)
+            if subagent_context:
+                parts.append(subagent_context)
+            async_delegate_context = get_async_delegate_manager().render_turn_context(owner_session_id)
+            if async_delegate_context:
+                parts.append(async_delegate_context)
+            return "\n\n".join(parts)
         except Exception:
             logger.debug("Failed to render background subagent context", exc_info=True)
             return ""
@@ -5737,6 +5745,7 @@ class AIAgent:
                 context=function_args.get("context"),
                 toolsets=function_args.get("toolsets"),
                 profile=function_args.get("profile"),
+                async_mode=bool(function_args.get("async", False)),
                 tasks=function_args.get("tasks"),
                 max_iterations=function_args.get("max_iterations"),
                 parent_agent=self,
@@ -6103,6 +6112,7 @@ class AIAgent:
                         context=function_args.get("context"),
                         toolsets=function_args.get("toolsets"),
                         profile=function_args.get("profile"),
+                        async_mode=bool(function_args.get("async", False)),
                         tasks=tasks_arg,
                         max_iterations=function_args.get("max_iterations"),
                         parent_agent=self,
