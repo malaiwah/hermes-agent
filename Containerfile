@@ -1,12 +1,12 @@
 FROM debian:13.4
 
 # ── System dependencies ──────────────────────────────────────────────────────
-# Added gnupg for GPG email signing support (run #46 retry)
+# Added gnupg for GPG email signing support
 
-RUN apt-get update && \\\
-    apt-get install -y --no-install-recommends \\\
-        build-essential nodejs npm python3 python3-pip ripgrep ffmpeg gcc \\\
-        python3-dev libffi-dev podman-remote gnupg && \\\
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        build-essential nodejs npm python3 python3-pip ripgrep ffmpeg gcc \
+        python3-dev libffi-dev podman-remote gnupg && \
     rm -rf /var/lib/apt/lists/*
 
 # ── Application source (includes oikos patches) ─────────────────────────────
@@ -27,7 +27,7 @@ RUN chmod +x /opt/hermes/docker/entrypoint.sh \
 # ── Podman-remote shim ───────────────────────────────────────────────────────
 # Bridges DOCKER_HOST env var to podman-remote --url flag
 
-RUN printf '#!/bin/sh\nprintf "%%s podman-remote-shim: %%s\\n" "$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)" "$*" >> /opt/data/logs/shim.log 2>/dev/null\nexec /usr/bin/podman-remote --url "${DOCKER_HOST:-unix:///var/run/docker.sock}" "$@"\n' \
+RUN printf '#!/bin/sh\nprintf "%%s podman-remote-shim: %%s\n" "$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)" "$*" >> /opt/data/logs/shim.log 2>/dev/null\nexec /usr/bin/podman-remote --url "${DOCKER_HOST:-unix:///var/run/docker.sock}" "$@"\n' \
     > /usr/local/bin/docker && chmod +x /usr/local/bin/docker
 
 # ── Runtime ──────────────────────────────────────────────────────────────────
