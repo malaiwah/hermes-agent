@@ -1040,6 +1040,22 @@ class TestConcurrentToolExecution:
                 mock_seq.assert_called_once()
                 mock_con.assert_not_called()
 
+    def test_send_user_message_forces_sequential(self, agent):
+        """Batches containing user-facing updates should stay sequential."""
+        tc1 = _mock_tool_call(name="web_search", arguments='{}', call_id="c1")
+        tc2 = _mock_tool_call(
+            name="send_user_message",
+            arguments='{"message":"I found the right file."}',
+            call_id="c2",
+        )
+        mock_msg = _mock_assistant_msg(content="", tool_calls=[tc1, tc2])
+        messages = []
+        with patch.object(agent, "_execute_tool_calls_sequential") as mock_seq:
+            with patch.object(agent, "_execute_tool_calls_concurrent") as mock_con:
+                agent._execute_tool_calls(mock_msg, messages, "task-1")
+                mock_seq.assert_called_once()
+                mock_con.assert_not_called()
+
     def test_multiple_tools_uses_concurrent_path(self, agent):
         """Multiple read-only tools should use concurrent path."""
         tc1 = _mock_tool_call(name="web_search", arguments='{}', call_id="c1")
@@ -1299,6 +1315,53 @@ class TestConcurrentToolExecution:
             result = agent._invoke_tool("todo", {"todos": []}, "task-1")
             mock_todo.assert_called_once()
         assert "ok" in result
+
+    def test_invoke_tool_send_user_message_uses_callback(self, agent):
+        cb = MagicMock()
+        agent.message_callback = cb
+
+        result = json.loads(
+            agent._invoke_tool(
+                "send_user_message",
+                {"message": "I found the relevant files."},
+                "task-1",
+            )
+        )
+
+        cb.assert_called_once_with("I found the relevant files.")
+        assert result["sent"] is True
+        assert result["message"] == "I found the relevant files."
+
+    def test_invoke_tool_send_user_message_falls_back_to_status_callback(self, agent):
+        cb = MagicMock()
+        agent.message_callback = None
+        agent.status_callback = cb
+
+        result = json.loads(
+            agent._invoke_tool(
+                "send_user_message",
+                {"message": "Still working through the patch."},
+                "task-1",
+            )
+        )
+
+        cb.assert_called_once_with("agent_message", "Still working through the patch.")
+        assert result["sent"] is True
+
+    def test_invoke_tool_send_user_message_errors_without_callback(self, agent):
+        agent.message_callback = None
+        agent.status_callback = None
+
+        result = json.loads(
+            agent._invoke_tool(
+                "send_user_message",
+                {"message": "No route available."},
+                "task-1",
+            )
+        )
+
+        assert "error" in result
+        assert "not available" in result["error"].lower()
 
 
 class TestPathsOverlap:

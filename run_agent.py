@@ -208,7 +208,7 @@ class IterationBudget:
 
 # Tools that must never run concurrently (interactive / user-facing).
 # When any of these appear in a batch, we fall back to sequential execution.
-_NEVER_PARALLEL_TOOLS = frozenset({"clarify"})
+_NEVER_PARALLEL_TOOLS = frozenset({"clarify", "send_user_message"})
 
 # Read-only tools with no shared mutable session state.
 _PARALLEL_SAFE_TOOLS = frozenset({
@@ -459,6 +459,7 @@ class AIAgent:
         step_callback: callable = None,
         stream_delta_callback: callable = None,
         tool_gen_callback: callable = None,
+        message_callback: callable = None,
         status_callback: callable = None,
         max_tokens: int = None,
         reasoning_config: Dict[str, Any] = None,
@@ -505,6 +506,8 @@ class AIAgent:
             tool_progress_callback (callable): Callback function(tool_name, args_preview) for progress notifications
             clarify_callback (callable): Callback function(question, choices) -> str for interactive user questions.
                 Provided by the platform layer (CLI or gateway). If None, the clarify tool returns an error.
+            message_callback (callable): Callback function(message_text) -> None for sending
+                a natural-language update to the current user without ending the turn.
             max_tokens (int): Maximum tokens for model responses (optional, uses model default if not set)
             reasoning_config (Dict): OpenRouter reasoning configuration override (e.g. {"effort": "none"} to disable thinking).
                 If None, defaults to {"enabled": True, "effort": "medium"} for OpenRouter. Set to disable/customize reasoning.
@@ -590,6 +593,7 @@ class AIAgent:
         self.clarify_callback = clarify_callback
         self.step_callback = step_callback
         self.stream_delta_callback = stream_delta_callback
+        self.message_callback = message_callback
         self.status_callback = status_callback
         self.tool_gen_callback = tool_gen_callback
         self._last_reported_tool = None  # Track for "new tool" mode
@@ -1462,6 +1466,43 @@ class AIAgent:
                 self.status_callback("lifecycle", message)
             except Exception:
                 logger.debug("status_callback error in _emit_status", exc_info=True)
+
+    def _emit_user_message(self, message: str) -> str:
+        """Send a natural-language update to the current user.
+
+        Prefers the dedicated ``message_callback`` so platforms can render
+        user-facing status naturally inside the current session. Falls back to
+        ``status_callback("agent_message", ...)`` for older embeddings that do
+        not wire the dedicated callback yet.
+        """
+        text = str(message or "").strip()
+        if not text:
+            return json.dumps({"error": "Message text is required."}, ensure_ascii=False)
+
+        if self.message_callback:
+            try:
+                self.message_callback(text)
+                return json.dumps({"sent": True, "message": text}, ensure_ascii=False)
+            except Exception as exc:
+                return json.dumps(
+                    {"error": f"Failed to send user message: {exc}"},
+                    ensure_ascii=False,
+                )
+
+        if self.status_callback:
+            try:
+                self.status_callback("agent_message", text)
+                return json.dumps({"sent": True, "message": text}, ensure_ascii=False)
+            except Exception as exc:
+                return json.dumps(
+                    {"error": f"Failed to send user message: {exc}"},
+                    ensure_ascii=False,
+                )
+
+        return json.dumps(
+            {"error": "send_user_message is not available in this execution context."},
+            ensure_ascii=False,
+        )
 
     def _is_direct_openai_url(self, base_url: str = None) -> bool:
         """Return True when a base URL targets OpenAI's native API."""
@@ -5887,6 +5928,8 @@ class AIAgent:
                 choices=function_args.get("choices"),
                 callback=self.clarify_callback,
             )
+        elif function_name == "send_user_message":
+            return self._emit_user_message(function_args.get("message", ""))
         elif function_name == "delegate_task":
             from tools.delegate_tool import delegate_task as _delegate_task
             return _delegate_task(
@@ -6239,6 +6282,11 @@ class AIAgent:
                 tool_duration = time.time() - tool_start_time
                 if self.quiet_mode:
                     self._vprint(f"  {_get_cute_tool_message_impl('clarify', function_args, tool_duration, result=function_result)}")
+            elif function_name == "send_user_message":
+                function_result = self._emit_user_message(function_args.get("message", ""))
+                tool_duration = time.time() - tool_start_time
+                if self.quiet_mode:
+                    self._vprint(f"  {_get_cute_tool_message_impl('send_user_message', function_args, tool_duration, result=function_result)}")
             elif function_name == "delegate_task":
                 from tools.delegate_tool import delegate_task as _delegate_task
                 tasks_arg = function_args.get("tasks")
