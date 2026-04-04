@@ -52,6 +52,48 @@ class TestParseEnvVar:
         assert result is fake_env
         assert mock_docker.call_args.kwargs["forward_env"] == ["GITHUB_TOKEN"]
 
+    def test_terminal_tool_passes_docker_forward_env_into_container_config(self):
+        fake_env = type(
+            "FakeEnv",
+            (),
+            {"execute": lambda self, *args, **kwargs: {"output": "ok", "exit_code": 0, "error": ""}},
+        )()
+        config = {
+            "env_type": "docker",
+            "docker_image": "python:3.11",
+            "cwd": "/root",
+            "timeout": 180,
+            "container_cpu": 1,
+            "container_memory": 5120,
+            "container_disk": 51200,
+            "container_persistent": True,
+            "modal_mode": "auto",
+            "docker_volumes": [],
+            "docker_mount_cwd_to_workspace": False,
+            "docker_forward_env": ["GITHUB_TOKEN", "NPM_TOKEN"],
+            "host_cwd": None,
+        }
+        task_id = "docker-forward-env-test"
+        _tt_mod._active_environments.clear()
+        _tt_mod._last_activity.clear()
+        _tt_mod._task_env_overrides.clear()
+
+        try:
+            with patch.object(_tt_mod, "_get_env_config", return_value=config), \
+                 patch.object(_tt_mod, "_create_environment", return_value=fake_env) as mock_create, \
+                 patch.object(_tt_mod, "_start_cleanup_thread"), \
+                 patch.object(_tt_mod, "_check_all_guards", return_value={"approved": True}):
+                result = json.loads(_tt_mod.terminal_tool("echo ok", task_id=task_id))
+
+            assert result["exit_code"] == 0
+            assert mock_create.call_args.kwargs["container_config"]["docker_forward_env"] == [
+                "GITHUB_TOKEN",
+                "NPM_TOKEN",
+            ]
+        finally:
+            _tt_mod._active_environments.clear()
+            _tt_mod._last_activity.clear()
+
     def test_falls_back_to_default(self):
         with patch.dict("os.environ", {}, clear=False):
             # Remove the var if it exists, rely on default
