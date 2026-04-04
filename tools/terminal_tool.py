@@ -422,6 +422,15 @@ _cleanup_running = False
 _task_env_overrides: Dict[str, Dict[str, Any]] = {}
 
 
+def _default_cwd_for_env_type(env_type: str) -> str:
+    """Return the backend-appropriate default working directory."""
+    if env_type == "local":
+        return os.getcwd()
+    if env_type == "ssh":
+        return "~"
+    return "/root"
+
+
 def register_task_env_overrides(task_id: str, overrides: Dict[str, Any]):
     """
     Register environment overrides for a specific task/rollout.
@@ -430,9 +439,15 @@ def register_task_env_overrides(task_id: str, overrides: Dict[str, Any]):
     per-task sandbox settings (e.g., a custom Dockerfile for the Modal image).
 
     Supported override keys:
+        - env_type: str -- Backend override ("docker", "modal", etc.)
         - modal_image: str -- Path to Dockerfile or Docker Hub image name
         - docker_image: str -- Docker image name
+        - singularity_image: str -- Singularity image reference
+        - daytona_image: str -- Daytona image name
         - cwd: str -- Working directory inside the sandbox
+        - docker_forward_env: list[str] -- Env vars to forward into Docker
+        - docker_volumes: list[str] -- Additional Docker bind mounts
+        - docker_mount_cwd_to_workspace: bool -- Opt-in host cwd bind mount
 
     Args:
         task_id: The rollout's unique task identifier
@@ -475,15 +490,7 @@ def _get_env_config() -> Dict[str, Any]:
     
     mount_docker_cwd = os.getenv("TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE", "false").lower() in ("true", "1", "yes")
 
-    # Default cwd: local uses the host's current directory, everything
-    # else starts in the user's home (~ resolves to whatever account
-    # is running inside the container/remote).
-    if env_type == "local":
-        default_cwd = os.getcwd()
-    elif env_type == "ssh":
-        default_cwd = "~"
-    else:
-        default_cwd = "/root"
+    default_cwd = _default_cwd_for_env_type(env_type)
 
     # Read TERMINAL_CWD but sanity-check it for container backends.
     # If Docker cwd passthrough is explicitly enabled, remap the host path to
@@ -543,6 +550,80 @@ def _get_env_config() -> Dict[str, Any]:
         "container_disk": _parse_env_var("TERMINAL_CONTAINER_DISK", "51200"),        # MB (default 50GB)
         "container_persistent": os.getenv("TERMINAL_CONTAINER_PERSISTENT", "true").lower() in ("true", "1", "yes"),
         "docker_volumes": _parse_env_var("TERMINAL_DOCKER_VOLUMES", "[]", json.loads, "valid JSON"),
+    }
+
+
+def _resolve_task_environment_settings(task_id: str, config: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    """Resolve per-task environment settings after applying registered overrides."""
+    config = dict(config or _get_env_config())
+    overrides = dict(_task_env_overrides.get(task_id, {}) or {})
+
+    env_type = str(overrides.get("env_type") or config["env_type"])
+    base_env_type = str(config["env_type"])
+
+    if env_type == "docker":
+        image = overrides.get("docker_image") or config["docker_image"]
+    elif env_type == "singularity":
+        image = overrides.get("singularity_image") or config["singularity_image"]
+    elif env_type == "modal":
+        image = overrides.get("modal_image") or config["modal_image"]
+    elif env_type == "daytona":
+        image = overrides.get("daytona_image") or config["daytona_image"]
+    else:
+        image = ""
+
+    cwd = overrides.get("cwd")
+    if not cwd:
+        cwd = config["cwd"] if env_type == base_env_type else _default_cwd_for_env_type(env_type)
+
+    host_cwd = overrides.get("host_cwd")
+    if host_cwd is None:
+        host_cwd = config.get("host_cwd") if env_type == base_env_type else None
+
+    container_config = None
+    if env_type in ("docker", "singularity", "modal", "daytona"):
+        container_config = {
+            "container_cpu": config.get("container_cpu", 1),
+            "container_memory": config.get("container_memory", 5120),
+            "container_disk": config.get("container_disk", 51200),
+            "container_persistent": config.get("container_persistent", True),
+            "modal_mode": config.get("modal_mode", "auto"),
+            "docker_volumes": overrides.get("docker_volumes", config.get("docker_volumes", [])),
+            "docker_mount_cwd_to_workspace": overrides.get(
+                "docker_mount_cwd_to_workspace",
+                config.get("docker_mount_cwd_to_workspace", False),
+            ),
+            "docker_forward_env": overrides.get(
+                "docker_forward_env",
+                config.get("docker_forward_env", []),
+            ),
+        }
+
+    ssh_config = None
+    if env_type == "ssh":
+        ssh_config = {
+            "host": config.get("ssh_host", ""),
+            "user": config.get("ssh_user", ""),
+            "port": config.get("ssh_port", 22),
+            "key": config.get("ssh_key", ""),
+            "persistent": config.get("ssh_persistent", False),
+        }
+
+    local_config = None
+    if env_type == "local":
+        local_config = {
+            "persistent": config.get("local_persistent", False),
+        }
+
+    return {
+        "env_type": env_type,
+        "image": image,
+        "cwd": cwd,
+        "host_cwd": host_cwd,
+        "container_config": container_config,
+        "ssh_config": ssh_config,
+        "local_config": local_config,
+        "timeout": config["timeout"],
     }
 
 
@@ -941,29 +1022,13 @@ def terminal_tool(
     try:
         # Get configuration
         config = _get_env_config()
-        env_type = config["env_type"]
-
         # Use task_id for environment isolation
         effective_task_id = task_id or "default"
-
-        # Check per-task overrides (set by environments like TerminalBench2Env)
-        # before falling back to global env var config
-        overrides = _task_env_overrides.get(effective_task_id, {})
-        
-        # Select image based on env type, with per-task override support
-        if env_type == "docker":
-            image = overrides.get("docker_image") or config["docker_image"]
-        elif env_type == "singularity":
-            image = overrides.get("singularity_image") or config["singularity_image"]
-        elif env_type == "modal":
-            image = overrides.get("modal_image") or config["modal_image"]
-        elif env_type == "daytona":
-            image = overrides.get("daytona_image") or config["daytona_image"]
-        else:
-            image = ""
-
-        cwd = overrides.get("cwd") or config["cwd"]
-        default_timeout = config["timeout"]
+        resolved_env = _resolve_task_environment_settings(effective_task_id, config)
+        env_type = resolved_env["env_type"]
+        image = resolved_env["image"]
+        cwd = resolved_env["cwd"]
+        default_timeout = resolved_env["timeout"]
         effective_timeout = timeout or default_timeout
 
         # Start cleanup thread
@@ -1002,32 +1067,9 @@ def terminal_tool(
                     logger.info("Creating new %s environment for task %s...", env_type, effective_task_id[:8])
                     try:
                         ssh_config = None
-                        if env_type == "ssh":
-                            ssh_config = {
-                                "host": config.get("ssh_host", ""),
-                                "user": config.get("ssh_user", ""),
-                                "port": config.get("ssh_port", 22),
-                                "key": config.get("ssh_key", ""),
-                                "persistent": config.get("ssh_persistent", False),
-                            }
-
-                        container_config = None
-                        if env_type in ("docker", "singularity", "modal", "daytona"):
-                            container_config = {
-                                "container_cpu": config.get("container_cpu", 1),
-                                "container_memory": config.get("container_memory", 5120),
-                                "container_disk": config.get("container_disk", 51200),
-                                "container_persistent": config.get("container_persistent", True),
-                                "modal_mode": config.get("modal_mode", "auto"),
-                                "docker_volumes": config.get("docker_volumes", []),
-                                "docker_mount_cwd_to_workspace": config.get("docker_mount_cwd_to_workspace", False),
-                            }
-
-                        local_config = None
-                        if env_type == "local":
-                            local_config = {
-                                "persistent": config.get("local_persistent", False),
-                            }
+                        ssh_config = resolved_env["ssh_config"]
+                        container_config = resolved_env["container_config"]
+                        local_config = resolved_env["local_config"]
 
                         new_env = _create_environment(
                             env_type=env_type,
@@ -1038,7 +1080,7 @@ def terminal_tool(
                             container_config=container_config,
                             local_config=local_config,
                             task_id=effective_task_id,
-                            host_cwd=config.get("host_cwd"),
+                            host_cwd=resolved_env.get("host_cwd"),
                         )
                     except ImportError as e:
                         return json.dumps({

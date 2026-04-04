@@ -39,6 +39,36 @@ MAX_DEPTH = 2  # parent (0) -> child (1) -> grandchild rejected (2)
 DEFAULT_MAX_ITERATIONS = 50
 DEFAULT_TOOLSETS = ["terminal", "file", "web"]
 
+BUILTIN_DELEGATION_PROFILES = {
+    "restricted": {
+        "description": "Minimal subagent profile with no memory access.",
+        "toolsets": ["terminal", "file"],
+        "memory": "none",
+        "provider_tools": False,
+        "terminal": {
+            "backend": "docker",
+        },
+    },
+    "friendly": {
+        "description": "Read-only memory profile for cooperative code and research tasks.",
+        "toolsets": ["terminal", "file", "web"],
+        "memory": "read",
+        "provider_tools": False,
+        "terminal": {
+            "backend": "docker",
+        },
+    },
+    "privileged": {
+        "description": "Write-capable memory profile for trusted subagents.",
+        "toolsets": ["terminal", "file", "web", "memory"],
+        "memory": "write",
+        "provider_tools": True,
+        "terminal": {
+            "backend": "docker",
+        },
+    },
+}
+
 
 def check_delegate_requirements() -> bool:
     """Delegation has no external requirements -- always available."""
@@ -73,6 +103,203 @@ def _strip_blocked_tools(toolsets: List[str]) -> List[str]:
         "delegation", "clarify", "memory", "code_execution",
     }
     return [t for t in toolsets if t not in blocked_toolset_names]
+
+
+def _resolve_toolset_tools(toolsets: List[str]) -> set[str]:
+    """Resolve a list of toolset names into concrete tool names."""
+    from toolsets import resolve_toolset, validate_toolset
+
+    resolved: set[str] = set()
+    for toolset_name in toolsets or []:
+        if validate_toolset(toolset_name):
+            resolved.update(resolve_toolset(toolset_name))
+    return resolved
+
+
+def _normalize_memory_access(value: object) -> str:
+    """Normalize a delegation profile memory mode."""
+    normalized = str(value or "none").strip().lower()
+    if normalized not in {"none", "read", "write"}:
+        raise ValueError(
+            f"Invalid delegation memory mode '{value}'. "
+            "Expected one of: none, read, write."
+        )
+    return normalized
+
+
+def _parse_boolish(value: object, default: bool = False) -> bool:
+    """Parse profile bool-like config values safely."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "1", "yes", "on"}:
+            return True
+        if lowered in {"false", "0", "no", "off"}:
+            return False
+    return default
+
+
+def _get_delegation_profiles(cfg: dict) -> dict:
+    """Return built-in profiles plus any user-defined overrides."""
+    profiles = {
+        name: {
+            "description": spec.get("description", ""),
+            "toolsets": list(spec.get("toolsets") or []),
+            "memory": spec.get("memory", "none"),
+            "provider_tools": spec.get("provider_tools", False),
+            "terminal": dict(spec.get("terminal") or {}),
+        }
+        for name, spec in BUILTIN_DELEGATION_PROFILES.items()
+    }
+
+    custom = cfg.get("profiles") or {}
+    if not isinstance(custom, dict):
+        return profiles
+
+    for name, spec in custom.items():
+        if not isinstance(spec, dict):
+            continue
+        existing = profiles.get(name, {})
+        merged = {
+            "description": spec.get("description", existing.get("description", "")),
+            "toolsets": list(spec.get("toolsets") or existing.get("toolsets") or []),
+            "memory": spec.get("memory", existing.get("memory", "none")),
+            "provider_tools": spec.get("provider_tools", existing.get("provider_tools", False)),
+            "terminal": {
+                **dict(existing.get("terminal") or {}),
+                **dict(spec.get("terminal") or {}),
+            },
+        }
+        profiles[name] = merged
+
+    return profiles
+
+
+def _resolve_delegation_profile(cfg: dict, requested_profile: Optional[str]) -> dict:
+    """Resolve a delegation capability profile."""
+    profile_name = (requested_profile or cfg.get("default_profile") or "").strip()
+    if not profile_name:
+        legacy_toolsets = cfg.get("default_toolsets")
+        if not isinstance(legacy_toolsets, list):
+            legacy_toolsets = []
+        return {
+            "name": "",
+            "toolsets": list(legacy_toolsets),
+            "memory": "none",
+            "provider_tools": False,
+            "terminal": {},
+        }
+
+    profiles = _get_delegation_profiles(cfg)
+    spec = profiles.get(profile_name)
+    if not isinstance(spec, dict):
+        raise ValueError(
+            f"Unknown delegation profile '{profile_name}'. "
+            f"Available: {', '.join(sorted(profiles))}"
+        )
+
+    return {
+        "name": profile_name,
+        "toolsets": list(spec.get("toolsets") or []),
+        "memory": _normalize_memory_access(spec.get("memory")),
+        "provider_tools": _parse_boolish(spec.get("provider_tools"), default=False),
+        "terminal": dict(spec.get("terminal") or {}),
+    }
+
+
+def _build_child_blocked_tools(memory_access: str) -> set[str]:
+    """Return the blocked tool names for a child profile."""
+    blocked = set(DELEGATE_BLOCKED_TOOLS)
+    if memory_access == "write":
+        blocked.discard("memory")
+    return blocked
+
+
+def _build_child_enabled_toolsets(
+    task_index: int,
+    requested_toolsets: Optional[List[str]],
+    parent_agent,
+    profile_toolsets: Optional[List[str]],
+    blocked_tools: set[str],
+) -> tuple[List[str], str]:
+    """Create an exact child toolset derived from parent + profile constraints."""
+    from toolsets import create_custom_toolset, resolve_toolset, validate_toolset
+
+    parent_toolsets = list(getattr(parent_agent, "enabled_toolsets", None) or DEFAULT_TOOLSETS)
+    parent_allowed_tools = _resolve_toolset_tools(parent_toolsets) - blocked_tools
+
+    profile_allowed_tools = set(parent_allowed_tools)
+    if profile_toolsets:
+        profile_allowed_tools = set()
+        for toolset_name in profile_toolsets:
+            if not validate_toolset(toolset_name):
+                logger.debug("Ignoring unknown toolset in delegation profile: %s", toolset_name)
+                continue
+            profile_allowed_tools.update(resolve_toolset(toolset_name))
+        profile_allowed_tools &= parent_allowed_tools
+
+    child_tools = set(profile_allowed_tools)
+    if requested_toolsets:
+        child_tools = set()
+        for toolset_name in requested_toolsets:
+            if not validate_toolset(toolset_name):
+                logger.debug("Dropping unknown delegated toolset request: %s", toolset_name)
+                continue
+
+            requested_tools = set(resolve_toolset(toolset_name)) - blocked_tools
+            if not requested_tools:
+                logger.debug(
+                    "Dropping delegated toolset '%s': contains no child-safe tools",
+                    toolset_name,
+                )
+                continue
+
+            if not requested_tools.issubset(profile_allowed_tools):
+                logger.debug(
+                    "Dropping delegated toolset '%s': requests tools outside parent/profile scope",
+                    toolset_name,
+                )
+                continue
+
+            child_tools.update(requested_tools)
+
+    toolset_name = f"_delegate_child_{os.getpid()}_{task_index}_{time.time_ns()}"
+    create_custom_toolset(
+        name=toolset_name,
+        description="Exact tool subset for delegated child agent",
+        tools=sorted(child_tools),
+    )
+    return [toolset_name], toolset_name
+
+
+def _build_terminal_overrides(profile: dict) -> Dict[str, Any]:
+    """Translate a delegation profile terminal block into per-task overrides."""
+    terminal = profile.get("terminal") or {}
+    if not isinstance(terminal, dict):
+        return {}
+
+    overrides: Dict[str, Any] = {}
+    backend = str(terminal.get("backend") or "").strip()
+    if backend:
+        overrides["env_type"] = backend
+
+    for key in (
+        "cwd",
+        "docker_image",
+        "modal_image",
+        "daytona_image",
+        "singularity_image",
+        "docker_mount_cwd_to_workspace",
+        "docker_forward_env",
+        "docker_volumes",
+    ):
+        if key in terminal:
+            overrides[key] = terminal[key]
+
+    return overrides
 
 
 def _build_child_progress_callback(task_index: int, parent_agent, task_count: int = 1) -> Optional[callable]:
@@ -152,6 +379,7 @@ def _build_child_agent(
     goal: str,
     context: Optional[str],
     toolsets: Optional[List[str]],
+    profile: dict,
     model: Optional[str],
     max_iterations: int,
     parent_agent,
@@ -172,16 +400,14 @@ def _build_child_agent(
     """
     from run_agent import AIAgent
 
-    # When no explicit toolsets given, inherit from parent's enabled toolsets
-    # so disabled tools (e.g. web) don't leak to subagents.
-    parent_toolsets = set(getattr(parent_agent, "enabled_toolsets", None) or DEFAULT_TOOLSETS)
-    if toolsets:
-        # Intersect with parent — subagent must not gain tools the parent lacks
-        child_toolsets = _strip_blocked_tools([t for t in toolsets if t in parent_toolsets])
-    elif parent_agent and getattr(parent_agent, "enabled_toolsets", None):
-        child_toolsets = _strip_blocked_tools(parent_agent.enabled_toolsets)
-    else:
-        child_toolsets = _strip_blocked_tools(DEFAULT_TOOLSETS)
+    blocked_tools = _build_child_blocked_tools(profile.get("memory", "none"))
+    child_toolsets, delegate_toolset_name = _build_child_enabled_toolsets(
+        task_index=task_index,
+        requested_toolsets=toolsets,
+        parent_agent=parent_agent,
+        profile_toolsets=profile.get("toolsets"),
+        blocked_tools=blocked_tools,
+    )
 
     child_prompt = _build_child_system_prompt(goal, context)
     # Extract parent's API key so subagents inherit auth (e.g. Nous Portal).
@@ -224,7 +450,10 @@ def _build_child_agent(
         log_prefix=f"[subagent-{task_index}]",
         platform=parent_agent.platform,
         skip_context_files=True,
-        skip_memory=True,
+        skip_memory=profile.get("memory", "none") == "none",
+        memory_write_enabled=profile.get("memory", "none") == "write",
+        provider_tool_access=bool(profile.get("provider_tools", False)),
+        agent_context="subagent",
         clarify_callback=None,
         session_db=getattr(parent_agent, '_session_db', None),
         providers_allowed=parent_agent.providers_allowed,
@@ -236,6 +465,9 @@ def _build_child_agent(
     )
     # Set delegation depth so children can't spawn grandchildren
     child._delegate_depth = getattr(parent_agent, '_delegate_depth', 0) + 1
+    child._delegate_temp_toolset = delegate_toolset_name
+    child._delegate_terminal_overrides = _build_terminal_overrides(profile)
+    child._delegate_task_id = f"delegate-{task_index}-{time.time_ns()}"
 
     # Register child for interrupt propagation
     if hasattr(parent_agent, '_active_children'):
@@ -269,9 +501,15 @@ def _run_single_child(
     import model_tools
     _saved_tool_names = getattr(child, "_delegate_saved_tool_names",
                                 list(model_tools._last_resolved_tool_names))
+    child_task_id = getattr(child, "_delegate_task_id", f"delegate-{task_index}-{time.time_ns()}")
+    terminal_overrides = getattr(child, "_delegate_terminal_overrides", None) or {}
 
     try:
-        result = child.run_conversation(user_message=goal)
+        if terminal_overrides:
+            from tools.terminal_tool import register_task_env_overrides
+            register_task_env_overrides(child_task_id, terminal_overrides)
+
+        result = child.run_conversation(user_message=goal, task_id=child_task_id)
 
         # Flush any remaining batched progress to gateway
         if child_progress_cb and hasattr(child_progress_cb, '_flush'):
@@ -383,10 +621,18 @@ def _run_single_child(
         # Restore the parent's tool names so the process-global is correct
         # for any subsequent execute_code calls or other consumers.
         import model_tools
+        from toolsets import TOOLSETS
+        from tools.terminal_tool import clear_task_env_overrides
 
         saved_tool_names = getattr(child, "_delegate_saved_tool_names", None)
         if isinstance(saved_tool_names, list):
             model_tools._last_resolved_tool_names = list(saved_tool_names)
+
+        temp_toolset = getattr(child, "_delegate_temp_toolset", None)
+        if temp_toolset:
+            TOOLSETS.pop(temp_toolset, None)
+
+        clear_task_env_overrides(child_task_id)
 
         # Unregister child from interrupt propagation
         if hasattr(parent_agent, '_active_children'):
@@ -404,6 +650,7 @@ def delegate_task(
     goal: Optional[str] = None,
     context: Optional[str] = None,
     toolsets: Optional[List[str]] = None,
+    profile: Optional[str] = None,
     tasks: Optional[List[Dict[str, Any]]] = None,
     max_iterations: Optional[int] = None,
     parent_agent=None,
@@ -449,7 +696,7 @@ def delegate_task(
     if tasks and isinstance(tasks, list):
         task_list = tasks[:MAX_CONCURRENT_CHILDREN]
     elif goal and isinstance(goal, str) and goal.strip():
-        task_list = [{"goal": goal, "context": context, "toolsets": toolsets}]
+        task_list = [{"goal": goal, "context": context, "toolsets": toolsets, "profile": profile}]
     else:
         return json.dumps({"error": "Provide either 'goal' (single task) or 'tasks' (batch)."})
 
@@ -480,8 +727,13 @@ def delegate_task(
     children = []
     try:
         for i, t in enumerate(task_list):
+            try:
+                resolved_profile = _resolve_delegation_profile(cfg, t.get("profile") or profile)
+            except ValueError as exc:
+                return json.dumps({"error": str(exc)})
             child = _build_child_agent(
                 task_index=i, goal=t["goal"], context=t.get("context"),
+                profile=resolved_profile,
                 toolsets=t.get("toolsets") or toolsets, model=creds["model"],
                 max_iterations=effective_max_iter, parent_agent=parent_agent,
                 override_provider=creds["provider"], override_base_url=creds["base_url"],
@@ -716,10 +968,12 @@ DELEGATE_TASK_SCHEMA = {
         "- Single tool call -> just call the tool directly\n"
         "- Tasks needing user interaction -> subagents cannot use clarify\n\n"
         "IMPORTANT:\n"
-        "- Subagents have NO memory of your conversation. Pass all relevant "
+        "- Subagents do not automatically know your conversation history. Pass all relevant "
         "info (file paths, error messages, constraints) via the 'context' field.\n"
-        "- Subagents CANNOT call: delegate_task, clarify, memory, send_message, "
-        "execute_code.\n"
+        "- Profiles can change child capabilities, including memory access and "
+        "terminal backend selection.\n"
+        "- Subagents CANNOT call: delegate_task, clarify, send_message, "
+        "execute_code. Memory access depends on the selected profile.\n"
         "- Each subagent gets its own terminal session (separate working directory and state).\n"
         "- Results are always returned as an array, one entry per task."
     ),
@@ -747,10 +1001,18 @@ DELEGATE_TASK_SCHEMA = {
                 "items": {"type": "string"},
                 "description": (
                     "Toolsets to enable for this subagent. "
-                    "Default: inherits your enabled toolsets. "
+                    "Default: inherits the selected profile's child-safe tools. "
                     "Common patterns: ['terminal', 'file'] for code work, "
                     "['web'] for research, ['terminal', 'file', 'web'] for "
                     "full-stack tasks."
+                ),
+            },
+            "profile": {
+                "type": "string",
+                "description": (
+                    "Optional delegation capability profile. Built-ins: "
+                    "'restricted', 'friendly', 'privileged'. Profiles can set "
+                    "default toolsets, memory access, and terminal backend overrides."
                 ),
             },
             "tasks": {
@@ -760,6 +1022,10 @@ DELEGATE_TASK_SCHEMA = {
                     "properties": {
                         "goal": {"type": "string", "description": "Task goal"},
                         "context": {"type": "string", "description": "Task-specific context"},
+                        "profile": {
+                            "type": "string",
+                            "description": "Delegation profile for this specific task",
+                        },
                         "toolsets": {
                             "type": "array",
                             "items": {"type": "string"},
@@ -799,6 +1065,7 @@ registry.register(
         goal=args.get("goal"),
         context=args.get("context"),
         toolsets=args.get("toolsets"),
+        profile=args.get("profile"),
         tasks=args.get("tasks"),
         max_iterations=args.get("max_iterations"),
         parent_agent=kw.get("parent_agent")),

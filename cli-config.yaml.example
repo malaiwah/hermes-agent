@@ -681,7 +681,16 @@ code_execution:
 # Supports single tasks and batch mode (up to 3 parallel).
 delegation:
   max_iterations: 50                          # Max tool-calling turns per child (default: 50)
-  default_toolsets: ["terminal", "file", "web"]  # Default toolsets for subagents
+  default_toolsets: ["terminal", "file", "web"]  # Legacy fallback when no delegation profile is selected
+  # default_profile: "friendly"               # Built-in: restricted, friendly, privileged
+  # profiles:
+  #   docs:
+  #     toolsets: ["file", "web"]
+  #     memory: "read"                        # none | read | write
+  #     provider_tools: false
+  #     terminal:
+  #       backend: "docker"                   # docker | modal | local | ssh | singularity | daytona
+  #       docker_image: "nikolaik/python-nodejs:python3.11-nodejs20"
   # model: "google/gemini-3-flash-preview"    # Override model for subagents (empty = inherit parent)
   # provider: "openrouter"                    # Override provider for subagents (empty = inherit parent)
   #                                           # Resolves full credentials (base_url, api_key) automatically.

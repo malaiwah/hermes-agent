@@ -158,7 +158,8 @@ def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
     """
     from tools.terminal_tool import (
         _active_environments, _env_lock, _create_environment,
-        _get_env_config, _last_activity, _start_cleanup_thread,
+        _get_env_config, _last_activity, _resolve_task_environment_settings,
+        _start_cleanup_thread,
         _creation_locks,
         _creation_locks_lock,
     )
@@ -195,62 +196,23 @@ def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
                 terminal_env = None
 
         if terminal_env is None:
-            from tools.terminal_tool import _task_env_overrides
-
             config = _get_env_config()
-            env_type = config["env_type"]
-            overrides = _task_env_overrides.get(task_id, {})
-
-            if env_type == "docker":
-                image = overrides.get("docker_image") or config["docker_image"]
-            elif env_type == "singularity":
-                image = overrides.get("singularity_image") or config["singularity_image"]
-            elif env_type == "modal":
-                image = overrides.get("modal_image") or config["modal_image"]
-            elif env_type == "daytona":
-                image = overrides.get("daytona_image") or config["daytona_image"]
-            else:
-                image = ""
-
-            cwd = overrides.get("cwd") or config["cwd"]
+            resolved_env = _resolve_task_environment_settings(task_id, config)
+            env_type = resolved_env["env_type"]
+            image = resolved_env["image"]
+            cwd = resolved_env["cwd"]
             logger.info("Creating new %s environment for task %s...", env_type, task_id[:8])
-
-            container_config = None
-            if env_type in ("docker", "singularity", "modal", "daytona"):
-                container_config = {
-                    "container_cpu": config.get("container_cpu", 1),
-                    "container_memory": config.get("container_memory", 5120),
-                    "container_disk": config.get("container_disk", 51200),
-                    "container_persistent": config.get("container_persistent", True),
-                    "docker_volumes": config.get("docker_volumes", []),
-                }
-
-            ssh_config = None
-            if env_type == "ssh":
-                ssh_config = {
-                    "host": config.get("ssh_host", ""),
-                    "user": config.get("ssh_user", ""),
-                    "port": config.get("ssh_port", 22),
-                    "key": config.get("ssh_key", ""),
-                    "persistent": config.get("ssh_persistent", False),
-                }
-
-            local_config = None
-            if env_type == "local":
-                local_config = {
-                    "persistent": config.get("local_persistent", False),
-                }
 
             terminal_env = _create_environment(
                 env_type=env_type,
                 image=image,
                 cwd=cwd,
-                timeout=config["timeout"],
-                ssh_config=ssh_config,
-                container_config=container_config,
-                local_config=local_config,
+                timeout=resolved_env["timeout"],
+                ssh_config=resolved_env["ssh_config"],
+                container_config=resolved_env["container_config"],
+                local_config=resolved_env["local_config"],
                 task_id=task_id,
-                host_cwd=config.get("host_cwd"),
+                host_cwd=resolved_env.get("host_cwd"),
             )
 
             with _env_lock:

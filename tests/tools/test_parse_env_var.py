@@ -52,6 +52,20 @@ class TestParseEnvVar:
         assert result is fake_env
         assert mock_docker.call_args.kwargs["forward_env"] == ["GITHUB_TOKEN"]
 
+    def test_task_override_can_switch_backend_with_sandbox_default_cwd(self):
+        task_id = "delegate-friendly"
+        with patch.dict("os.environ", {"TERMINAL_ENV": "local"}, clear=False):
+            _tt_mod.register_task_env_overrides(task_id, {"env_type": "docker"})
+            try:
+                resolved = _tt_mod._resolve_task_environment_settings(task_id)
+            finally:
+                _tt_mod.clear_task_env_overrides(task_id)
+
+        assert resolved["env_type"] == "docker"
+        assert resolved["cwd"] == "/root"
+        assert resolved["host_cwd"] is None
+        assert resolved["container_config"] is not None
+
     def test_falls_back_to_default(self):
         with patch.dict("os.environ", {}, clear=False):
             # Remove the var if it exists, rely on default

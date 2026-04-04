@@ -466,6 +466,9 @@ class AIAgent:
         platform: str = None,
         skip_context_files: bool = False,
         skip_memory: bool = False,
+        memory_write_enabled: bool = True,
+        provider_tool_access: bool = True,
+        agent_context: str = "primary",
         session_db=None,
         iteration_budget: "IterationBudget" = None,
         fallback_model: Dict[str, Any] = None,
@@ -534,6 +537,9 @@ class AIAgent:
         self._print_fn = None
         self.background_review_callback = None  # Optional sync callback for gateway delivery
         self.skip_context_files = skip_context_files
+        self._memory_write_enabled = bool(memory_write_enabled)
+        self._provider_tool_access = bool(provider_tool_access)
+        self._agent_context = str(agent_context or "primary")
         self.pass_session_id = pass_session_id
         self.persist_session = persist_session
         self._credential_pool = credential_pool
@@ -1070,7 +1076,7 @@ class AIAgent:
                             "session_id": self.session_id,
                             "platform": platform or "cli",
                             "hermes_home": str(_ghh()),
-                            "agent_context": "primary",
+                            "agent_context": self._agent_context,
                         }
                         # Profile identity for per-profile provider scoping
                         try:
@@ -1090,7 +1096,7 @@ class AIAgent:
                 self._memory_manager = None
 
         # Inject memory provider tool schemas into the tool surface
-        if self._memory_manager and self.tools is not None:
+        if self._memory_manager and self._provider_tool_access and self.tools is not None:
             for _schema in self._memory_manager.get_all_tool_schemas():
                 _wrapped = {"type": "function", "function": _schema}
                 self.tools.append(_wrapped)
@@ -5586,6 +5592,45 @@ class AIAgent:
         finally:
             self._executing_tools = False
 
+    def _handle_builtin_memory_tool(self, function_args: dict) -> str:
+        """Handle the built-in memory tool with optional write protection."""
+        if not self._memory_write_enabled:
+            return json.dumps({
+                "success": False,
+                "error": "Memory writes are disabled for this agent.",
+            })
+
+        target = function_args.get("target", "memory")
+        from tools.memory_tool import memory_tool as _memory_tool
+        result = _memory_tool(
+            action=function_args.get("action"),
+            target=target,
+            content=function_args.get("content"),
+            old_text=function_args.get("old_text"),
+            store=self._memory_store,
+        )
+
+        if self._memory_manager and function_args.get("action") in ("add", "replace"):
+            try:
+                self._memory_manager.on_memory_write(
+                    function_args.get("action", ""),
+                    target,
+                    function_args.get("content", ""),
+                )
+            except Exception:
+                pass
+
+        return result
+
+    def _handle_provider_memory_tool(self, function_name: str, function_args: dict) -> str:
+        """Handle external memory-provider tools with optional access control."""
+        if not self._provider_tool_access:
+            return json.dumps({
+                "success": False,
+                "error": "Memory provider tools are disabled for this agent.",
+            })
+        return self._memory_manager.handle_tool_call(function_name, function_args)
+
     def _invoke_tool(self, function_name: str, function_args: dict, effective_task_id: str) -> str:
         """Invoke a single tool and return the result string. No display logic.
 
@@ -5612,28 +5657,9 @@ class AIAgent:
                 current_session_id=self.session_id,
             )
         elif function_name == "memory":
-            target = function_args.get("target", "memory")
-            from tools.memory_tool import memory_tool as _memory_tool
-            result = _memory_tool(
-                action=function_args.get("action"),
-                target=target,
-                content=function_args.get("content"),
-                old_text=function_args.get("old_text"),
-                store=self._memory_store,
-            )
-            # Bridge: notify external memory provider of built-in memory writes
-            if self._memory_manager and function_args.get("action") in ("add", "replace"):
-                try:
-                    self._memory_manager.on_memory_write(
-                        function_args.get("action", ""),
-                        target,
-                        function_args.get("content", ""),
-                    )
-                except Exception:
-                    pass
-            return result
+            return self._handle_builtin_memory_tool(function_args)
         elif self._memory_manager and self._memory_manager.has_tool(function_name):
-            return self._memory_manager.handle_tool_call(function_name, function_args)
+            return self._handle_provider_memory_tool(function_name, function_args)
         elif function_name == "clarify":
             from tools.clarify_tool import clarify_tool as _clarify_tool
             return _clarify_tool(
@@ -5647,6 +5673,7 @@ class AIAgent:
                 goal=function_args.get("goal"),
                 context=function_args.get("context"),
                 toolsets=function_args.get("toolsets"),
+                profile=function_args.get("profile"),
                 tasks=function_args.get("tasks"),
                 max_iterations=function_args.get("max_iterations"),
                 parent_agent=self,
@@ -5969,15 +5996,7 @@ class AIAgent:
                 if self.quiet_mode:
                     self._vprint(f"  {_get_cute_tool_message_impl('session_search', function_args, tool_duration, result=function_result)}")
             elif function_name == "memory":
-                target = function_args.get("target", "memory")
-                from tools.memory_tool import memory_tool as _memory_tool
-                function_result = _memory_tool(
-                    action=function_args.get("action"),
-                    target=target,
-                    content=function_args.get("content"),
-                    old_text=function_args.get("old_text"),
-                    store=self._memory_store,
-                )
+                function_result = self._handle_builtin_memory_tool(function_args)
                 tool_duration = time.time() - tool_start_time
                 if self.quiet_mode:
                     self._vprint(f"  {_get_cute_tool_message_impl('memory', function_args, tool_duration, result=function_result)}")
@@ -6011,6 +6030,7 @@ class AIAgent:
                         goal=function_args.get("goal"),
                         context=function_args.get("context"),
                         toolsets=function_args.get("toolsets"),
+                        profile=function_args.get("profile"),
                         tasks=tasks_arg,
                         max_iterations=function_args.get("max_iterations"),
                         parent_agent=self,
@@ -6036,7 +6056,7 @@ class AIAgent:
                     spinner.start()
                 _mem_result = None
                 try:
-                    function_result = self._memory_manager.handle_tool_call(function_name, function_args)
+                    function_result = self._handle_provider_memory_tool(function_name, function_args)
                     _mem_result = function_result
                 except Exception as tool_error:
                     function_result = json.dumps({"error": f"Memory tool '{function_name}' failed: {tool_error}"})
