@@ -199,6 +199,23 @@ def load_cli_config() -> Dict[str, Any]:
                 "hype": "YOOO LET'S GOOOO!!! I am SO PUMPED to help you today! Every question is AMAZING and we're gonna CRUSH IT together! This is gonna be LEGENDARY! ARE YOU READY?! LET'S DO THIS!",
             },
         },
+        "delegation": {
+            "background_subagents": {
+                "enabled": True,
+                "max_per_session": 3,
+                "max_global": 8,
+                "idle_timeout_seconds": 900,
+                "max_lifetime_seconds": 7200,
+                "default_agent_kind": "opencode",
+                "agents": {
+                    "opencode": {
+                        "command": "opencode",
+                        "args": ["acp"],
+                        "cwd_mode": "session",
+                    },
+                },
+            },
+        },
 
         "display": {
             "compact": False,

@@ -49,6 +49,12 @@ class TestAgentLoopTools:
         assert "memory" in _AGENT_LOOP_TOOLS
         assert "session_search" in _AGENT_LOOP_TOOLS
         assert "delegate_task" in _AGENT_LOOP_TOOLS
+        assert "spawn_background_subagent" in _AGENT_LOOP_TOOLS
+        assert "list_background_subagents" in _AGENT_LOOP_TOOLS
+        assert "send_background_subagent" in _AGENT_LOOP_TOOLS
+        assert "poll_background_subagent" in _AGENT_LOOP_TOOLS
+        assert "get_background_subagent_status" in _AGENT_LOOP_TOOLS
+        assert "stop_background_subagent" in _AGENT_LOOP_TOOLS
 
     def test_no_regular_tools_in_set(self):
         assert "web_search" not in _AGENT_LOOP_TOOLS

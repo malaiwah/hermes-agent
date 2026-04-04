@@ -120,6 +120,85 @@ _SECURITY_ARGS = [
 _storage_opt_ok: Optional[bool] = None  # cached result across instances
 
 
+class PersistentDockerExecSession:
+    """Long-lived interactive `docker exec -i` session."""
+
+    def __init__(self, process: subprocess.Popen[str]):
+        self._process = process
+        self._reader_started = False
+        self._reader_lock = threading.Lock()
+        self._write_lock = threading.Lock()
+
+    @property
+    def pid(self) -> int | None:
+        return getattr(self._process, "pid", None)
+
+    def write_line(self, payload: str) -> None:
+        if self._process.stdin is None:
+            raise RuntimeError("Persistent docker exec stdin is not available.")
+        with self._write_lock:
+            self._process.stdin.write(payload + "\n")
+            self._process.stdin.flush()
+
+    def read_loop(
+        self,
+        *,
+        stdout_handler=None,
+        stderr_handler=None,
+        exit_handler=None,
+    ) -> None:
+        with self._reader_lock:
+            if self._reader_started:
+                return
+            self._reader_started = True
+
+        def _drain_stdout():
+            if self._process.stdout is None:
+                return
+            try:
+                for line in self._process.stdout:
+                    if stdout_handler:
+                        stdout_handler(line.rstrip("\n"))
+            except Exception:
+                logger.debug("Persistent docker exec stdout reader crashed", exc_info=True)
+
+        def _drain_stderr():
+            if self._process.stderr is None:
+                return
+            try:
+                for line in self._process.stderr:
+                    if stderr_handler:
+                        stderr_handler(line.rstrip("\n"))
+            except Exception:
+                logger.debug("Persistent docker exec stderr reader crashed", exc_info=True)
+
+        def _wait_for_exit():
+            try:
+                self._process.wait()
+            finally:
+                if exit_handler:
+                    exit_handler(self._process.returncode)
+
+        threading.Thread(target=_drain_stdout, daemon=True).start()
+        threading.Thread(target=_drain_stderr, daemon=True).start()
+        threading.Thread(target=_wait_for_exit, daemon=True).start()
+
+    def is_session_alive(self) -> bool:
+        return self._process.poll() is None
+
+    def terminate_session(self) -> None:
+        if self._process.poll() is not None:
+            return
+        try:
+            self._process.terminate()
+            self._process.wait(timeout=2)
+        except Exception:
+            try:
+                self._process.kill()
+            except Exception:
+                pass
+
+
 def _ensure_docker_available() -> None:
     """Best-effort check that the docker CLI is available before use.
 
@@ -523,6 +602,49 @@ class DockerEnvironment(BaseEnvironment):
             return {"output": "".join(_output_chunks), "returncode": proc.returncode}
         except Exception as e:
             return {"output": f"Docker execution error: {e}", "returncode": 1}
+
+    def start_persistent_exec(
+        self,
+        *,
+        cwd: str = "",
+        command: list[str] | None = None,
+        env: dict[str, str] | None = None,
+    ) -> PersistentDockerExecSession:
+        """Start a long-lived interactive docker exec session."""
+        assert self._container_id, "Container not started"
+        work_dir = cwd or self.cwd
+
+        cmd = [self._docker_exe, "exec", "-i", "-w", work_dir]
+        forward_keys = set(self._forward_env)
+        try:
+            from tools.env_passthrough import get_all_passthrough
+
+            forward_keys |= get_all_passthrough()
+        except Exception:
+            pass
+        hermes_env = _load_hermes_env_vars() if forward_keys else {}
+        for key in sorted(forward_keys):
+            value = os.getenv(key)
+            if value is None:
+                value = hermes_env.get(key)
+            if value is not None:
+                cmd.extend(["-e", f"{key}={value}"])
+        for key, value in sorted((env or {}).items()):
+            if value is not None:
+                cmd.extend(["-e", f"{key}={value}"])
+
+        cmd.append(self._container_id)
+        cmd.extend(list(command or ["bash"]))
+
+        process = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        return PersistentDockerExecSession(process)
 
     def cleanup(self):
         """Stop and remove the container. Bind-mount dirs persist if persistent=True."""

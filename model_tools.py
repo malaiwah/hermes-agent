@@ -154,6 +154,7 @@ def _discover_tools():
         "tools.clarify_tool",
         "tools.code_execution_tool",
         "tools.delegate_tool",
+        "tools.background_subagent_tool",
         "tools.process_registry",
         "tools.send_message_tool",
         # "tools.honcho_tools",  # Removed — Honcho is now a memory provider plugin
@@ -361,7 +362,18 @@ def get_tool_definitions(
 # because they need agent-level state (TodoStore, MemoryStore, etc.).
 # The registry still holds their schemas; dispatch just returns a stub error
 # so if something slips through, the LLM sees a sensible message.
-_AGENT_LOOP_TOOLS = {"todo", "memory", "session_search", "delegate_task"}
+_AGENT_LOOP_TOOLS = {
+    "todo",
+    "memory",
+    "session_search",
+    "delegate_task",
+    "spawn_background_subagent",
+    "list_background_subagents",
+    "send_background_subagent",
+    "poll_background_subagent",
+    "get_background_subagent_status",
+    "stop_background_subagent",
+}
 _READ_SEARCH_TOOLS = {"read_file", "search_files"}
 
 

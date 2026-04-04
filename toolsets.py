@@ -56,6 +56,9 @@ _HERMES_CORE_TOOLS = [
     "clarify",
     # Code execution + delegation
     "execute_code", "delegate_task",
+    "spawn_background_subagent", "list_background_subagents",
+    "send_background_subagent", "poll_background_subagent",
+    "get_background_subagent_status", "stop_background_subagent",
     # Cronjob management
     "cronjob",
     # Cross-platform messaging (gated on gateway running via check_fn)
@@ -190,7 +193,15 @@ TOOLSETS = {
     
     "delegation": {
         "description": "Spawn subagents with isolated context for complex subtasks",
-        "tools": ["delegate_task"],
+        "tools": [
+            "delegate_task",
+            "spawn_background_subagent",
+            "list_background_subagents",
+            "send_background_subagent",
+            "poll_background_subagent",
+            "get_background_subagent_status",
+            "stop_background_subagent",
+        ],
         "includes": []
     },
 
@@ -240,6 +251,9 @@ TOOLSETS = {
             "todo", "memory",
             "session_search",
             "execute_code", "delegate_task",
+            "spawn_background_subagent", "list_background_subagents",
+            "send_background_subagent", "poll_background_subagent",
+            "get_background_subagent_status", "stop_background_subagent",
         ],
         "includes": []
     },
@@ -270,6 +284,9 @@ TOOLSETS = {
             "session_search",
             # Code execution + delegation
             "execute_code", "delegate_task",
+            "spawn_background_subagent", "list_background_subagents",
+            "send_background_subagent", "poll_background_subagent",
+            "get_background_subagent_status", "stop_background_subagent",
             # Cronjob management
             "cronjob",
             # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)

@@ -264,6 +264,53 @@ def test_execute_uses_hermes_dotenv_for_allowlisted_env(monkeypatch):
     assert "GITHUB_TOKEN=value_from_dotenv" in popen_calls[0]
 
 
+def test_start_persistent_exec_builds_interactive_docker_exec(monkeypatch):
+    env = _make_execute_only_env(["OPENAI_API_KEY"])
+    popen_calls = []
+
+    class _FakePersistentPopen(_FakePopen):
+        def __init__(self, cmd, **kwargs):
+            super().__init__(cmd, **kwargs)
+            self.stdin = StringIO()
+            self.stdout = StringIO("")
+            self.stderr = StringIO("")
+            self.pid = 1234
+            self.returncode = None
+
+        def wait(self, timeout=None):
+            self.returncode = 0
+            return 0
+
+        def terminate(self):
+            self.returncode = 0
+
+        def kill(self):
+            self.returncode = -9
+
+    def _fake_popen(cmd, **kwargs):
+        popen_calls.append((cmd, kwargs))
+        return _FakePersistentPopen(cmd, **kwargs)
+
+    monkeypatch.setenv("OPENAI_API_KEY", "env-value")
+    monkeypatch.setattr(docker_env.subprocess, "Popen", _fake_popen)
+
+    session = env.start_persistent_exec(
+        cwd="/workspace",
+        command=["opencode", "acp"],
+        env={"HERMES_FOO": "bar"},
+    )
+
+    assert session.pid == 1234
+    cmd, kwargs = popen_calls[0]
+    assert cmd[:5] == ["/usr/bin/docker", "exec", "-i", "-w", "/workspace"]
+    assert "-e" in cmd
+    assert "OPENAI_API_KEY=env-value" in cmd
+    assert "HERMES_FOO=bar" in cmd
+    assert cmd[-3:] == ["test-container", "opencode", "acp"]
+    assert kwargs["stdin"] == subprocess.PIPE
+    assert kwargs["stdout"] == subprocess.PIPE
+    assert kwargs["stderr"] == subprocess.PIPE
+
 def test_execute_prefers_shell_env_over_hermes_dotenv(monkeypatch):
     env = _make_execute_only_env(["GITHUB_TOKEN"])
     popen_calls = []

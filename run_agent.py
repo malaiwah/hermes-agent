@@ -5631,6 +5631,69 @@ class AIAgent:
             })
         return self._memory_manager.handle_tool_call(function_name, function_args)
 
+    def _handle_background_subagent_tool(self, function_name: str, function_args: dict) -> str:
+        from agent.background_subagents import get_background_subagent_manager
+
+        manager = get_background_subagent_manager()
+        owner_session_id = str(self.session_id or "").strip()
+        if not owner_session_id:
+            return json.dumps({
+                "success": False,
+                "error": "Background subagents require a parent session_id.",
+            })
+
+        if function_name == "spawn_background_subagent":
+            result = manager.spawn_subagent(
+                owner_session_id=owner_session_id,
+                purpose=function_args.get("purpose", ""),
+                initial_task=function_args.get("initial_task", ""),
+                cwd=function_args.get("cwd", ""),
+                agent_kind=function_args.get("agent_kind"),
+            )
+        elif function_name == "list_background_subagents":
+            result = manager.list_subagents(owner_session_id=owner_session_id)
+        elif function_name == "send_background_subagent":
+            result = manager.send_message(
+                owner_session_id=owner_session_id,
+                subagent_id=function_args.get("id", ""),
+                message=function_args.get("message", ""),
+            )
+        elif function_name == "poll_background_subagent":
+            result = manager.poll_subagent(
+                owner_session_id=owner_session_id,
+                subagent_id=function_args.get("id", ""),
+                since_seq=function_args.get("since_seq"),
+            )
+        elif function_name == "get_background_subagent_status":
+            result = manager.get_status(
+                owner_session_id=owner_session_id,
+                subagent_id=function_args.get("id", ""),
+            )
+        elif function_name == "stop_background_subagent":
+            result = manager.stop_subagent(
+                owner_session_id=owner_session_id,
+                subagent_id=function_args.get("id", ""),
+                reason=function_args.get("reason", ""),
+            )
+        else:
+            result = {
+                "success": False,
+                "error": f"Unknown background subagent tool: {function_name}",
+            }
+        return json.dumps(result)
+
+    def _build_background_subagent_context(self) -> str:
+        owner_session_id = str(self.session_id or "").strip()
+        if not owner_session_id:
+            return ""
+        try:
+            from agent.background_subagents import get_background_subagent_manager
+
+            return get_background_subagent_manager().render_turn_context(owner_session_id)
+        except Exception:
+            logger.debug("Failed to render background subagent context", exc_info=True)
+            return ""
+
     def _invoke_tool(self, function_name: str, function_args: dict, effective_task_id: str) -> str:
         """Invoke a single tool and return the result string. No display logic.
 
@@ -5678,6 +5741,15 @@ class AIAgent:
                 max_iterations=function_args.get("max_iterations"),
                 parent_agent=self,
             )
+        elif function_name in {
+            "spawn_background_subagent",
+            "list_background_subagents",
+            "send_background_subagent",
+            "poll_background_subagent",
+            "get_background_subagent_status",
+            "stop_background_subagent",
+        }:
+            return self._handle_background_subagent_tool(function_name, function_args)
         else:
             return handle_function_call(
                 function_name, function_args, effective_task_id,
@@ -6044,6 +6116,18 @@ class AIAgent:
                         spinner.stop(cute_msg)
                     elif self.quiet_mode:
                         self._vprint(f"  {cute_msg}")
+            elif function_name in {
+                "spawn_background_subagent",
+                "list_background_subagents",
+                "send_background_subagent",
+                "poll_background_subagent",
+                "get_background_subagent_status",
+                "stop_background_subagent",
+            }:
+                function_result = self._handle_background_subagent_tool(function_name, function_args)
+                tool_duration = time.time() - tool_start_time
+                if self.quiet_mode:
+                    self._vprint(f"  {_get_cute_tool_message_impl(function_name, function_args, tool_duration, result=function_result)}")
             elif self._memory_manager and self._memory_manager.has_tool(function_name):
                 # Memory provider tools (hindsight_retain, honcho_search, etc.)
                 # These are not in the tool registry — route through MemoryManager.
@@ -6279,6 +6363,9 @@ class AIAgent:
             effective_system = self._cached_system_prompt or ""
             if self.ephemeral_system_prompt:
                 effective_system = (effective_system + "\n\n" + self.ephemeral_system_prompt).strip()
+            background_context = self._build_background_subagent_context()
+            if background_context:
+                effective_system = (effective_system + "\n\n" + background_context).strip()
             if effective_system:
                 api_messages = [{"role": "system", "content": effective_system}] + api_messages
             if self.prefill_messages:
@@ -6791,6 +6878,9 @@ class AIAgent:
             effective_system = active_system_prompt or ""
             if self.ephemeral_system_prompt:
                 effective_system = (effective_system + "\n\n" + self.ephemeral_system_prompt).strip()
+            background_context = self._build_background_subagent_context()
+            if background_context:
+                effective_system = (effective_system + "\n\n" + background_context).strip()
             # Plugin context from pre_llm_call hooks — ephemeral, not cached.
             if _plugin_turn_context:
                 effective_system = (effective_system + "\n\n" + _plugin_turn_context).strip()

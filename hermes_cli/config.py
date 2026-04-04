@@ -448,6 +448,21 @@ DEFAULT_CONFIG = {
         "profiles": {},    # optional named child capability profiles (toolsets, memory, terminal)
         "max_iterations": 50,  # per-subagent iteration cap (each subagent gets its own budget,
                                # independent of the parent's max_iterations)
+        "background_subagents": {
+            "enabled": True,
+            "max_per_session": 3,
+            "max_global": 8,
+            "idle_timeout_seconds": 900,
+            "max_lifetime_seconds": 7200,
+            "default_agent_kind": "opencode",
+            "agents": {
+                "opencode": {
+                    "command": "opencode",
+                    "args": ["acp"],
+                    "cwd_mode": "session",
+                },
+            },
+        },
     },
 
     # Ephemeral prefill messages file — JSON list of {role, content} dicts

@@ -1472,6 +1472,23 @@ class TestRunConversation:
         assert result["final_response"] == "Final answer"
         assert result["completed"] is True
 
+    def test_background_subagent_context_is_injected_ephemerally(self, agent):
+        self._setup_agent(agent)
+        resp = _mock_response(content="Final answer", finish_reason="stop")
+        agent.client.chat.completions.create.return_value = resp
+        with (
+            patch.object(agent, "_build_background_subagent_context", return_value="BG roster"),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            agent.run_conversation("hello")
+
+        kwargs = agent.client.chat.completions.create.call_args.kwargs
+        messages = kwargs["messages"]
+        assert messages[0]["role"] == "system"
+        assert "BG roster" in messages[0]["content"]
+
     def test_tool_calls_then_stop(self, agent):
         self._setup_agent(agent)
         tc = _mock_tool_call(name="web_search", arguments="{}", call_id="c1")

@@ -43,6 +43,12 @@ TOOL_KIND_MAP: Dict[str, ToolKind] = {
     "browser_get_images": "read",
     # Agent internals
     "delegate_task": "execute",
+    "spawn_background_subagent": "execute",
+    "list_background_subagents": "read",
+    "send_background_subagent": "execute",
+    "poll_background_subagent": "read",
+    "get_background_subagent_status": "read",
+    "stop_background_subagent": "execute",
     "vision_analyze": "read",
     "image_generate": "execute",
     "text_to_speech": "execute",
