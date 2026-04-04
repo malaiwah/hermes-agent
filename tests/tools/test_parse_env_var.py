@@ -10,6 +10,7 @@ import sys
 import tools.terminal_tool  # noqa: F401 -- ensure module is loaded
 _tt_mod = sys.modules["tools.terminal_tool"]
 from tools.terminal_tool import _parse_env_var
+import tools.file_tools as _file_tools_mod
 
 
 class TestParseEnvVar:
@@ -105,6 +106,63 @@ class TestParseEnvVar:
             _tt_mod.clear_task_env_overrides("workspace-override-test")
 
         assert result["exit_code"] == 0
+        assert captured["cwd"] == "/workspace"
+        assert captured["host_cwd"] == str(tmp_path)
+        assert captured["container_config"]["docker_volumes"] == [f"{tmp_path}:/workspace:ro"]
+
+    def test_file_tools_apply_task_specific_docker_workspace_overrides(self, monkeypatch, tmp_path):
+        captured = {}
+        fake_env = object()
+
+        monkeypatch.setattr(_file_tools_mod, "_file_ops_cache", {})
+        monkeypatch.setattr(_tt_mod, "_active_environments", {})
+        monkeypatch.setattr(_tt_mod, "_last_activity", {})
+        monkeypatch.setattr(_tt_mod, "_start_cleanup_thread", lambda: None)
+        monkeypatch.setattr(
+            _tt_mod,
+            "_get_env_config",
+            lambda: {
+                "env_type": "docker",
+                "docker_image": "python:3.11",
+                "docker_volumes": [],
+                "docker_mount_cwd_to_workspace": False,
+                "docker_forward_env": [],
+                "docker_network": None,
+                "cwd": "/root",
+                "host_cwd": None,
+                "timeout": 180,
+                "container_cpu": 1,
+                "container_memory": 5120,
+                "container_disk": 51200,
+                "container_persistent": True,
+                "modal_mode": "auto",
+            },
+        )
+
+        def _fake_create_environment(**kwargs):
+            captured.update(kwargs)
+            return fake_env
+
+        monkeypatch.setattr(_tt_mod, "_create_environment", _fake_create_environment)
+        monkeypatch.setattr(_file_tools_mod, "ShellFileOperations", lambda env: SimpleNamespace(env=env))
+
+        _tt_mod.register_task_env_overrides(
+            "file-workspace-override-test",
+            {
+                "cwd": "/workspace",
+                "host_cwd": str(tmp_path),
+                "docker_mount_cwd_to_workspace": False,
+                "docker_volumes": [f"{tmp_path}:/workspace:ro"],
+            },
+        )
+
+        try:
+            file_ops = _file_tools_mod._get_file_ops("file-workspace-override-test")
+        finally:
+            _tt_mod.clear_task_env_overrides("file-workspace-override-test")
+            _file_tools_mod.clear_file_ops_cache("file-workspace-override-test")
+
+        assert file_ops.env is fake_env
         assert captured["cwd"] == "/workspace"
         assert captured["host_cwd"] == str(tmp_path)
         assert captured["container_config"]["docker_volumes"] == [f"{tmp_path}:/workspace:ro"]

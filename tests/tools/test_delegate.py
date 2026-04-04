@@ -259,6 +259,12 @@ class TestDelegateTask(unittest.TestCase):
             "TERMINAL_CWD": "/tmp/delegate-workspace",
         }, clear=False), \
             patch("run_agent.AIAgent") as MockAgent, \
+            patch("tools.terminal_tool._get_env_config", return_value={
+                "env_type": "docker",
+                "cwd": "/workspace",
+                "host_cwd": "/tmp/delegate-workspace",
+                "docker_volumes": [],
+            }), \
             patch("tools.terminal_tool.register_task_env_overrides") as mock_register, \
             patch("tools.terminal_tool.clear_task_env_overrides") as mock_clear, \
             patch("pathlib.Path.exists", return_value=True), \
@@ -292,6 +298,72 @@ class TestDelegateTask(unittest.TestCase):
             assert registered_overrides["cwd"] == "/workspace"
             assert registered_overrides["docker_volumes"] == ["/private/tmp/delegate-workspace:/workspace:ro"]
             mock_clear.assert_called_once_with("child-session")
+
+    def test_temp_workspace_is_cleaned_after_child_finishes(self):
+        parent = _make_mock_parent(depth=0)
+
+        with patch.dict(os.environ, {
+            "TERMINAL_ENV": "docker",
+            "TERMINAL_CWD": "/tmp/delegate-temp-root",
+        }, clear=False), \
+            patch("run_agent.AIAgent") as MockAgent, \
+            patch("tools.terminal_tool.register_task_env_overrides"), \
+            patch("tools.terminal_tool.clear_task_env_overrides"), \
+            patch("pathlib.Path.exists", return_value=True), \
+            patch("pathlib.Path.is_dir", return_value=True), \
+            patch("tools.subagent_workspace.resolve_parent_workspace_root") as mock_root:
+            from pathlib import Path
+            import tempfile
+
+            real_root = Path(tempfile.mkdtemp(prefix="delegate-temp-root-")).resolve()
+            mock_root.return_value = real_root
+            mock_child = MagicMock()
+            mock_child.session_id = "child-session"
+            mock_child.run_conversation.return_value = {
+                "final_response": "done",
+                "completed": True,
+                "api_calls": 1,
+                "messages": [],
+            }
+            MockAgent.return_value = mock_child
+
+            try:
+                result = json.loads(
+                    delegate_task(
+                        goal="Use a temp workspace",
+                        workspace_visibility="temp_rw",
+                        parent_agent=parent,
+                    )
+                )
+                assert result["results"][0]["status"] == "completed"
+                temp_base = real_root / ".hermes-subagents"
+                assert not any(temp_base.iterdir()) if temp_base.exists() else True
+            finally:
+                import shutil
+                shutil.rmtree(real_root, ignore_errors=True)
+
+    def test_invalid_workspace_config_does_not_leave_active_children(self):
+        parent = _make_mock_parent(depth=0)
+
+        with patch("run_agent.AIAgent") as MockAgent, \
+            patch("tools.subagent_workspace.resolve_parent_workspace_root"), \
+            patch("tools.subagent_workspace.resolve_terminal_backend", return_value="docker"), \
+            patch("tools.subagent_workspace.build_workspace_overrides", side_effect=ValueError("bad mapping")):
+            mock_child = MagicMock()
+            mock_child.session_id = "child-session"
+            MockAgent.return_value = mock_child
+
+            result = json.loads(
+                delegate_task(
+                    goal="Inspect the repo",
+                    workspace_visibility="mapped",
+                    workspace_mappings=[{"source": "../escape"}],
+                    parent_agent=parent,
+                )
+            )
+
+            assert "error" in result
+            assert parent._active_children == []
 
 
 class TestToolNamePreservation(unittest.TestCase):

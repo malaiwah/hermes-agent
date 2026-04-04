@@ -91,16 +91,22 @@ def _configure_child_workspace(child, task_index: int, task_cfg: Dict[str, Any],
     if (visibility in (None, "", "inherit")) and mappings:
         visibility = "mapped"
 
+    backend = resolve_terminal_backend()
+    workspace_root = None
+    if visibility not in (None, "", "inherit") or mappings:
+        workspace_root = resolve_parent_workspace_root(task_cfg.get("_parent_task_id"))
+
     plan = build_workspace_overrides(
         visibility=visibility,
         mappings=mappings,
-        workspace_root=resolve_parent_workspace_root(),
+        workspace_root=workspace_root,
         child_token=f"subagent-{task_index}-{getattr(child, 'session_id', '') or task_index}",
-        backend=resolve_terminal_backend(),
+        backend=backend,
     )
 
     child._delegate_task_id = getattr(child, "session_id", None)
     child._delegate_task_env_overrides = plan.get("task_env_overrides")
+    child._delegate_workspace_cleanup_paths = plan.get("cleanup_paths", [])
     prompt_note = plan.get("prompt_note", "").strip()
     if prompt_note:
         child.ephemeral_system_prompt = _build_child_system_prompt(
@@ -108,6 +114,41 @@ def _configure_child_workspace(child, task_index: int, task_cfg: Dict[str, Any],
             task_cfg.get("context"),
             prompt_note,
         )
+
+
+def _register_active_child(parent_agent, child) -> None:
+    if hasattr(parent_agent, '_active_children'):
+        lock = getattr(parent_agent, '_active_children_lock', None)
+        if lock:
+            with lock:
+                parent_agent._active_children.append(child)
+        else:
+            parent_agent._active_children.append(child)
+
+
+def _unregister_active_child(parent_agent, child) -> None:
+    if hasattr(parent_agent, '_active_children'):
+        try:
+            lock = getattr(parent_agent, '_active_children_lock', None)
+            if lock:
+                with lock:
+                    parent_agent._active_children.remove(child)
+            else:
+                parent_agent._active_children.remove(child)
+        except (ValueError, UnboundLocalError) as e:
+            logger.debug("Could not remove child from active_children: %s", e)
+
+
+def _cleanup_child_workspace(child) -> None:
+    paths = getattr(child, "_delegate_workspace_cleanup_paths", None) or []
+    if not paths:
+        return
+    try:
+        from tools.subagent_workspace import cleanup_workspace_paths
+
+        cleanup_workspace_paths(paths)
+    except Exception:
+        logger.debug("Failed to cleanup delegated temp workspace paths", exc_info=True)
 
 
 def _strip_blocked_tools(toolsets: List[str]) -> List[str]:
@@ -280,15 +321,6 @@ def _build_child_agent(
     # Set delegation depth so children can't spawn grandchildren
     child._delegate_depth = getattr(parent_agent, '_delegate_depth', 0) + 1
 
-    # Register child for interrupt propagation
-    if hasattr(parent_agent, '_active_children'):
-        lock = getattr(parent_agent, '_active_children_lock', None)
-        if lock:
-            with lock:
-                parent_agent._active_children.append(child)
-        else:
-            parent_agent._active_children.append(child)
-
     return child
 
 def _run_single_child(
@@ -439,6 +471,7 @@ def _run_single_child(
                 clear_task_env_overrides(child_task_id)
             except Exception:
                 logger.debug("Failed to clear delegated task env overrides", exc_info=True)
+        _cleanup_child_workspace(child)
 
         # Restore the parent's tool names so the process-global is correct
         # for any subsequent execute_code calls or other consumers.
@@ -449,16 +482,7 @@ def _run_single_child(
             model_tools._last_resolved_tool_names = list(saved_tool_names)
 
         # Unregister child from interrupt propagation
-        if hasattr(parent_agent, '_active_children'):
-            try:
-                lock = getattr(parent_agent, '_active_children_lock', None)
-                if lock:
-                    with lock:
-                        parent_agent._active_children.remove(child)
-                else:
-                    parent_agent._active_children.remove(child)
-            except (ValueError, UnboundLocalError) as e:
-                logger.debug("Could not remove child from active_children: %s", e)
+        _unregister_active_child(parent_agent, child)
 
 def delegate_task(
     goal: Optional[str] = None,
@@ -466,6 +490,7 @@ def delegate_task(
     toolsets: Optional[List[str]] = None,
     workspace_visibility: Optional[str] = None,
     workspace_mappings: Optional[List[Dict[str, Any]]] = None,
+    parent_task_id: Optional[str] = None,
     tasks: Optional[List[Dict[str, Any]]] = None,
     max_iterations: Optional[int] = None,
     parent_agent=None,
@@ -517,6 +542,7 @@ def delegate_task(
             "toolsets": toolsets,
             "workspace_visibility": workspace_visibility,
             "workspace_mappings": workspace_mappings,
+            "_parent_task_id": parent_task_id,
         }]
     else:
         return json.dumps({"error": "Provide either 'goal' (single task) or 'tasks' (batch)."})
@@ -528,6 +554,7 @@ def delegate_task(
     for i, task in enumerate(task_list):
         if not task.get("goal", "").strip():
             return json.dumps({"error": f"Task {i} is missing a 'goal'."})
+        task.setdefault("_parent_task_id", parent_task_id)
 
     overall_start = time.monotonic()
     results = []
@@ -561,10 +588,14 @@ def delegate_task(
             if "workspace_mappings" not in t and workspace_mappings is not None:
                 t["workspace_mappings"] = workspace_mappings
             _configure_child_workspace(child, i, t, cfg)
+            _register_active_child(parent_agent, child)
             # Override with correct parent tool names (before child construction mutated global)
             child._delegate_saved_tool_names = _parent_tool_names
             children.append((i, t, child))
     except ValueError as exc:
+        for _, _, child in children:
+            _cleanup_child_workspace(child)
+            _unregister_active_child(parent_agent, child)
         return json.dumps({"error": str(exc)})
     finally:
         # Authoritative restore: reset global to parent's tool names after all children built
