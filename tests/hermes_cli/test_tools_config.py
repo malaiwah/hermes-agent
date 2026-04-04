@@ -3,6 +3,7 @@
 from unittest.mock import patch
 
 from hermes_cli.tools_config import (
+    CONFIGURABLE_TOOLSETS,
     _configure_provider,
     _get_platform_tools,
     _platform_toolset_summary,
@@ -28,6 +29,11 @@ def test_get_platform_tools_preserves_explicit_empty_selection():
     enabled = _get_platform_tools(config, "cli")
 
     assert enabled == set()
+
+
+def test_configurable_toolsets_include_user_updates():
+    keys = [ts_key for ts_key, _, _ in CONFIGURABLE_TOOLSETS]
+    assert "user_updates" in keys
 
 
 def test_platform_toolset_summary_uses_explicit_platform_list():

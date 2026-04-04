@@ -2313,7 +2313,7 @@ class HermesCLI:
             self._show_status()
         else:
             # Get tools for display
-            tools = get_tool_definitions(enabled_toolsets=self.enabled_toolsets, quiet_mode=True)
+            tools = get_tool_definitions(enabled_toolsets=self.enabled_toolsets, quiet_mode=True, platform="cli")
             
             # Get terminal working directory (where commands will execute)
             cwd = os.getenv("TERMINAL_CWD", os.getcwd())
@@ -2818,7 +2818,7 @@ class HermesCLI:
     def _show_status(self):
         """Show current status bar."""
         # Get tool count
-        tools = get_tool_definitions(enabled_toolsets=self.enabled_toolsets, quiet_mode=True)
+        tools = get_tool_definitions(enabled_toolsets=self.enabled_toolsets, quiet_mode=True, platform="cli")
         tool_count = len(tools) if tools else 0
         
         # Format model name (shorten if needed)
@@ -2882,7 +2882,7 @@ class HermesCLI:
     
     def show_tools(self):
         """Display available tools with kawaii ASCII art."""
-        tools = get_tool_definitions(enabled_toolsets=self.enabled_toolsets, quiet_mode=True)
+        tools = get_tool_definitions(enabled_toolsets=self.enabled_toolsets, quiet_mode=True, platform="cli")
         
         if not tools:
             print("(;_;) No tools available")
@@ -4061,7 +4061,7 @@ class HermesCLI:
                 if self.compact or term_w < 80:
                     cc.print(_build_compact_banner())
                 else:
-                    tools = get_tool_definitions(enabled_toolsets=self.enabled_toolsets, quiet_mode=True)
+                    tools = get_tool_definitions(enabled_toolsets=self.enabled_toolsets, quiet_mode=True, platform="cli")
                     cwd = os.getenv("TERMINAL_CWD", os.getcwd())
                     ctx_len = None
                     if hasattr(self, 'agent') and self.agent and hasattr(self.agent, 'context_compressor'):
@@ -5216,6 +5216,7 @@ class HermesCLI:
                     enabled_toolsets=self.agent.enabled_toolsets
                     if hasattr(self.agent, "enabled_toolsets") else None,
                     quiet_mode=True,
+                    platform="cli",
                 )
                 self.agent.valid_tool_names = {
                     tool["function"]["name"] for tool in self.agent.tools

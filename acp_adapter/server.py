@@ -142,6 +142,7 @@ class HermesACPAgent(acp.Agent):
                 enabled_toolsets=enabled_toolsets,
                 disabled_toolsets=disabled_toolsets,
                 quiet_mode=True,
+                platform="acp",
             )
             state.agent.valid_tool_names = {
                 tool["function"]["name"] for tool in state.agent.tools or []
@@ -495,7 +496,7 @@ class HermesACPAgent(acp.Agent):
         try:
             from model_tools import get_tool_definitions
             toolsets = getattr(state.agent, "enabled_toolsets", None) or ["hermes-acp"]
-            tools = get_tool_definitions(enabled_toolsets=toolsets, quiet_mode=True)
+            tools = get_tool_definitions(enabled_toolsets=toolsets, quiet_mode=True, platform="acp")
             if not tools:
                 return "No tools available."
             lines = [f"Available tools ({len(tools)}):"]

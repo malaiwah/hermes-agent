@@ -1363,6 +1363,27 @@ class TestConcurrentToolExecution:
         assert "error" in result
         assert "not available" in result["error"].lower()
 
+    def test_send_user_message_skips_generic_tool_progress_callback(self, agent):
+        tc = _mock_tool_call(
+            name="send_user_message",
+            arguments='{"message":"I am updating the config now."}',
+            call_id="c1",
+        )
+        mock_msg = _mock_assistant_msg(content="", tool_calls=[tc])
+        messages = []
+        progress_cb = MagicMock()
+        message_cb = MagicMock()
+        agent.tool_progress_callback = progress_cb
+        agent.message_callback = message_cb
+
+        agent._execute_tool_calls_sequential(mock_msg, messages, "task-1")
+
+        progress_cb.assert_not_called()
+        message_cb.assert_called_once_with("I am updating the config now.")
+        assert len(messages) == 1
+        payload = json.loads(messages[0]["content"])
+        assert payload["sent"] is True
+
 
 class TestPathsOverlap:
     """Unit tests for the _paths_overlap helper."""
