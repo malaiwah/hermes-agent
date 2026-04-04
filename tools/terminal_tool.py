@@ -472,9 +472,16 @@ def _get_env_config() -> Dict[str, Any]:
     """Get terminal environment configuration from environment variables."""
     # Default image with Python and Node.js for maximum compatibility
     default_image = "nikolaik/python-nodejs:python3.11-nodejs20"
-    env_type = os.getenv("TERMINAL_ENV", "local")
+    # Load config.yaml terminal block to use as fallback before hardcoded defaults
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config().get("terminal", {})
+    except Exception:
+        cfg = {}
+
+    env_type = os.getenv("TERMINAL_ENV", cfg.get("backend", "local"))
     
-    mount_docker_cwd = os.getenv("TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE", "false").lower() in ("true", "1", "yes")
+    mount_docker_cwd = os.getenv("TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE", str(cfg.get("docker_mount_cwd_to_workspace", "false"))).lower() in ("true", "1", "yes")
 
     # Default cwd: local uses the host's current directory, everything
     # else starts in the user's home (~ resolves to whatever account
@@ -490,7 +497,7 @@ def _get_env_config() -> Dict[str, Any]:
     # If Docker cwd passthrough is explicitly enabled, remap the host path to
     # /workspace and track the original host path separately. Otherwise keep the
     # normal sandbox behavior and discard host paths.
-    cwd = os.getenv("TERMINAL_CWD", default_cwd)
+    cwd = os.getenv("TERMINAL_CWD", cfg.get("cwd", default_cwd))
     host_cwd = None
     host_prefixes = ("/Users/", "/home/", "C:\\", "C:/")
     if env_type == "docker" and mount_docker_cwd:
@@ -515,16 +522,16 @@ def _get_env_config() -> Dict[str, Any]:
     return {
         "env_type": env_type,
         "modal_mode": coerce_modal_mode(os.getenv("TERMINAL_MODAL_MODE", "auto")),
-        "docker_image": os.getenv("TERMINAL_DOCKER_IMAGE", default_image),
-        "docker_forward_env": _parse_env_var("TERMINAL_DOCKER_FORWARD_ENV", "[]", json.loads, "valid JSON"),
-        "singularity_image": os.getenv("TERMINAL_SINGULARITY_IMAGE", f"docker://{default_image}"),
-        "modal_image": os.getenv("TERMINAL_MODAL_IMAGE", default_image),
-        "daytona_image": os.getenv("TERMINAL_DAYTONA_IMAGE", default_image),
+        "docker_image": os.getenv("TERMINAL_DOCKER_IMAGE", cfg.get("docker_image", default_image)),
+        "docker_forward_env": _parse_env_var("TERMINAL_DOCKER_FORWARD_ENV", json.dumps(cfg.get("docker_forward_env", [])), json.loads, "valid JSON"),
+        "singularity_image": os.getenv("TERMINAL_SINGULARITY_IMAGE", cfg.get("singularity_image", f"docker://{default_image}")),
+        "modal_image": os.getenv("TERMINAL_MODAL_IMAGE", cfg.get("modal_image", default_image)),
+        "daytona_image": os.getenv("TERMINAL_DAYTONA_IMAGE", cfg.get("daytona_image", default_image)),
         "cwd": cwd,
         "host_cwd": host_cwd,
         "docker_mount_cwd_to_workspace": mount_docker_cwd,
-        "timeout": _parse_env_var("TERMINAL_TIMEOUT", "180"),
-        "lifetime_seconds": _parse_env_var("TERMINAL_LIFETIME_SECONDS", "300"),
+        "timeout": _parse_env_var("TERMINAL_TIMEOUT", str(cfg.get("timeout", "180"))),
+        "lifetime_seconds": _parse_env_var("TERMINAL_LIFETIME_SECONDS", str(cfg.get("lifetime_seconds", "300"))),
         # SSH-specific config
         "ssh_host": os.getenv("TERMINAL_SSH_HOST", ""),
         "ssh_user": os.getenv("TERMINAL_SSH_USER", ""),
@@ -535,15 +542,15 @@ def _get_env_config() -> Dict[str, Any]:
         # Per-backend env vars override if explicitly set.
         "ssh_persistent": os.getenv(
             "TERMINAL_SSH_PERSISTENT",
-            os.getenv("TERMINAL_PERSISTENT_SHELL", "true"),
+            os.getenv("TERMINAL_PERSISTENT_SHELL", str(cfg.get("persistent_shell", "true"))),
         ).lower() in ("true", "1", "yes"),
         "local_persistent": os.getenv("TERMINAL_LOCAL_PERSISTENT", "false").lower() in ("true", "1", "yes"),
         # Container resource config (applies to docker, singularity, modal, daytona -- ignored for local/ssh)
-        "container_cpu": _parse_env_var("TERMINAL_CONTAINER_CPU", "1", float, "number"),
-        "container_memory": _parse_env_var("TERMINAL_CONTAINER_MEMORY", "5120"),     # MB (default 5GB)
-        "container_disk": _parse_env_var("TERMINAL_CONTAINER_DISK", "51200"),        # MB (default 50GB)
-        "container_persistent": os.getenv("TERMINAL_CONTAINER_PERSISTENT", "true").lower() in ("true", "1", "yes"),
-        "docker_volumes": _parse_env_var("TERMINAL_DOCKER_VOLUMES", "[]", json.loads, "valid JSON"),
+        "container_cpu": _parse_env_var("TERMINAL_CONTAINER_CPU", str(cfg.get("container_cpu", "1")), float, "number"),
+        "container_memory": _parse_env_var("TERMINAL_CONTAINER_MEMORY", str(cfg.get("container_memory", "5120"))),     # MB (default 5GB)
+        "container_disk": _parse_env_var("TERMINAL_CONTAINER_DISK", str(cfg.get("container_disk", "51200"))),        # MB (default 50GB)
+        "container_persistent": os.getenv("TERMINAL_CONTAINER_PERSISTENT", str(cfg.get("container_persistent", "true"))).lower() in ("true", "1", "yes"),
+        "docker_volumes": _parse_env_var("TERMINAL_DOCKER_VOLUMES", json.dumps(cfg.get("docker_volumes", [])), json.loads, "valid JSON"),
         "docker_network": os.getenv("TERMINAL_DOCKER_NETWORK", None),
     }
 
