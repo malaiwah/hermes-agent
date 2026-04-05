@@ -1,6 +1,7 @@
 """Tests for the privileged gateway-local terminal escape hatch."""
 
 import json
+from unittest.mock import patch
 
 import tools.terminal_tool as terminal_tool_module
 
@@ -123,3 +124,31 @@ def test_terminal_requirements_allow_gateway_local_fallback(monkeypatch):
     monkeypatch.setattr(terminal_tool_module, "can_offer_gateway_local", lambda config=None: True)
 
     assert terminal_tool_module.check_terminal_requirements() is True
+
+
+def test_gateway_local_real_guard_wrapper_accepts_extra_warnings(monkeypatch):
+    fake_env = _FakeEnv()
+
+    monkeypatch.setenv("HERMES_GATEWAY_SESSION", "1")
+    monkeypatch.setenv("MESSAGING_CWD", "/srv/gateway-work")
+    monkeypatch.setattr(terminal_tool_module, "_get_env_config", lambda: _config())
+    monkeypatch.setattr(terminal_tool_module, "_start_cleanup_thread", lambda: None)
+    monkeypatch.setattr(terminal_tool_module, "_active_environments", {})
+    monkeypatch.setattr(
+        terminal_tool_module,
+        "_create_environment",
+        lambda **kwargs: fake_env,
+    )
+
+    with patch("tools.approval._get_approval_mode", return_value="off"), \
+         patch("tools.tirith_security.check_command_security", return_value={"action": "allow", "findings": [], "summary": ""}):
+        result = json.loads(
+            terminal_tool_module.terminal_tool(
+                "pwd",
+                gateway_local=True,
+                task_id="task-2",
+            )
+        )
+
+    assert result["error"] is None
+    assert result["execution_scope"] == "gateway_local"
