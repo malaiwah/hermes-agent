@@ -1,10 +1,56 @@
 """Tests for Matrix voice message support (MSC3245)."""
 import io
+import sys
+import types
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
-nio = pytest.importorskip("nio", reason="matrix-nio not installed")
+try:
+    import nio  # type: ignore
+    _USING_FAKE_NIO = False
+except ImportError:
+    nio = types.ModuleType("nio")
+    _USING_FAKE_NIO = True
+
+    class _RoomMessageImage:
+        pass
+
+    class _RoomMessageAudio:
+        pass
+
+    class _RoomMessageVideo:
+        pass
+
+    class _RoomMessageFile:
+        pass
+
+    class _MemoryDownloadResponse:
+        pass
+
+    class _DownloadError:
+        pass
+
+    class _UploadResponse:
+        pass
+
+    class _RoomSendResponse:
+        pass
+
+    nio.RoomMessageImage = _RoomMessageImage
+    nio.RoomMessageAudio = _RoomMessageAudio
+    nio.RoomMessageVideo = _RoomMessageVideo
+    nio.RoomMessageFile = _RoomMessageFile
+    nio.MemoryDownloadResponse = _MemoryDownloadResponse
+    nio.DownloadError = _DownloadError
+    nio.UploadResponse = _UploadResponse
+    nio.RoomSendResponse = _RoomSendResponse
+
+
+@pytest.fixture(autouse=True)
+def _install_fake_nio(monkeypatch):
+    if _USING_FAKE_NIO:
+        monkeypatch.setitem(sys.modules, "nio", nio)
 
 from gateway.platforms.base import MessageType
 
