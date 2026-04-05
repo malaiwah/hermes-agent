@@ -905,8 +905,8 @@ DELEGATE_TASK_SCHEMA = {
         "- Subagents CANNOT call: delegate_task, clarify, memory, send_message, "
         "execute_code.\n"
         "- Each subagent gets its own terminal session (separate working directory and state).\n"
-        "- workspace_visibility defaults to 'inherit'. Use 'full_ro', 'temp_rw', "
-        "or 'mapped' when you need stricter filesystem isolation in Docker sandboxes.\n"
+        "- workspace_visibility defaults to 'inherit'. Use 'full_ro' or 'mapped' "
+        "when you need stricter filesystem isolation in Docker sandboxes.\n"
         "- Results are always returned as an array, one entry per task."
     ),
     "parameters": {
@@ -941,14 +941,12 @@ DELEGATE_TASK_SCHEMA = {
             },
             "workspace_visibility": {
                 "type": "string",
-                "enum": ["inherit", "full_rw", "full_ro", "temp_rw", "mapped"],
+                "enum": ["inherit", "full_rw", "full_ro", "mapped"],
                 "description": (
                     "Filesystem visibility for the child sandbox. "
                     "'inherit' keeps the current backend behavior. "
                     "'full_rw' mounts the full parent workspace at /workspace read-write. "
                     "'full_ro' mounts it read-only. "
-                    "'temp_rw' creates a fresh writable subdirectory inside the parent workspace "
-                    "and mounts only that at /workspace. "
                     "'mapped' exposes only the paths listed in workspace_mappings."
                 ),
             },
@@ -1001,7 +999,7 @@ DELEGATE_TASK_SCHEMA = {
                         },
                         "workspace_visibility": {
                             "type": "string",
-                            "enum": ["inherit", "full_rw", "full_ro", "temp_rw", "mapped"],
+                            "enum": ["inherit", "full_rw", "full_ro", "mapped"],
                             "description": "Workspace visibility for this task's sandbox.",
                         },
                         "workspace_mappings": {

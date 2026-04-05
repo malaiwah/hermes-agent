@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import os
 import posixpath
-import tempfile
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -18,7 +17,6 @@ ALLOWED_WORKSPACE_VISIBILITY = frozenset({
     "inherit",
     "full_rw",
     "full_ro",
-    "temp_rw",
     "mapped",
 })
 
@@ -92,28 +90,6 @@ def build_workspace_overrides(
                 "WORKSPACE VISIBILITY:\n"
                 f"- You can access the parent workspace at /workspace (host root: {workspace_root}).\n"
                 "- The mount is read-only. Copy files elsewhere before editing."
-            ),
-        )
-
-    if mode == "temp_rw":
-        base_dir = workspace_root / ".hermes-subagents"
-        base_dir.mkdir(parents=True, exist_ok=True)
-        temp_dir = Path(
-            tempfile.mkdtemp(
-                prefix=f"{child_token[:24]}-",
-                dir=str(base_dir),
-            )
-        ).resolve()
-        rel_path = temp_dir.relative_to(workspace_root)
-        return _build_mount_override(
-            host_path=temp_dir,
-            container_path="/workspace",
-            read_only=False,
-            prompt_note=(
-                "WORKSPACE VISIBILITY:\n"
-                f"- You only see an isolated writable subworkspace at /workspace.\n"
-                f"- Host path: {rel_path}.\n"
-                "- You cannot see the rest of the parent workspace."
             ),
         )
 

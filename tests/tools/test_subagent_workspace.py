@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import pytest
 
 from tools.subagent_workspace import build_workspace_overrides
@@ -18,22 +16,6 @@ def test_full_ro_mounts_parent_workspace_read_only(tmp_path):
     assert plan["task_env_overrides"]["docker_volumes"] == [f"{tmp_path.resolve()}:/workspace:ro"]
     assert "read-only" in plan["prompt_note"]
 
-
-def test_temp_rw_creates_isolated_subworkspace(tmp_path):
-    plan = build_workspace_overrides(
-        visibility="temp_rw",
-        mappings=None,
-        workspace_root=tmp_path,
-        child_token="child-2",
-        backend="docker",
-    )
-
-    mount = plan["task_env_overrides"]["docker_volumes"][0]
-    host_path = Path(mount.split(":", 1)[0])
-    assert host_path.is_dir()
-    assert host_path.parent == tmp_path / ".hermes-subagents"
-    assert mount.endswith(":/workspace")
-    assert "isolated writable subworkspace" in plan["prompt_note"]
 
 
 def test_mapped_rejects_workspace_escape(tmp_path):
