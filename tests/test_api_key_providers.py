@@ -642,6 +642,7 @@ class TestHasAnyProviderConfigured:
             "agent.anthropic_adapter.is_claude_code_token_valid",
             lambda creds: True,
         )
+        monkeypatch.setattr("hermes_cli.auth.get_auth_status", lambda provider_id: {"logged_in": False})
         from hermes_cli.main import _has_any_provider_configured
         assert _has_any_provider_configured() is False
 
@@ -719,6 +720,7 @@ class TestHasAnyProviderConfigured:
         for var in ("OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
                      "ANTHROPIC_TOKEN", "OPENAI_BASE_URL"):
             monkeypatch.delenv(var, raising=False)
+        monkeypatch.setattr("hermes_cli.auth.get_auth_status", lambda provider_id: {"logged_in": False})
         from hermes_cli.main import _has_any_provider_configured
         assert _has_any_provider_configured() is False
 
