@@ -2,6 +2,13 @@
 # Docker entrypoint: bootstrap config files into the mounted volume, then run hermes.
 set -e
 
+# Show image provenance at startup for traceability
+if [ -f /etc/hermes-release ]; then
+    echo "=== hermes-release ==="
+    cat /etc/hermes-release
+    echo "======================"
+fi
+
 HERMES_HOME="/opt/data"
 INSTALL_DIR="/opt/hermes"
 

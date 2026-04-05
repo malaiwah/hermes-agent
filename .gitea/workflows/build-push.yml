@@ -18,6 +18,10 @@ jobs:
       - name: Build
         run: |
           podman-remote build --network=host \
+            --build-arg GIT_COMMIT=${{ github.sha }} \
+            --build-arg GIT_REF=${{ github.ref_name }} \
+            --build-arg BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+            --build-arg IMAGE_SOURCE=$IMAGE \
             -t $IMAGE:latest \
             -t $IMAGE:${{ github.sha }} \
             .
