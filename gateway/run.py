@@ -4322,21 +4322,19 @@ class GatewayRunner:
         except Exception:
             logger.debug("Failed to update in-memory home channel", exc_info=True)
         
-        # Save to config.yaml
+        # Save to .env
         try:
-            from hermes_cli.config import describe_config_write_failure, save_config_key_result
+            from hermes_cli.config import save_env_value
 
-            result = save_config_key_result(env_key, chat_id, config_path=_hermes_home / "config.yaml")
+            save_env_value(env_key, str(chat_id))
             # Also set in the current environment so it takes effect immediately
             os.environ[env_key] = str(chat_id)
-            if not result:
-                return (
-                    f"✅ Home channel set to **{chat_name}** (ID: {chat_id}) for this running gateway only.\n"
-                    f"_(could not persist to config)_\n\n"
-                    f"{describe_config_write_failure(result, action='save the home channel')}"
-                )
         except Exception as e:
-            return f"Failed to save home channel: {e}"
+            os.environ[env_key] = str(chat_id)
+            return (
+                f"✅ Home channel set to **{chat_name}** (ID: {chat_id}) for this running gateway only.\n"
+                f"_(could not persist to .env: {e})_"
+            )
         
         return (
             f"✅ Home channel set to **{chat_name}** (ID: {chat_id}).\n"
