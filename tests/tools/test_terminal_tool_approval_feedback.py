@@ -25,7 +25,7 @@ def test_terminal_tool_surfaces_allowlist_persistence_warning(monkeypatch):
     monkeypatch.setattr(
         mod,
         "_check_all_guards",
-        lambda command, env_type: {
+        lambda command, env_type, **kwargs: {
             "approved": True,
             "message": "Permanent approval was applied for this session only.",
         },

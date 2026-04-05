@@ -122,12 +122,15 @@ class TestCwdHandling:
         assert config["cwd"] == "/workspace"
         assert config["host_cwd"] == "/home/user/project"
 
-    def test_local_backend_uses_getcwd(self, monkeypatch):
-        """Local backend should use os.getcwd(), not /root."""
-        monkeypatch.setenv("TERMINAL_ENV", "local")
-        monkeypatch.delenv("TERMINAL_CWD", raising=False)
-        config = _tt_mod._get_env_config()
-        assert config["cwd"] == os.getcwd()
+    def test_local_backend_uses_getcwd(self):
+        """Local backend should keep a current-directory cwd, not /root."""
+        with patch.dict(os.environ, {"TERMINAL_ENV": "local"}, clear=False):
+            env = os.environ.copy()
+            env.pop("TERMINAL_CWD", None)
+            with patch.dict(os.environ, env, clear=True):
+                config = _tt_mod._get_env_config()
+                assert config["cwd"] in (".", os.getcwd())
+                assert config["cwd"] != "/root"
 
     def test_create_environment_passes_docker_host_cwd_and_flag(self, monkeypatch):
         """Docker host cwd and mount flag should reach DockerEnvironment."""

@@ -1,18 +1,56 @@
 """Tests for Matrix voice message support (MSC3245)."""
 import io
+import sys
 import types
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-# Try importing real nio; skip entire file if not available.
-# A MagicMock in sys.modules (from another test) is not the real package.
 try:
-    import nio as _nio_probe
-    if not isinstance(_nio_probe, types.ModuleType) or not hasattr(_nio_probe, "__file__"):
-        pytest.skip("nio in sys.modules is a mock, not the real package", allow_module_level=True)
+    import nio  # type: ignore
+    _USING_FAKE_NIO = False
 except ImportError:
-    pytest.skip("matrix-nio not installed", allow_module_level=True)
+    nio = types.ModuleType("nio")
+    _USING_FAKE_NIO = True
+
+    class _RoomMessageImage:
+        pass
+
+    class _RoomMessageAudio:
+        pass
+
+    class _RoomMessageVideo:
+        pass
+
+    class _RoomMessageFile:
+        pass
+
+    class _MemoryDownloadResponse:
+        pass
+
+    class _DownloadError:
+        pass
+
+    class _UploadResponse:
+        pass
+
+    class _RoomSendResponse:
+        pass
+
+    nio.RoomMessageImage = _RoomMessageImage
+    nio.RoomMessageAudio = _RoomMessageAudio
+    nio.RoomMessageVideo = _RoomMessageVideo
+    nio.RoomMessageFile = _RoomMessageFile
+    nio.MemoryDownloadResponse = _MemoryDownloadResponse
+    nio.DownloadError = _DownloadError
+    nio.UploadResponse = _UploadResponse
+    nio.RoomSendResponse = _RoomSendResponse
+
+
+@pytest.fixture(autouse=True)
+def _install_fake_nio(monkeypatch):
+    if _USING_FAKE_NIO:
+        monkeypatch.setitem(sys.modules, "nio", nio)
 
 from gateway.platforms.base import MessageType
 

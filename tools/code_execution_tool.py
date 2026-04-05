@@ -119,9 +119,9 @@ _TOOL_STUBS = {
     ),
     "terminal": (
         "terminal",
-        "command: str, timeout: int = None, workdir: str = None",
+        "command: str, timeout: int = None, workdir: str = None, gateway_local: bool = False",
         '"""Run a shell command (foreground only). Returns dict with "output" and "exit_code"."""',
-        '{"command": command, "timeout": timeout, "workdir": workdir}',
+        '{"command": command, "timeout": timeout, "workdir": workdir, "gateway_local": gateway_local}',
     ),
 }
 
@@ -300,7 +300,7 @@ def _call(tool_name, args):
 # ---------------------------------------------------------------------------
 
 # Terminal parameters that must not be used from ephemeral sandbox scripts
-_TERMINAL_BLOCKED_PARAMS = {"background", "check_interval", "pty", "notify_on_complete"}
+_TERMINAL_BLOCKED_PARAMS = {"background", "check_interval", "pty", "gateway_local"}
 
 
 def _rpc_server_loop(

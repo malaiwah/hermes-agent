@@ -124,7 +124,7 @@ PROVIDER_ENV_VARS = (
     "AI_GATEWAY_API_KEY", "AI_GATEWAY_BASE_URL",
     "KILOCODE_API_KEY", "KILOCODE_BASE_URL",
     "DASHSCOPE_API_KEY", "OPENCODE_ZEN_API_KEY", "OPENCODE_GO_API_KEY",
-    "NOUS_API_KEY", "GITHUB_TOKEN", "GH_TOKEN",
+    "NOUS_API_KEY", "GITHUB_TOKEN", "GH_TOKEN", "COPILOT_GITHUB_TOKEN", "HF_TOKEN",
     "OPENAI_BASE_URL", "HERMES_COPILOT_ACP_COMMAND", "COPILOT_CLI_PATH",
     "HERMES_COPILOT_ACP_ARGS", "COPILOT_ACP_BASE_URL",
 )
@@ -645,6 +645,7 @@ class TestHasAnyProviderConfigured:
             "agent.anthropic_adapter.is_claude_code_token_valid",
             lambda creds: True,
         )
+        monkeypatch.setattr("hermes_cli.auth.get_auth_status", lambda provider_id=None: {"logged_in": False})
         from hermes_cli.main import _has_any_provider_configured
         assert _has_any_provider_configured() is False
 
@@ -722,6 +723,7 @@ class TestHasAnyProviderConfigured:
         for var in ("OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
                      "ANTHROPIC_TOKEN", "OPENAI_BASE_URL"):
             monkeypatch.delenv(var, raising=False)
+        monkeypatch.setattr("hermes_cli.auth.get_auth_status", lambda provider_id=None: {"logged_in": False})
         from hermes_cli.main import _has_any_provider_configured
         assert _has_any_provider_configured() is False
 

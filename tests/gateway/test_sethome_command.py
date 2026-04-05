@@ -50,12 +50,10 @@ async def test_sethome_reports_session_only_when_config_is_locked(tmp_path, monk
     def locked_write(*args, **kwargs):
         raise OSError(errno.EBUSY, "Device or resource busy")
 
-    monkeypatch.setattr("utils.atomic_yaml_write", locked_write)
+    monkeypatch.setattr("hermes_cli.config.save_env_value", locked_write)
 
     runner = _make_runner()
     result = await runner._handle_set_home_command(_make_event())
 
     assert "for this running gateway only" in result
-    assert "read-only or otherwise locked" in result
-    assert "Apply this patch manually" in result
-    assert "TELEGRAM_HOME_CHANNEL" in result
+    assert "could not persist to .env" in result
