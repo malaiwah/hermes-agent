@@ -337,7 +337,8 @@ class TestDelegateTask(unittest.TestCase):
             registered_task_id, registered_overrides = mock_register.call_args.args
             assert registered_task_id == "child-session"
             assert registered_overrides["cwd"] == "/workspace"
-            assert registered_overrides["docker_volumes"] == ["/private/tmp/delegate-workspace:/workspace:ro"]
+            expected_host = os.path.realpath("/tmp/delegate-workspace")
+            assert registered_overrides["docker_volumes"] == [f"{expected_host}:/workspace:ro"]
             mock_clear.assert_called_once_with("child-session")
 
 
