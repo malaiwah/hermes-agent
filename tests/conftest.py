@@ -38,6 +38,27 @@ def _isolate_hermes_home(tmp_path, monkeypatch):
     monkeypatch.delenv("HERMES_SESSION_CHAT_ID", raising=False)
     monkeypatch.delenv("HERMES_SESSION_CHAT_NAME", raising=False)
     monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
+    # Tests should not inherit CI/operator terminal backend or provider auth
+    # from the outer runner environment. Individual tests set these explicitly.
+    for key in (
+        "TERMINAL_ENV",
+        "TERMINAL_MODAL_MODE",
+        "MODAL_TOKEN_ID",
+        "MODAL_TOKEN_SECRET",
+        "HERMES_ENABLE_NOUS_MANAGED_TOOLS",
+        "OPENAI_BASE_URL",
+        "OPENAI_API_KEY",
+        "OPENROUTER_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
+        "COPILOT_GITHUB_TOKEN",
+        "NOUS_API_KEY",
+        "HF_TOKEN",
+    ):
+        monkeypatch.delenv(key, raising=False)
 
 
 @pytest.fixture()

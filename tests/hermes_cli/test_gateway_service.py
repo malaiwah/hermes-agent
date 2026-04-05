@@ -93,8 +93,16 @@ class TestGeneratedSystemdUnits:
 
         assert "/home/test/.nvm/versions/node/v24.14.0/bin" in unit
 
-    def test_system_unit_avoids_recursive_execstop_and_uses_extended_stop_timeout(self):
-        unit = gateway_cli.generate_systemd_unit(system=True)
+    def test_system_unit_avoids_recursive_execstop_and_uses_extended_stop_timeout(self, monkeypatch):
+        monkeypatch.setattr(
+            gateway_cli, "_system_service_identity",
+            lambda run_as_user=None: ("alice", "alice", "/home/alice"),
+        )
+        monkeypatch.setattr(
+            gateway_cli, "_build_user_local_paths",
+            lambda home, existing: [],
+        )
+        unit = gateway_cli.generate_systemd_unit(system=True, run_as_user="alice")
 
         assert "ExecStart=" in unit
         assert "ExecStop=" not in unit

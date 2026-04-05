@@ -1098,6 +1098,12 @@ class TestEventBridgePollE2E:
         # Update sessions.json updated_at to trigger re-check
         sessions_data["agent:main:telegram:dm:new"]["updated_at"] = "2026-03-29T15:00:10"
         (sessions_dir / "sessions.json").write_text(json.dumps(sessions_data))
+        # Ensure the watcher observes a later mtime even on filesystems with
+        # coarse timestamp resolution (for example whole-second mtimes).
+        sessions_file = sessions_dir / "sessions.json"
+        current_mtime = sessions_file.stat().st_mtime
+        forced_mtime = max(time.time(), current_mtime + 1.1)
+        os.utime(sessions_file, (forced_mtime, forced_mtime))
 
         # Second poll — should detect the new message
         bridge._poll_once(db)

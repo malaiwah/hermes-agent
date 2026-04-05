@@ -290,10 +290,51 @@ class TestDelegateTask(unittest.TestCase):
                 max_iterations=10,
                 parent_agent=parent,
             )
-
         self.assertTrue(callable(mock_child.thinking_callback))
         mock_child.thinking_callback("deliberating...")
         parent.tool_progress_callback.assert_not_called()
+    def test_workspace_visibility_registers_child_task_overrides(self):
+        parent = _make_mock_parent(depth=0)
+
+        with patch.dict(os.environ, {
+            "TERMINAL_ENV": "docker",
+            "TERMINAL_CWD": "/tmp/delegate-workspace",
+        }, clear=False), \
+            patch("run_agent.AIAgent") as MockAgent, \
+            patch("tools.terminal_tool.register_task_env_overrides") as mock_register, \
+            patch("tools.terminal_tool.clear_task_env_overrides") as mock_clear, \
+            patch("pathlib.Path.exists", return_value=True), \
+            patch("pathlib.Path.is_dir", return_value=True):
+            mock_child = MagicMock()
+            mock_child.session_id = "child-session"
+            mock_child.run_conversation.return_value = {
+                "final_response": "done",
+                "completed": True,
+                "api_calls": 1,
+                "messages": [],
+            }
+            MockAgent.return_value = mock_child
+
+            result = json.loads(
+                delegate_task(
+                    goal="Inspect the repo",
+                    workspace_visibility="full_ro",
+                    parent_agent=parent,
+                )
+            )
+
+            assert result["results"][0]["status"] == "completed"
+            mock_child.run_conversation.assert_called_once_with(
+                user_message="Inspect the repo",
+                task_id="child-session",
+            )
+            mock_register.assert_called_once()
+            registered_task_id, registered_overrides = mock_register.call_args.args
+            assert registered_task_id == "child-session"
+            assert registered_overrides["cwd"] == "/workspace"
+            expected_host = os.path.realpath("/tmp/delegate-workspace")
+            assert registered_overrides["docker_volumes"] == [f"{expected_host}:/workspace:ro"]
+            mock_clear.assert_called_once_with("child-session")
 
 
 class TestToolNamePreservation(unittest.TestCase):
