@@ -7856,7 +7856,10 @@ class GatewayRunner:
 
             hidden_entry = None
             if session_key:
-                hidden_entry = self._pending_hidden_turns.pop(session_key, None)
+                hidden_entry = getattr(self, "_pending_hidden_turns", {}).pop(
+                    session_key,
+                    None,
+                )
             if hidden_entry:
                 _sc = stream_consumer_holder[0]
                 _already_streamed = _sc and getattr(_sc, "already_sent", False)
