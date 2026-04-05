@@ -530,6 +530,10 @@ def _get_env_config() -> Dict[str, Any]:
         "cwd": cwd,
         "host_cwd": host_cwd,
         "docker_mount_cwd_to_workspace": mount_docker_cwd,
+        "enable_gateway_local": os.getenv(
+            "TERMINAL_ENABLE_GATEWAY_LOCAL",
+            str(cfg.get("enable_gateway_local", "false")),
+        ).lower() in ("true", "1", "yes"),
         "timeout": _parse_env_var("TERMINAL_TIMEOUT", str(cfg.get("timeout", "180"))),
         "lifetime_seconds": _parse_env_var("TERMINAL_LIFETIME_SECONDS", str(cfg.get("lifetime_seconds", "300"))),
         # SSH-specific config
@@ -553,6 +557,31 @@ def _get_env_config() -> Dict[str, Any]:
         "docker_volumes": _parse_env_var("TERMINAL_DOCKER_VOLUMES", json.dumps(cfg.get("docker_volumes", [])), json.loads, "valid JSON"),
         "docker_network": os.getenv("TERMINAL_DOCKER_NETWORK", None),
     }
+
+
+def can_offer_gateway_local(config: Optional[Dict[str, Any]] = None) -> bool:
+    """Return whether the privileged gateway-local escape hatch may be shown."""
+    cfg = config or _get_env_config()
+    return bool(
+        os.getenv("HERMES_GATEWAY_SESSION")
+        and cfg.get("enable_gateway_local")
+        and cfg.get("env_type") != "local"
+    )
+
+
+def _resolve_gateway_local_cwd() -> str:
+    """Resolve the real gateway-local cwd without sandbox normalization.
+
+    Remote backend config intentionally sanitizes TERMINAL_CWD for container
+    execution. Gateway-local is the opposite: it should execute in the live
+    gateway container/process using the operator-facing workspace context.
+    """
+    base_dir = os.getenv("MESSAGING_CWD") or str(Path.home())
+    raw_cwd = os.getenv("TERMINAL_CWD") or base_dir
+    expanded = os.path.expanduser(raw_cwd)
+    if os.path.isabs(expanded):
+        return expanded
+    return os.path.abspath(os.path.join(base_dir, expanded))
 
 
 def _get_modal_backend_state(modal_mode: object | None) -> Dict[str, Any]:
@@ -991,6 +1020,7 @@ def terminal_tool(
     workdir: Optional[str] = None,
     check_interval: Optional[int] = None,
     pty: bool = False,
+    gateway_local: bool = False,
 ) -> str:
     """
     Execute a command in the configured terminal environment.
@@ -1004,6 +1034,9 @@ def terminal_tool(
         workdir: Working directory for this command (optional, uses session cwd if not set)
         check_interval: Seconds between auto-checks for background processes (gateway only, min 30)
         pty: If True, use pseudo-terminal for interactive CLI tools (local backend only)
+        gateway_local: If True, run a one-shot command directly inside the
+            gateway container/process instead of the configured remote sandbox.
+            Gateway-only, disabled by default, and requires explicit approval.
 
     Returns:
         str: JSON string with output, exit_code, and error fields
@@ -1027,6 +1060,7 @@ def terminal_tool(
         # Get configuration
         config = _get_env_config()
         env_type = config["env_type"]
+        requested_env_type = env_type
         pre_exec_notice = ""
 
         # Use task_id for environment isolation
@@ -1051,6 +1085,46 @@ def terminal_tool(
         cwd = overrides.get("cwd") or config["cwd"]
         default_timeout = config["timeout"]
         effective_timeout = timeout or default_timeout
+        use_gateway_local = bool(gateway_local)
+
+        if use_gateway_local:
+            if not config.get("enable_gateway_local"):
+                return json.dumps({
+                    "output": "",
+                    "exit_code": -1,
+                    "error": "gateway_local is disabled. Enable terminal.enable_gateway_local first."
+                }, ensure_ascii=False)
+            if not os.getenv("HERMES_GATEWAY_SESSION"):
+                return json.dumps({
+                    "output": "",
+                    "exit_code": -1,
+                    "error": "gateway_local is only available in gateway sessions."
+                }, ensure_ascii=False)
+            if requested_env_type == "local":
+                return json.dumps({
+                    "output": "",
+                    "exit_code": -1,
+                    "error": "gateway_local is unavailable when terminal.backend is already local."
+                }, ensure_ascii=False)
+            if background:
+                return json.dumps({
+                    "output": "",
+                    "exit_code": -1,
+                    "error": "gateway_local does not support background execution."
+                }, ensure_ascii=False)
+            if pty:
+                return json.dumps({
+                    "output": "",
+                    "exit_code": -1,
+                    "error": "gateway_local does not support PTY mode."
+                }, ensure_ascii=False)
+            env_type = "local"
+            image = ""
+            cwd = _resolve_gateway_local_cwd()
+            pre_exec_notice = (
+                f"Running directly in the Hermes gateway container instead of the "
+                f"configured {requested_env_type} sandbox."
+            )
 
         # Start cleanup thread
         _start_cleanup_thread()
@@ -1059,13 +1133,24 @@ def terminal_tool(
         # Use a per-task creation lock so concurrent tool calls for the same
         # task_id wait for the first one to finish creating the sandbox,
         # instead of each creating their own (wasting Modal resources).
-        with _env_lock:
-            if effective_task_id in _active_environments:
-                _last_activity[effective_task_id] = time.time()
-                env = _active_environments[effective_task_id]
-                needs_creation = False
-            else:
-                needs_creation = True
+        if use_gateway_local:
+            env = _create_environment(
+                env_type="local",
+                image="",
+                cwd=cwd,
+                timeout=effective_timeout,
+                local_config={"persistent": False},
+                task_id=effective_task_id,
+            )
+            needs_creation = False
+        else:
+            with _env_lock:
+                if effective_task_id in _active_environments:
+                    _last_activity[effective_task_id] = time.time()
+                    env = _active_environments[effective_task_id]
+                    needs_creation = False
+                else:
+                    needs_creation = True
 
         if needs_creation:
             # Per-task lock: only one thread creates the sandbox, others wait
@@ -1146,7 +1231,24 @@ def terminal_tool(
         # Skip check if force=True (user has confirmed they want to run it)
         approval_note = None
         if not force:
-            approval = _check_all_guards(command, env_type)
+            extra_warnings = None
+            disable_smart_approval = False
+            if use_gateway_local:
+                extra_warnings = [{
+                    "pattern_key": "gateway_local_execution",
+                    "description": (
+                        "run command directly in the Hermes gateway container "
+                        f"instead of the configured {requested_env_type} sandbox"
+                    ),
+                    "session_only": True,
+                }]
+                disable_smart_approval = True
+            approval = _check_all_guards(
+                command,
+                env_type,
+                extra_warnings=extra_warnings,
+                disable_smart_approval=disable_smart_approval,
+            )
             if not approval["approved"]:
                 # Check if this is an approval_required (gateway ask mode)
                 if approval.get("status") == "approval_required":
@@ -1178,7 +1280,13 @@ def terminal_tool(
             elif approval.get("smart_approved"):
                 desc = approval.get("description", "flagged as dangerous")
                 approval_note = f"Command was flagged ({desc}) and auto-approved by smart approval."
-            pre_exec_notice = (approval.get("message") or "").strip()
+            approval_message = (approval.get("message") or "").strip()
+            if approval_message:
+                pre_exec_notice = (
+                    f"{pre_exec_notice}\n\n{approval_message}".strip()
+                    if pre_exec_notice
+                    else approval_message
+                )
 
         # Prepare command for execution
         if background:
@@ -1219,6 +1327,8 @@ def terminal_tool(
                     "exit_code": 0,
                     "error": None,
                 }
+                if use_gateway_local:
+                    result_data["execution_scope"] = "gateway_local"
                 if approval_note:
                     result_data["approval"] = approval_note
 
@@ -1343,6 +1453,8 @@ def terminal_tool(
                 "exit_code": returncode,
                 "error": None,
             }
+            if use_gateway_local:
+                result_dict["execution_scope"] = "gateway_local"
             if approval_note:
                 result_dict["approval"] = approval_note
             if exit_note:
@@ -1367,6 +1479,9 @@ def check_terminal_requirements() -> bool:
     """Check if all requirements for the terminal tool are met."""
     config = _get_env_config()
     env_type = config["env_type"]
+
+    if can_offer_gateway_local(config):
+        return True
 
     try:
         if env_type == "local":
@@ -1549,6 +1664,11 @@ TERMINAL_SCHEMA = {
                 "type": "boolean",
                 "description": "Run in pseudo-terminal (PTY) mode for interactive CLI tools like Codex, Claude Code, or Python REPL. Only works with local and SSH backends. Default: false.",
                 "default": False
+            },
+            "gateway_local": {
+                "type": "boolean",
+                "description": "Gateway-only escape hatch: run this one command directly inside the Hermes gateway container instead of the configured remote sandbox. Disabled unless terminal.enable_gateway_local is turned on, unavailable when the backend is already local, and always requires explicit approval. Default: false.",
+                "default": False
             }
         },
         "required": ["command"]
@@ -1565,6 +1685,7 @@ def _handle_terminal(args, **kw):
         workdir=args.get("workdir"),
         check_interval=args.get("check_interval"),
         pty=args.get("pty", False),
+        gateway_local=args.get("gateway_local", False),
     )
 
 

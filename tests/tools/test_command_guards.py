@@ -163,6 +163,42 @@ class TestTirithAllowDangerous:
         # allow_permanent should be True (no tirith warning)
         assert cb.call_args[1]["allow_permanent"] is True
 
+    @patch(_TIRITH_PATCH, return_value=_tirith_result("allow"))
+    def test_extra_gateway_local_warning_gateway(self, mock_tirith):
+        os.environ["HERMES_GATEWAY_SESSION"] = "1"
+        result = check_all_command_guards(
+            "echo hello",
+            "local",
+            extra_warnings=[{
+                "pattern_key": "gateway_local_execution",
+                "description": "run command directly in the Hermes gateway container",
+                "session_only": True,
+            }],
+            disable_smart_approval=True,
+        )
+        assert result["approved"] is False
+        assert result.get("status") == "approval_required"
+        assert "gateway container" in result["description"].lower()
+
+    @patch(_TIRITH_PATCH, return_value=_tirith_result("allow"))
+    def test_extra_gateway_local_warning_cli_hides_always(self, mock_tirith):
+        os.environ["HERMES_INTERACTIVE"] = "1"
+        cb = MagicMock(return_value="session")
+        result = check_all_command_guards(
+            "echo hello",
+            "local",
+            approval_callback=cb,
+            extra_warnings=[{
+                "pattern_key": "gateway_local_execution",
+                "description": "run command directly in the Hermes gateway container",
+                "session_only": True,
+            }],
+            disable_smart_approval=True,
+        )
+        assert result["approved"] is True
+        cb.assert_called_once()
+        assert cb.call_args[1]["allow_permanent"] is False
+
 
 # ---------------------------------------------------------------------------
 # tirith warn + safe command

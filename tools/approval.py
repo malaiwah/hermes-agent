@@ -659,7 +659,9 @@ def _format_tirith_description(tirith_result: dict) -> str:
 
 
 def check_all_command_guards(command: str, env_type: str,
-                             approval_callback=None) -> dict:
+                             approval_callback=None,
+                             extra_warnings: Optional[list[dict]] = None,
+                             disable_smart_approval: bool = False) -> dict:
     """Run all pre-exec security checks and return a single approval decision.
 
     Gathers findings from tirith and dangerous-command detection, then
@@ -722,6 +724,14 @@ def check_all_command_guards(command: str, env_type: str,
         if not is_approved(session_key, pattern_key):
             warnings.append((pattern_key, description, False))
 
+    for warning in extra_warnings or []:
+        key = warning.get("pattern_key")
+        desc = warning.get("description")
+        if not key or not desc:
+            continue
+        if not is_approved(session_key, key):
+            warnings.append((key, desc, bool(warning.get("session_only", False))))
+
     # Nothing to warn about
     if not warnings:
         return {"approved": True, "message": None}
@@ -730,7 +740,7 @@ def check_all_command_guards(command: str, env_type: str,
     # When approvals.mode=smart, ask the aux LLM before prompting the user.
     # Inspired by OpenAI Codex's Smart Approvals guardian subagent
     # (openai/codex#13860).
-    if approval_mode == "smart":
+    if approval_mode == "smart" and not disable_smart_approval:
         combined_desc_for_llm = "; ".join(desc for _, desc, _ in warnings)
         verdict = _smart_approve(command, combined_desc_for_llm)
         if verdict == "approve":

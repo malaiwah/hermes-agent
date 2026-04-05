@@ -330,6 +330,26 @@ def get_tool_definitions(
             if td.get("function", {}).get("name") != "send_user_message"
         ]
 
+    try:
+        from tools.terminal_tool import can_offer_gateway_local
+        expose_gateway_local = can_offer_gateway_local()
+    except Exception:
+        expose_gateway_local = False
+    if not expose_gateway_local:
+        for i, td in enumerate(filtered_tools):
+            if td.get("function", {}).get("name") == "terminal":
+                fn = td["function"]
+                params = dict(fn.get("parameters", {}))
+                properties = dict(params.get("properties", {}))
+                if "gateway_local" in properties:
+                    properties.pop("gateway_local", None)
+                    params["properties"] = properties
+                    filtered_tools[i] = {
+                        "type": "function",
+                        "function": {**fn, "parameters": params},
+                    }
+                break
+
     # The set of tool names that actually passed check_fn filtering.
     # Use this (not tools_to_include) for any downstream schema that references
     # other tools by name — otherwise the model sees tools mentioned in

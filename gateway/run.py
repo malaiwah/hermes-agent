@@ -128,6 +128,7 @@ if _config_path.exists():
                 "container_persistent": "TERMINAL_CONTAINER_PERSISTENT",
                 "docker_volumes": "TERMINAL_DOCKER_VOLUMES",
                 "docker_network": "TERMINAL_DOCKER_NETWORK",
+                "enable_gateway_local": "TERMINAL_ENABLE_GATEWAY_LOCAL",
                 "sandbox_dir": "TERMINAL_SANDBOX_DIR",
                 "persistent_shell": "TERMINAL_PERSISTENT_SHELL",
             }
