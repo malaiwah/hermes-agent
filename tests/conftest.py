@@ -106,6 +106,36 @@ def _ensure_current_event_loop(request):
 
 
 @pytest.fixture(autouse=True)
+def _reset_terminal_runtime_state():
+    """Isolate process-global terminal state between tests.
+
+    Terminal/code-execution/file tools cache environments and interrupt state at
+    module scope. Full-suite runs can otherwise reuse a sandbox created by an
+    earlier test with a different backend (for example Modal), which makes later
+    tests nondeterministically inherit the wrong environment.
+    """
+    from tools.interrupt import set_interrupt
+    from tools.file_tools import clear_file_ops_cache
+    from tools import terminal_tool as _terminal_tool
+
+    def _reset():
+        set_interrupt(False)
+        clear_file_ops_cache()
+        _terminal_tool._stop_cleanup_thread()
+        for task_id in list(_terminal_tool._active_environments.keys()):
+            _terminal_tool.cleanup_vm(task_id)
+        _terminal_tool._creation_locks.clear()
+        _terminal_tool._task_env_overrides.clear()
+
+    _reset()
+
+    try:
+        yield
+    finally:
+        _reset()
+
+
+@pytest.fixture(autouse=True)
 def _enforce_test_timeout():
     """Kill any individual test that takes longer than 30 seconds.
     SIGALRM is Unix-only; skip on Windows."""

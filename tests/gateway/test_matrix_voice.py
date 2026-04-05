@@ -6,12 +6,8 @@ import types
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-try:
-    import nio  # type: ignore
-    _USING_FAKE_NIO = False
-except ImportError:
+def _make_fake_nio_module():
     nio = types.ModuleType("nio")
-    _USING_FAKE_NIO = True
 
     class _RoomMessageImage:
         pass
@@ -45,12 +41,19 @@ except ImportError:
     nio.DownloadError = _DownloadError
     nio.UploadResponse = _UploadResponse
     nio.RoomSendResponse = _RoomSendResponse
+    return nio
 
 
 @pytest.fixture(autouse=True)
 def _install_fake_nio(monkeypatch):
-    if _USING_FAKE_NIO:
-        monkeypatch.setitem(sys.modules, "nio", nio)
+    existing = sys.modules.get("nio")
+    if existing is not None and getattr(existing, "__file__", None):
+        yield
+        return
+
+    fake_nio = _make_fake_nio_module()
+    monkeypatch.setitem(sys.modules, "nio", fake_nio)
+    yield
 
 from gateway.platforms.base import MessageType
 
