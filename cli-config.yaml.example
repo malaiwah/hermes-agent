@@ -395,6 +395,13 @@ session_reset:
 # explicitly want one shared "room brain" per group/channel.
 group_sessions_per_user: true
 
+# When true, a graceful gateway shutdown writes a small restart ledger for
+# in-flight sessions and the next gateway boot injects a hidden continuation
+# turn so interrupted work can resume from the last persisted context.
+# Sessions that were waiting on dangerous-command approval are resumed with a
+# note that approval state was lost and must be requested again if needed.
+resume_inflight_sessions_on_restart: false
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Gateway Streaming
 # ─────────────────────────────────────────────────────────────────────────────

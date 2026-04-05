@@ -91,6 +91,7 @@ load_hermes_dotenv(hermes_home=_hermes_home, project_env=Path(__file__).resolve(
 # Bridge config.yaml values into the environment so os.getenv() picks them up.
 # config.yaml is authoritative for terminal settings — overrides .env.
 _config_path = _hermes_home / 'config.yaml'
+_INFLIGHT_RESUME_LEDGER_PATH = _hermes_home / ".inflight_resume.json"
 if _config_path.exists():
     try:
         import yaml as _yaml
@@ -493,6 +494,8 @@ class GatewayRunner:
         self._running_agents: Dict[str, Any] = {}
         self._running_agents_ts: Dict[str, float] = {}  # start timestamp per session
         self._pending_messages: Dict[str, str] = {}  # Queued messages during interrupt
+        self._inflight_turns: Dict[str, Dict[str, Any]] = {}
+        self._resuming_inflight_sessions: set[str] = set()
 
         # Cache AIAgent instances per session to preserve prompt caching.
         # Without this, a new AIAgent is created per message, rebuilding the
@@ -848,6 +851,282 @@ class GatewayRunner:
         self._exit_cleanly = True
         self._exit_reason = reason
         self._shutdown_event.set()
+
+    @staticmethod
+    def _serialize_resume_event(event: Any) -> Optional[Dict[str, Any]]:
+        """Convert a MessageEvent-like object into JSON-safe resume metadata."""
+        if not event:
+            return None
+        return {
+            "text": getattr(event, "text", "") or "",
+            "message_type": getattr(getattr(event, "message_type", None), "value", "text"),
+            "message_id": getattr(event, "message_id", None),
+            "media_urls": list(getattr(event, "media_urls", []) or []),
+            "media_types": list(getattr(event, "media_types", []) or []),
+            "reply_to_message_id": getattr(event, "reply_to_message_id", None),
+            "reply_to_text": getattr(event, "reply_to_text", None),
+            "auto_skill": getattr(event, "auto_skill", None),
+            "persist_user_message": getattr(event, "persist_user_message", None),
+            "timestamp": (
+                getattr(event, "timestamp", None).isoformat()
+                if getattr(event, "timestamp", None) is not None
+                else None
+            ),
+        }
+
+    @staticmethod
+    def _deserialize_resume_event(source: SessionSource, data: Dict[str, Any]):
+        """Rebuild a MessageEvent from persisted resume metadata."""
+        from gateway.platforms.base import MessageEvent, MessageType
+
+        message_type = MessageType.TEXT
+        raw_type = data.get("message_type")
+        if raw_type:
+            try:
+                message_type = MessageType(raw_type)
+            except Exception:
+                pass
+
+        timestamp = None
+        raw_timestamp = data.get("timestamp")
+        if raw_timestamp:
+            try:
+                timestamp = datetime.fromisoformat(raw_timestamp)
+            except Exception:
+                pass
+
+        kwargs = {
+            "text": data.get("text", "") or "",
+            "message_type": message_type,
+            "source": source,
+            "message_id": data.get("message_id"),
+            "media_urls": list(data.get("media_urls") or []),
+            "media_types": list(data.get("media_types") or []),
+            "reply_to_message_id": data.get("reply_to_message_id"),
+            "reply_to_text": data.get("reply_to_text"),
+            "auto_skill": data.get("auto_skill"),
+            "persist_user_message": data.get("persist_user_message"),
+        }
+        if timestamp is not None:
+            kwargs["timestamp"] = timestamp
+        return MessageEvent(**kwargs)
+
+    def _load_inflight_resume_entries(self) -> List[Dict[str, Any]]:
+        """Read persisted interrupted-session recovery entries from disk."""
+        if not _INFLIGHT_RESUME_LEDGER_PATH.exists():
+            return []
+        try:
+            data = json.loads(_INFLIGHT_RESUME_LEDGER_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                return [entry for entry in data if isinstance(entry, dict)]
+        except Exception as e:
+            logger.warning("Failed to load inflight resume ledger: %s", e)
+        return []
+
+    def _save_inflight_resume_entries(self, entries: List[Dict[str, Any]]) -> None:
+        """Persist interrupted-session recovery entries atomically."""
+        from utils import atomic_json_write
+
+        if entries:
+            atomic_json_write(_INFLIGHT_RESUME_LEDGER_PATH, entries)
+        else:
+            try:
+                _INFLIGHT_RESUME_LEDGER_PATH.unlink(missing_ok=True)
+            except OSError as e:
+                logger.debug("Failed to remove inflight resume ledger: %s", e)
+
+    def _remove_inflight_resume_entry(self, session_key: str) -> None:
+        """Delete one recovered session entry from the restart ledger."""
+        entries = [
+            entry
+            for entry in self._load_inflight_resume_entries()
+            if entry.get("session_key") != session_key
+        ]
+        self._save_inflight_resume_entries(entries)
+
+    def _collect_pending_resume_event(self, session_key: str, source: SessionSource) -> Optional[Dict[str, Any]]:
+        """Capture any queued follow-up message that would otherwise be lost on restart."""
+        adapter = self.adapters.get(source.platform)
+        if adapter is not None:
+            pending_event = getattr(adapter, "_pending_messages", {}).get(session_key)
+            serialized = self._serialize_resume_event(pending_event)
+            if serialized:
+                return serialized
+
+        queued_text = self._pending_messages.get(session_key)
+        if queued_text:
+            from gateway.platforms.base import MessageEvent, MessageType
+
+            return self._serialize_resume_event(
+                MessageEvent(
+                    text=queued_text,
+                    message_type=MessageType.TEXT,
+                    source=source,
+                )
+            )
+        return None
+
+    def _build_inflight_resume_entries(self) -> List[Dict[str, Any]]:
+        """Capture the in-memory state needed to resume interrupted gateway turns."""
+        try:
+            from tools.approval import has_blocking_approval
+        except Exception:
+            has_blocking_approval = None
+
+        entries: List[Dict[str, Any]] = []
+        for session_key, meta in list(getattr(self, "_inflight_turns", {}).items()):
+            source_data = meta.get("source")
+            if not source_data:
+                continue
+            try:
+                source = SessionSource.from_dict(source_data)
+            except Exception:
+                continue
+
+            entry: Dict[str, Any] = {
+                "session_key": session_key,
+                "session_id": meta.get("session_id"),
+                "source": source_data,
+                "started_at": meta.get("started_at"),
+                "interrupted_event": meta.get("event"),
+                "pending_event": self._collect_pending_resume_event(session_key, source),
+                "approval_blocked": (
+                    (
+                        bool(has_blocking_approval(session_key))
+                        if has_blocking_approval is not None
+                        else False
+                    )
+                    or session_key in getattr(self, "_pending_approvals", {})
+                ),
+            }
+
+            override = getattr(self, "_session_model_overrides", {}).get(session_key)
+            if override:
+                entry["session_model_override"] = dict(override)
+
+            entries.append(entry)
+        return entries
+
+    async def _drain_inflight_turns_for_shutdown(self, timeout_seconds: float = 1.5) -> None:
+        """Give interrupted turns a brief chance to finish before snapshotting them."""
+        deadline = time.monotonic() + max(timeout_seconds, 0.0)
+        while time.monotonic() < deadline:
+            if not getattr(self, "_inflight_turns", {}):
+                return
+            await asyncio.sleep(0.05)
+
+    def _schedule_inflight_resumption_recovery(self) -> None:
+        """Resume any persisted interrupted sessions that are now routable."""
+        if not getattr(self.config, "resume_inflight_sessions_on_restart", False):
+            if _INFLIGHT_RESUME_LEDGER_PATH.exists():
+                logger.info(
+                    "Discarding inflight resume ledger because resume_inflight_sessions_on_restart is disabled"
+                )
+                self._save_inflight_resume_entries([])
+            return
+
+        task = asyncio.create_task(self._recover_inflight_sessions())
+        self._background_tasks.add(task)
+
+        def _cleanup(done_task):
+            self._background_tasks.discard(done_task)
+
+        task.add_done_callback(_cleanup)
+
+    async def _recover_inflight_sessions(self) -> None:
+        """Schedule hidden continuation turns for sessions interrupted by restart."""
+        entries = self._load_inflight_resume_entries()
+        if not entries:
+            return
+
+        resuming = getattr(self, "_resuming_inflight_sessions", None)
+        if resuming is None:
+            resuming = set()
+            self._resuming_inflight_sessions = resuming
+
+        for entry in entries:
+            try:
+                source = SessionSource.from_dict(entry.get("source") or {})
+            except Exception:
+                continue
+            session_key = entry.get("session_key") or ""
+            if (
+                source.platform not in self.adapters
+                or not session_key
+                or session_key in resuming
+            ):
+                continue
+            resuming.add(session_key)
+            task = asyncio.create_task(self._resume_interrupted_session(entry))
+            self._background_tasks.add(task)
+
+            def _cleanup(done_task, key=session_key):
+                self._background_tasks.discard(done_task)
+                self._resuming_inflight_sessions.discard(key)
+
+            task.add_done_callback(_cleanup)
+
+    async def _resume_interrupted_session(self, entry: Dict[str, Any]) -> None:
+        """Run a hidden continuation turn after a graceful restart."""
+        session_key = entry.get("session_key") or ""
+        if not session_key or session_key in self._running_agents:
+            return
+
+        try:
+            source = SessionSource.from_dict(entry.get("source") or {})
+        except Exception as e:
+            logger.warning("Skipping invalid inflight resume entry: %s", e)
+            return
+
+        persisted_note = (
+            "[System note: The gateway restarted while a previous turn was in progress. "
+            "Resume from the last persisted context and continue the unfinished work.]"
+        )
+        resume_prompt = (
+            persisted_note
+            + (
+                " [A dangerous-command approval was pending before restart and was lost. "
+                "If the task still needs that action, request approval again.]"
+                if entry.get("approval_blocked")
+                else ""
+            )
+        )
+
+        pending_event_data = entry.get("pending_event")
+        if pending_event_data:
+            event = self._deserialize_resume_event(source, pending_event_data)
+            clean_text = event.persist_user_message or event.text
+            hidden_prefix = (
+                "[System note: The gateway restarted while you were processing the previous turn. "
+                "That in-flight turn was interrupted. Continue from the last persisted context "
+                "and handle the queued user follow-up below.]"
+            )
+            event.text = f"{hidden_prefix}\n\n{event.text or ''}".strip()
+            event.persist_user_message = clean_text
+        else:
+            from gateway.platforms.base import MessageEvent
+
+            event = MessageEvent(
+                text=resume_prompt,
+                source=source,
+                message_id=f"restart-resume-{uuid.uuid4().hex[:8]}",
+                persist_user_message=persisted_note,
+            )
+
+        override = entry.get("session_model_override")
+        if override:
+            self._session_model_overrides[session_key] = dict(override)
+
+        self._running_agents[session_key] = _AGENT_PENDING_SENTINEL
+        self._running_agents_ts[session_key] = time.time()
+        try:
+            await self._handle_message_with_agent(event, source, session_key)
+            self._remove_inflight_resume_entry(session_key)
+        finally:
+            if self._running_agents.get(session_key) is _AGENT_PENDING_SENTINEL:
+                del self._running_agents[session_key]
+            self._running_agents_ts.pop(session_key, None)
+            getattr(self, "_inflight_turns", {}).pop(session_key, None)
     
     @staticmethod
     def _load_prefill_messages() -> List[Dict[str, Any]]:
@@ -1239,6 +1518,8 @@ class GatewayRunner:
         except Exception as e:
             logger.error("Recovered watcher setup error: %s", e)
 
+        self._schedule_inflight_resumption_recovery()
+
         # Start background session expiry watcher for proactive memory flushing
         asyncio.create_task(self._session_expiry_watcher())
 
@@ -1378,6 +1659,7 @@ class GatewayRunner:
                             build_channel_directory(self.adapters)
                         except Exception:
                             pass
+                        self._schedule_inflight_resumption_recovery()
                     else:
                         # Check if the failure is non-retryable
                         if adapter.has_fatal_error and not adapter.fatal_error_retryable:
@@ -1429,6 +1711,13 @@ class GatewayRunner:
             except Exception:
                 pass
 
+        if getattr(self.config, "resume_inflight_sessions_on_restart", False):
+            try:
+                await self._drain_inflight_turns_for_shutdown()
+                self._save_inflight_resume_entries(self._build_inflight_resume_entries())
+            except Exception as e:
+                logger.warning("Failed to persist inflight resume ledger: %s", e)
+
         for platform, adapter in list(self.adapters.items()):
             try:
                 await adapter.cancel_background_tasks()
@@ -1447,6 +1736,7 @@ class GatewayRunner:
 
         self.adapters.clear()
         self._running_agents.clear()
+        getattr(self, "_inflight_turns", {}).clear()
         self._pending_messages.clear()
         self._pending_approvals.clear()
         self._shutdown_event.set()
@@ -2164,6 +2454,7 @@ class GatewayRunner:
             if self._running_agents.get(_quick_key) is _AGENT_PENDING_SENTINEL:
                 del self._running_agents[_quick_key]
             self._running_agents_ts.pop(_quick_key, None)
+            getattr(self, "_inflight_turns", {}).pop(_quick_key, None)
 
     async def _handle_message_with_agent(self, event, source, _quick_key: str):
         """Inner handler that runs under the _running_agents sentinel guard."""
@@ -2187,6 +2478,18 @@ class GatewayRunner:
         
         # Build session context
         context = build_session_context(source, self.config, session_entry)
+
+        inflight_turns = getattr(self, "_inflight_turns", None)
+        if inflight_turns is None:
+            inflight_turns = {}
+            self._inflight_turns = inflight_turns
+        inflight_turns[session_key] = {
+            "session_key": session_key,
+            "session_id": session_entry.session_id,
+            "source": source.to_dict(),
+            "event": self._serialize_resume_event(event),
+            "started_at": datetime.now().isoformat(),
+        }
         
         # Set environment variables for tools
         self._set_session_env(context)
@@ -2738,6 +3041,7 @@ class GatewayRunner:
                 session_id=session_entry.session_id,
                 session_key=session_key,
                 event_message_id=event.message_id,
+                persist_user_message=getattr(event, "persist_user_message", None),
             )
 
             # Stop persistent typing indicator now that the agent is done
@@ -5875,6 +6179,7 @@ class GatewayRunner:
         session_key: str = None,
         _interrupt_depth: int = 0,
         event_message_id: Optional[str] = None,
+        persist_user_message: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Run the agent with the given message and context.
@@ -6444,7 +6749,21 @@ class GatewayRunner:
             _approval_session_token = set_current_session_key(_approval_session_key)
             register_gateway_notify(_approval_session_key, _approval_notify_sync)
             try:
-                result = agent.run_conversation(message, conversation_history=agent_history, task_id=session_id)
+                _run_kwargs = {
+                    "conversation_history": agent_history,
+                    "task_id": session_id,
+                }
+                if persist_user_message is not None:
+                    try:
+                        import inspect as _inspect
+
+                        if "persist_user_message" in _inspect.signature(
+                            agent.run_conversation
+                        ).parameters:
+                            _run_kwargs["persist_user_message"] = persist_user_message
+                    except Exception:
+                        _run_kwargs["persist_user_message"] = persist_user_message
+                result = agent.run_conversation(message, **_run_kwargs)
             finally:
                 unregister_gateway_notify(_approval_session_key)
                 reset_current_session_key(_approval_session_token)
