@@ -16,6 +16,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from hermes_cli.config import guard_config_command
+
 logger = logging.getLogger(__name__)
 
 # Minimum manifest version this installer understands.
@@ -573,6 +575,7 @@ def cmd_toggle() -> None:
         console.print("\n[dim]No changes.[/dim]")
 
 
+@guard_config_command
 def plugins_command(args) -> None:
     """Dispatch hermes plugins subcommands."""
     action = getattr(args, "plugins_action", None)

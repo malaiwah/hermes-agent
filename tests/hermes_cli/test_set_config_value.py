@@ -127,6 +127,18 @@ class TestConfigYamlRouting:
             or "TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE=True" in env_content
         )
 
+    def test_invalid_existing_yaml_is_not_overwritten(self, _isolated_hermes_home, capsys):
+        config_path = _isolated_hermes_home / "config.yaml"
+        original = "model: [broken\n"
+        config_path.write_text(original, encoding="utf-8")
+
+        set_config_value("terminal.backend", "docker")
+
+        assert config_path.read_text(encoding="utf-8") == original
+        output = capsys.readouterr().out
+        assert "contains invalid YAML" in output
+        assert "Fix it before Hermes can update `terminal.backend`" in output
+
 
 # ---------------------------------------------------------------------------
 # Empty / falsy values — regression tests for #4277

@@ -1,12 +1,15 @@
 """Tests for hermes_cli configuration management."""
 
+import errno
 import os
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
+import pytest
 import yaml
 
 from hermes_cli.config import (
+    ConfigWriteError,
     DEFAULT_CONFIG,
     get_hermes_home,
     ensure_hermes_home,
@@ -206,6 +209,96 @@ class TestSaveConfigAtomicity:
                 raw = yaml.safe_load(f)
             assert raw["model"] == "test/atomic-model"
             assert raw["agent"]["max_turns"] == 77
+
+    def test_save_config_raises_readable_error_for_locked_file(self, tmp_path):
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            config = load_config()
+            config["model"] = "test/locked-model"
+
+            with patch("utils.atomic_yaml_write", side_effect=OSError(errno.EROFS, "Read-only file system")):
+                with pytest.raises(ConfigWriteError) as exc_info:
+                    save_config(config)
+
+            assert "read-only or otherwise locked" in str(exc_info.value)
+            assert "Apply this patch manually" in str(exc_info.value)
+
+    def test_save_config_refuses_to_overwrite_invalid_existing_yaml(self, tmp_path):
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            config_path = tmp_path / "config.yaml"
+            config_path.write_text("model: [broken\n", encoding="utf-8")
+
+            config = load_config()
+            config["model"] = "test-fixed-model"
+
+            with pytest.raises(ConfigWriteError) as exc_info:
+                save_config(config)
+
+            assert "contains invalid YAML" in str(exc_info.value)
+            assert config_path.read_text(encoding="utf-8") == "model: [broken\n"
+
+
+class TestEditConfig:
+    def test_edit_config_retries_until_yaml_is_valid(self, tmp_path, monkeypatch, capsys):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        config_path = hermes_home / "config.yaml"
+        config_path.write_text("model: original\n", encoding="utf-8")
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("EDITOR", "fake-editor")
+
+        calls = {"count": 0}
+
+        def fake_run(args):
+            edited_path = Path(args[1])
+            calls["count"] += 1
+            if calls["count"] == 1:
+                edited_path.write_text("model: [broken\n", encoding="utf-8")
+            else:
+                edited_path.write_text("model: fixed\n", encoding="utf-8")
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr("hermes_cli.config.subprocess.run", fake_run)
+        monkeypatch.setattr("builtins.input", lambda prompt="": "y")
+
+        from hermes_cli.config import edit_config
+
+        edit_config()
+
+        assert yaml.safe_load(config_path.read_text(encoding="utf-8")) == {"model": "fixed"}
+        assert calls["count"] == 2
+        output = capsys.readouterr().out
+        assert "YAML syntax is invalid" in output
+        assert f"Saved {config_path}" in output
+
+    def test_edit_config_reports_manual_patch_when_target_is_locked(self, tmp_path, monkeypatch, capsys):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        config_path = hermes_home / "config.yaml"
+        config_path.write_text("model: original\n", encoding="utf-8")
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("EDITOR", "fake-editor")
+
+        def fake_run(args):
+            edited_path = Path(args[1])
+            edited_path.write_text("model: updated\n", encoding="utf-8")
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr("hermes_cli.config.subprocess.run", fake_run)
+        monkeypatch.setattr(
+            "hermes_cli.config.os.replace",
+            lambda src, dst: (_ for _ in ()).throw(OSError(errno.EBUSY, "Device or resource busy")),
+        )
+
+        from hermes_cli.config import edit_config
+
+        edit_config()
+
+        output = capsys.readouterr().out
+        assert "read-only or otherwise locked" in output
+        assert "Apply this patch manually" in output
+        assert "model: updated" in output
 
 
 class TestSanitizeEnvLines:

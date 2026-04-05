@@ -1053,6 +1053,18 @@ def _parse_skills_argument(skills: str | list[str] | tuple[str, ...] | None) -> 
     return parsed
 
 
+def save_config_value_result(key_path: str, value: any):
+    """Save a config key and return a structured result."""
+    from hermes_cli.config import save_config_key_result
+
+    # Use the same precedence as load_cli_config: user config first, then project config
+    user_config_path = _hermes_home / 'config.yaml'
+    project_config_path = Path(__file__).parent / 'cli-config.yaml'
+    config_path = user_config_path if user_config_path.exists() else project_config_path
+
+    return save_config_key_result(key_path, value, config_path=config_path)
+
+
 def save_config_value(key_path: str, value: any) -> bool:
     """
     Save a value to the active config file at the specified key path.
@@ -1068,46 +1080,27 @@ def save_config_value(key_path: str, value: any) -> bool:
     Returns:
         True if successful, False otherwise
     """
-    # Use the same precedence as load_cli_config: user config first, then project config
-    user_config_path = _hermes_home / 'config.yaml'
-    project_config_path = Path(__file__).parent / 'cli-config.yaml'
-    config_path = user_config_path if user_config_path.exists() else project_config_path
-    
     try:
-        # Ensure parent directory exists (for ~/.hermes/config.yaml on first use)
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Load existing config
-        if config_path.exists():
-            with open(config_path, 'r') as f:
-                config = yaml.safe_load(f) or {}
-        else:
-            config = {}
-        
-        # Navigate to the key and set value
-        keys = key_path.split('.')
-        current = config
-        for key in keys[:-1]:
-            if key not in current or not isinstance(current[key], dict):
-                current[key] = {}
-            current = current[key]
-        current[keys[-1]] = value
-        
-        # Save back atomically — write to temp file + fsync + os.replace
-        # so an interrupt never leaves config.yaml truncated or empty.
-        from utils import atomic_yaml_write
-        atomic_yaml_write(config_path, config)
-        
-        # Enforce owner-only permissions on config files (contain API keys)
-        try:
-            os.chmod(config_path, 0o600)
-        except (OSError, NotImplementedError):
-            pass
-        
-        return True
+        result = save_config_value_result(key_path, value)
+        if result:
+            # Enforce owner-only permissions on config files (contain API keys)
+            try:
+                os.chmod(result.path, 0o600)
+            except (OSError, NotImplementedError):
+                pass
+        return bool(result)
     except Exception as e:
         logger.error("Failed to save config: %s", e)
         return False
+
+
+def _print_config_write_failure(action: str, result) -> None:
+    """Render a readable config write failure in the interactive CLI."""
+    from hermes_cli.config import describe_config_write_failure
+
+    print(f"  (! ) {action} could not be persisted.")
+    print()
+    print(describe_config_write_failure(result, action=action))
 
 
 
@@ -3759,17 +3752,21 @@ class HermesCLI:
             if new_prompt.lower() == "clear":
                 self.system_prompt = ""
                 self.agent = None  # Force re-init
-                if save_config_value("agent.system_prompt", ""):
+                result = save_config_value_result("agent.system_prompt", "")
+                if result:
                     print("(^_^)b System prompt cleared (saved to config)")
                 else:
                     print("(^_^) System prompt cleared (session only)")
+                    _print_config_write_failure("clear the system prompt", result)
             else:
                 self.system_prompt = new_prompt
                 self.agent = None  # Force re-init
-                if save_config_value("agent.system_prompt", new_prompt):
+                result = save_config_value_result("agent.system_prompt", new_prompt)
+                if result:
                     print("(^_^)b System prompt set (saved to config)")
                 else:
                     print("(^_^) System prompt set (session only)")
+                    _print_config_write_failure("save the system prompt", result)
                 print(f"  \"{new_prompt[:60]}{'...' if len(new_prompt) > 60 else ''}\"")
         else:
             # Show current prompt
@@ -3829,7 +3826,9 @@ class HermesCLI:
                 if save_config_value("agent.system_prompt", ""):
                     print("(^_^)b Personality cleared (saved to config)")
                 else:
+                    result = save_config_value_result("agent.system_prompt", "")
                     print("(^_^) Personality cleared (session only)")
+                    _print_config_write_failure("clear the personality overlay", result)
                 print("  No personality overlay — using base agent behavior.")
             elif personality_name in self.personalities:
                 self.system_prompt = self._resolve_personality_prompt(self.personalities[personality_name])
@@ -3837,7 +3836,9 @@ class HermesCLI:
                 if save_config_value("agent.system_prompt", self.system_prompt):
                     print(f"(^_^)b Personality set to '{personality_name}' (saved to config)")
                 else:
+                    result = save_config_value_result("agent.system_prompt", self.system_prompt)
                     print(f"(^_^) Personality set to '{personality_name}' (session only)")
+                    _print_config_write_failure("save the personality overlay", result)
                 print(f"  \"{self.system_prompt[:60]}{'...' if len(self.system_prompt) > 60 else ''}\"")
             else:
                 print(f"(._.) Unknown personality: {personality_name}")
@@ -5013,10 +5014,12 @@ class HermesCLI:
             return
 
         set_active_skin(new_skin)
-        if save_config_value("display.skin", new_skin):
+        result = save_config_value_result("display.skin", new_skin)
+        if result:
             print(f"  Skin set to: {new_skin} (saved)")
         else:
-            print(f"  Skin set to: {new_skin}")
+            print(f"  Skin set to: {new_skin} (session only)")
+            _print_config_write_failure("save the active skin", result)
         print("  Note: banner colors will update on next session start.")
         if self._apply_tui_skin_style():
             print("  Prompt + TUI colors updated.")
@@ -5093,16 +5096,24 @@ class HermesCLI:
             self.show_reasoning = True
             if self.agent:
                 self.agent.reasoning_callback = self._current_reasoning_callback()
-            save_config_value("display.show_reasoning", True)
-            _cprint(f"  {_GOLD}✓ Reasoning display: ON (saved){_RST}")
+            result = save_config_value_result("display.show_reasoning", True)
+            if result:
+                _cprint(f"  {_GOLD}✓ Reasoning display: ON (saved){_RST}")
+            else:
+                _cprint(f"  {_GOLD}✓ Reasoning display: ON (session only){_RST}")
+                _print_config_write_failure("save reasoning display settings", result)
             _cprint(f"  {_DIM}  Model thinking will be shown during and after each response.{_RST}")
             return
         if arg in ("hide", "off"):
             self.show_reasoning = False
             if self.agent:
                 self.agent.reasoning_callback = self._current_reasoning_callback()
-            save_config_value("display.show_reasoning", False)
-            _cprint(f"  {_GOLD}✓ Reasoning display: OFF (saved){_RST}")
+            result = save_config_value_result("display.show_reasoning", False)
+            if result:
+                _cprint(f"  {_GOLD}✓ Reasoning display: OFF (saved){_RST}")
+            else:
+                _cprint(f"  {_GOLD}✓ Reasoning display: OFF (session only){_RST}")
+                _print_config_write_failure("save reasoning display settings", result)
             return
 
         # Effort level change
@@ -5116,10 +5127,12 @@ class HermesCLI:
         self.reasoning_config = parsed
         self.agent = None  # Force agent re-init with new reasoning config
 
-        if save_config_value("agent.reasoning_effort", arg):
+        result = save_config_value_result("agent.reasoning_effort", arg)
+        if result:
             _cprint(f"  {_GOLD}✓ Reasoning effort set to '{arg}' (saved to config){_RST}")
         else:
             _cprint(f"  {_GOLD}✓ Reasoning effort set to '{arg}' (session only){_RST}")
+            _print_config_write_failure("save reasoning effort", result)
 
     def _on_reasoning(self, reasoning_text: str):
         """Callback for intermediate reasoning display during tool-call loops."""
