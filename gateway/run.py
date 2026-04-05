@@ -25,7 +25,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Optional, Any, List
 
 # ---------------------------------------------------------------------------
@@ -296,6 +296,8 @@ logger = logging.getLogger(__name__)
 # session from bypassing the "already running" guard during the async gap
 # between the guard check and actual agent creation.
 _AGENT_PENDING_SENTINEL = object()
+_SELF_NUDGE_NO_REPLY = "NO_REPLY"
+_SELF_NUDGE_MAX_DELAY_SECONDS = 86400
 
 
 def _resolve_runtime_agent_kwargs() -> dict:
@@ -515,6 +517,9 @@ class GatewayRunner:
         self._pending_messages: Dict[str, str] = {}  # Queued messages during interrupt
         self._inflight_turns: Dict[str, Dict[str, Any]] = {}
         self._resuming_inflight_sessions: set[str] = set()
+        self._self_nudge_tasks: Dict[str, asyncio.Task] = {}
+        self._self_nudge_entries: Dict[str, Dict[str, Any]] = {}
+        self._pending_hidden_turns: Dict[str, Dict[str, Any]] = {}
 
         # Cache AIAgent instances per session to preserve prompt caching.
         # Without this, a new AIAgent is created per message, rebuilding the
@@ -1142,6 +1147,125 @@ class GatewayRunner:
         try:
             await self._handle_message_with_agent(event, source, session_key)
             self._remove_inflight_resume_entry(session_key)
+        finally:
+            if self._running_agents.get(session_key) is _AGENT_PENDING_SENTINEL:
+                del self._running_agents[session_key]
+            self._running_agents_ts.pop(session_key, None)
+            getattr(self, "_inflight_turns", {}).pop(session_key, None)
+
+    def _build_self_nudge_text(self, entry: Dict[str, Any]) -> str:
+        """Build the hidden prompt text for a fired self-nudge."""
+        hidden_prefix = (
+            "[System note: A self-nudge timer you armed earlier has fired. "
+            "Resume from the last persisted context and continue the follow-up task below.]"
+        )
+        note = str(entry.get("note") or "").strip()
+        if note:
+            return f"{hidden_prefix}\n\nReminder:\n{note}"
+        return hidden_prefix
+
+    async def _cancel_self_nudge(self, session_key: str, reason: str = "") -> bool:
+        """Cancel the active self-nudge for a session, if any."""
+        task = getattr(self, "_self_nudge_tasks", {}).pop(session_key, None)
+        entry = getattr(self, "_self_nudge_entries", {}).pop(session_key, None)
+        getattr(self, "_pending_hidden_turns", {}).pop(session_key, None)
+        if task:
+            task.cancel()
+        if entry and reason:
+            logger.debug("Cancelled self-nudge for %s (%s)", session_key[:20], reason)
+        return bool(task or entry)
+
+    async def _arm_self_nudge(
+        self,
+        session_key: str,
+        source: SessionSource,
+        delay_seconds: int,
+        note: str = "",
+    ) -> Dict[str, Any]:
+        """Arm or replace a one-shot self-nudge for a session."""
+        seconds = int(delay_seconds)
+        if seconds <= 0:
+            return {"armed": False, "error": "delay_seconds must be greater than zero."}
+        if seconds > _SELF_NUDGE_MAX_DELAY_SECONDS:
+            return {
+                "armed": False,
+                "error": (
+                    f"delay_seconds exceeds the maximum of "
+                    f"{_SELF_NUDGE_MAX_DELAY_SECONDS} seconds."
+                ),
+            }
+
+        replaced = await self._cancel_self_nudge(session_key, reason="replaced")
+        due_at = datetime.now() + timedelta(seconds=seconds)
+        entry = {
+            "session_key": session_key,
+            "source": source.to_dict(),
+            "delay_seconds": seconds,
+            "note": str(note or "").strip(),
+            "due_at": due_at.isoformat(),
+        }
+        self._self_nudge_entries[session_key] = entry
+
+        task = asyncio.create_task(self._fire_self_nudge(entry))
+        self._self_nudge_tasks[session_key] = task
+
+        def _cleanup(done_task, key=session_key):
+            current = self._self_nudge_tasks.get(key)
+            if current is done_task:
+                self._self_nudge_tasks.pop(key, None)
+
+        task.add_done_callback(_cleanup)
+        return {
+            "armed": True,
+            "delay_seconds": seconds,
+            "due_at": due_at.isoformat(),
+            "replaced_existing": replaced,
+            "note": entry["note"],
+        }
+
+    async def _fire_self_nudge(self, entry: Dict[str, Any]) -> None:
+        """Wait for a self-nudge timer, then enqueue or run its hidden turn."""
+        session_key = entry.get("session_key") or ""
+        delay = max(int(entry.get("delay_seconds") or 0), 0)
+        if not session_key or delay <= 0:
+            return
+
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            raise
+
+        current = self._self_nudge_entries.get(session_key)
+        if current is not entry:
+            return
+        self._self_nudge_entries.pop(session_key, None)
+        if session_key in self._running_agents:
+            self._pending_hidden_turns[session_key] = entry
+            return
+        await self._run_self_nudge_entry(entry)
+
+    async def _run_self_nudge_entry(self, entry: Dict[str, Any]) -> None:
+        """Inject a hidden follow-up turn for a fired self-nudge."""
+        session_key = entry.get("session_key") or ""
+        if not session_key or session_key in self._running_agents:
+            return
+        try:
+            source = SessionSource.from_dict(entry.get("source") or {})
+        except Exception as e:
+            logger.warning("Skipping invalid self-nudge entry: %s", e)
+            return
+
+        event = MessageEvent(
+            text=self._build_self_nudge_text(entry),
+            source=source,
+            message_id=f"self-nudge-{uuid.uuid4().hex[:8]}",
+            persist_user_message="[System note: a self-nudge timer fired.]",
+        )
+
+        self._running_agents[session_key] = _AGENT_PENDING_SENTINEL
+        self._running_agents_ts[session_key] = time.time()
+        try:
+            await self._handle_message_with_agent(event, source, session_key)
         finally:
             if self._running_agents.get(session_key) is _AGENT_PENDING_SENTINEL:
                 del self._running_agents[session_key]
@@ -1805,6 +1929,11 @@ class GatewayRunner:
         for _task in list(self._background_tasks):
             _task.cancel()
         self._background_tasks.clear()
+        for _task in list(getattr(self, "_self_nudge_tasks", {}).values()):
+            _task.cancel()
+        getattr(self, "_self_nudge_tasks", {}).clear()
+        getattr(self, "_self_nudge_entries", {}).clear()
+        getattr(self, "_pending_hidden_turns", {}).clear()
 
         self.adapters.clear()
         self._running_agents.clear()
@@ -2580,6 +2709,8 @@ class GatewayRunner:
         # message arriving during any of those yields would pass the
         # "already running" guard and spin up a duplicate agent for the
         # same session — corrupting the transcript.
+        if not str(getattr(event, "message_id", "") or "").startswith("self-nudge-"):
+            await self._cancel_self_nudge(_quick_key, reason="new_user_message")
         self._running_agents[_quick_key] = _AGENT_PENDING_SENTINEL
         self._running_agents_ts[_quick_key] = time.time()
 
@@ -3239,6 +3370,17 @@ class GatewayRunner:
                 _response_time, _api_calls, _resp_len,
             )
 
+            if (
+                agent_result.get("self_nudge_armed")
+                and isinstance(response, str)
+                and response.strip().upper() == _SELF_NUDGE_NO_REPLY
+            ):
+                response = ""
+                if agent_messages and agent_messages[-1].get("role") == "assistant":
+                    _last_content = str(agent_messages[-1].get("content") or "").strip().upper()
+                    if _last_content == _SELF_NUDGE_NO_REPLY:
+                        agent_messages.pop()
+
             # Surface error details when the agent failed silently (final_response=None)
             if not response and agent_result.get("failed"):
                 error_detail = agent_result.get("error", "unknown error")
@@ -3571,6 +3713,7 @@ class GatewayRunner:
         except Exception as e:
             logger.debug("Gateway memory flush on reset failed: %s", e)
         self._evict_cached_agent(session_key)
+        await self._cancel_self_nudge(session_key, reason="session_reset")
         
         try:
             from tools.env_passthrough import clear_env_passthrough
@@ -6913,6 +7056,21 @@ class GatewayRunner:
             except Exception as _e:
                 logger.debug("message_callback error: %s", _e)
 
+        def _self_nudge_callback_sync(delay_seconds: int, note: str = "") -> dict:
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    self._arm_self_nudge(
+                        session_key=session_key,
+                        source=source,
+                        delay_seconds=delay_seconds,
+                        note=note,
+                    ),
+                    _loop_for_step,
+                )
+                return future.result(timeout=15)
+            except Exception as _e:
+                return {"armed": False, "error": f"Failed to arm self-nudge: {_e}"}
+
         def run_sync():
             # The conditional re-assignment of `message` further below
             # (prepending model-switch notes) makes Python treat it as a
@@ -7047,6 +7205,7 @@ class GatewayRunner:
             agent.step_callback = _step_callback_sync if _hooks_ref.loaded_hooks else None
             agent.stream_delta_callback = _stream_delta_cb
             agent.message_callback = _message_callback_sync
+            agent.self_nudge_callback = _self_nudge_callback_sync
             agent.status_callback = _status_callback_sync
             agent.reasoning_config = reasoning_config
 
@@ -7260,6 +7419,19 @@ class GatewayRunner:
                 _output_toks = getattr(_agent, "session_completion_tokens", 0)
             _resolved_model = getattr(_agent, "model", None) if _agent else None
 
+            if (
+                _agent
+                and getattr(_agent, "_self_nudge_armed_this_turn", False)
+                and isinstance(final_response, str)
+                and final_response.strip().upper() == _SELF_NUDGE_NO_REPLY
+            ):
+                final_response = ""
+                _msgs = result.get("messages") or []
+                if _msgs and _msgs[-1].get("role") == "assistant":
+                    _last_content = str(_msgs[-1].get("content") or "").strip().upper()
+                    if _last_content == _SELF_NUDGE_NO_REPLY:
+                        _msgs.pop()
+
             if not final_response:
                 error_msg = f"⚠️ {result['error']}" if result.get("error") else "(No response generated)"
                 return {
@@ -7362,6 +7534,9 @@ class GatewayRunner:
                 "output_tokens": _output_toks,
                 "model": _resolved_model,
                 "session_id": effective_session_id,
+                "self_nudge_armed": bool(
+                    _agent and getattr(_agent, "_self_nudge_armed_this_turn", False)
+                ),
             }
         
         # Start progress message sender if enabled
@@ -7662,6 +7837,11 @@ class GatewayRunner:
                 # new message).
 
                 # Process the pending message with updated history
+                if session_key:
+                    await self._cancel_self_nudge(
+                        session_key,
+                        reason="queued_user_followup",
+                    )
                 updated_history = result.get("messages", history)
                 return await self._run_agent(
                     message=pending,
@@ -7671,6 +7851,37 @@ class GatewayRunner:
                     session_id=session_id,
                     session_key=session_key,
                     _interrupt_depth=_interrupt_depth + 1,
+                )
+
+            hidden_entry = None
+            if session_key:
+                hidden_entry = self._pending_hidden_turns.pop(session_key, None)
+            if hidden_entry:
+                _sc = stream_consumer_holder[0]
+                _already_streamed = _sc and getattr(_sc, "already_sent", False)
+                first_response = (result or {}).get("final_response", "")
+                if first_response and not _already_streamed:
+                    try:
+                        await adapter.send(
+                            source.chat_id,
+                            first_response,
+                            metadata=getattr(event, "metadata", None),
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to send response before self-nudge follow-up: %s",
+                            e,
+                        )
+                updated_history = (result or {}).get("messages", history)
+                return await self._run_agent(
+                    message=self._build_self_nudge_text(hidden_entry),
+                    context_prompt=context_prompt,
+                    history=updated_history,
+                    source=source,
+                    session_id=session_id,
+                    session_key=session_key,
+                    _interrupt_depth=_interrupt_depth + 1,
+                    persist_user_message="[System note: a self-nudge timer fired.]",
                 )
         finally:
             # Stop progress sender, interrupt monitor, and notification task

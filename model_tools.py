@@ -153,6 +153,7 @@ def _discover_tools():
         "tools.session_search_tool",
         "tools.clarify_tool",
         "tools.send_user_message_tool",
+        "tools.self_nudge_tool",
         "tools.code_execution_tool",
         "tools.delegate_tool",
         "tools.process_registry",
@@ -330,6 +331,26 @@ def get_tool_definitions(
             if td.get("function", {}).get("name") != "send_user_message"
         ]
 
+    gateway_self_nudge_platforms = {
+        "discord",
+        "dingtalk",
+        "email",
+        "feishu",
+        "homeassistant",
+        "matrix",
+        "mattermost",
+        "signal",
+        "slack",
+        "telegram",
+        "wecom",
+        "whatsapp",
+    }
+    if platform not in gateway_self_nudge_platforms:
+        filtered_tools = [
+            td for td in filtered_tools
+            if td.get("function", {}).get("name") != "self_nudge"
+        ]
+
     try:
         from tools.terminal_tool import can_offer_gateway_local
         expose_gateway_local = can_offer_gateway_local()
@@ -410,7 +431,7 @@ def get_tool_definitions(
 # because they need agent-level state (TodoStore, MemoryStore, etc.).
 # The registry still holds their schemas; dispatch just returns a stub error
 # so if something slips through, the LLM sees a sensible message.
-_AGENT_LOOP_TOOLS = {"todo", "memory", "session_search", "delegate_task", "send_user_message"}
+_AGENT_LOOP_TOOLS = {"todo", "memory", "session_search", "delegate_task", "send_user_message", "self_nudge"}
 _READ_SEARCH_TOOLS = {"read_file", "search_files"}
 
 

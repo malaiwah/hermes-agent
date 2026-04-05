@@ -88,6 +88,7 @@ class TestAgentLoopTools:
         assert "session_search" in _AGENT_LOOP_TOOLS
         assert "delegate_task" in _AGENT_LOOP_TOOLS
         assert "send_user_message" in _AGENT_LOOP_TOOLS
+        assert "self_nudge" in _AGENT_LOOP_TOOLS
 
     def test_no_regular_tools_in_set(self):
         assert "web_search" not in _AGENT_LOOP_TOOLS
@@ -112,6 +113,29 @@ class TestAgentLoopTools:
         assert [t["function"]["name"] for t in cli_tools] == ["send_user_message"]
         assert api_tools == []
         assert default_tools == []
+
+    def test_self_nudge_only_exposed_on_gateway_platforms(self):
+        telegram_tools = get_tool_definitions(
+            enabled_toolsets=["user_updates"],
+            quiet_mode=True,
+            platform="telegram",
+        )
+        cli_tools = get_tool_definitions(
+            enabled_toolsets=["user_updates"],
+            quiet_mode=True,
+            platform="cli",
+        )
+        api_tools = get_tool_definitions(
+            enabled_toolsets=["user_updates"],
+            quiet_mode=True,
+            platform="api_server",
+        )
+
+        telegram_names = [t["function"]["name"] for t in telegram_tools]
+        assert "send_user_message" in telegram_names
+        assert "self_nudge" in telegram_names
+        assert [t["function"]["name"] for t in cli_tools] == ["send_user_message"]
+        assert api_tools == []
 
     def test_terminal_gateway_local_param_hidden_when_unavailable(self, monkeypatch):
         monkeypatch.setattr(terminal_tool_module, "can_offer_gateway_local", lambda config=None: False)

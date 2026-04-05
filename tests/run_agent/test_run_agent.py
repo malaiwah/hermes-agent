@@ -893,6 +893,17 @@ class TestBuildAssistantMessage:
         assert len(result["tool_calls"]) == 1
         assert result["tool_calls"][0]["function"]["name"] == "web_search"
 
+    def test_self_nudge_tool_call_redacts_private_note(self, agent):
+        tc = _mock_tool_call(
+            name="self_nudge",
+            arguments='{"delay_seconds":300,"note":"check the private deploy state"}',
+            call_id="c-self",
+        )
+        msg = _mock_assistant_msg(content="", tool_calls=[tc])
+        result = agent._build_assistant_message(msg, "tool_calls")
+        parsed = json.loads(result["tool_calls"][0]["function"]["arguments"])
+        assert parsed == {"delay_seconds": 300}
+
     def test_with_reasoning_details(self, agent):
         details = [{"type": "reasoning.summary", "text": "step1", "signature": "sig1"}]
         msg = _mock_assistant_msg(content="ans", reasoning_details=details)
@@ -1049,6 +1060,21 @@ class TestConcurrentToolExecution:
         tc2 = _mock_tool_call(
             name="send_user_message",
             arguments='{"message":"I found the right file."}',
+            call_id="c2",
+        )
+        mock_msg = _mock_assistant_msg(content="", tool_calls=[tc1, tc2])
+        messages = []
+        with patch.object(agent, "_execute_tool_calls_sequential") as mock_seq:
+            with patch.object(agent, "_execute_tool_calls_concurrent") as mock_con:
+                agent._execute_tool_calls(mock_msg, messages, "task-1")
+                mock_seq.assert_called_once()
+                mock_con.assert_not_called()
+
+    def test_self_nudge_forces_sequential(self, agent):
+        tc1 = _mock_tool_call(name="web_search", arguments='{}', call_id="c1")
+        tc2 = _mock_tool_call(
+            name="self_nudge",
+            arguments='{"delay_seconds":300,"note":"Check the deploy status."}',
             call_id="c2",
         )
         mock_msg = _mock_assistant_msg(content="", tool_calls=[tc1, tc2])
@@ -1364,6 +1390,36 @@ class TestConcurrentToolExecution:
             agent._invoke_tool(
                 "send_user_message",
                 {"message": "No route available."},
+                "task-1",
+            )
+        )
+
+        assert "error" in result
+        assert "not available" in result["error"].lower()
+
+    def test_invoke_tool_self_nudge_uses_callback(self, agent):
+        cb = MagicMock(return_value={"armed": True, "delay_seconds": 300})
+        agent.self_nudge_callback = cb
+
+        result = json.loads(
+            agent._invoke_tool(
+                "self_nudge",
+                {"delay_seconds": 300, "note": "Check the deploy output."},
+                "task-1",
+            )
+        )
+
+        cb.assert_called_once_with(300, "Check the deploy output.")
+        assert result["armed"] is True
+        assert agent._self_nudge_armed_this_turn is True
+
+    def test_invoke_tool_self_nudge_errors_without_callback(self, agent):
+        agent.self_nudge_callback = None
+
+        result = json.loads(
+            agent._invoke_tool(
+                "self_nudge",
+                {"delay_seconds": 60},
                 "task-1",
             )
         )

@@ -54,6 +54,8 @@ _HERMES_CORE_TOOLS = [
     "clarify",
     # Natural-language progress updates to the current user
     "send_user_message",
+    # One-shot hidden follow-up timer for gateway sessions
+    "self_nudge",
     # Code execution + delegation
     "execute_code", "delegate_task",
     # Cronjob management
@@ -183,8 +185,8 @@ TOOLSETS = {
     },
 
     "user_updates": {
-        "description": "Send short natural-language progress updates to the current user without ending the turn",
-        "tools": ["send_user_message"],
+        "description": "Send short progress updates to the current user and arm one-shot hidden follow-up nudges",
+        "tools": ["send_user_message", "self_nudge"],
         "includes": []
     },
     
@@ -252,7 +254,7 @@ TOOLSETS = {
     },
 
     "hermes-api-server": {
-        "description": "OpenAI-compatible API server — full agent tools accessible via HTTP (no interactive UI tools like clarify, send_user_message, or send_message)",
+        "description": "OpenAI-compatible API server — full agent tools accessible via HTTP (no interactive UI tools like clarify, send_user_message, self_nudge, or send_message)",
         "tools": [
             # Web
             "web_search", "web_extract",
