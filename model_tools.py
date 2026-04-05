@@ -305,6 +305,16 @@ def get_tool_definitions(
     # Ask the registry for schemas (only returns tools whose check_fn passes)
     filtered_tools = registry.get_definitions(tools_to_include, quiet=quiet_mode)
 
+    # Clarify requires a live platform callback that can synchronously wait
+    # for the user's answer. Today only the interactive CLI wires that
+    # callback, so keep the tool out of other contexts instead of exposing a
+    # deterministic runtime error.
+    if platform != "cli":
+        filtered_tools = [
+            td for td in filtered_tools
+            if td.get("function", {}).get("name") != "clarify"
+        ]
+
     # Interactive in-session messaging is only meaningful when Hermes has a
     # live session surface that can route updates back to the current user.
     # Keep it out of non-interactive/default contexts so the model does not

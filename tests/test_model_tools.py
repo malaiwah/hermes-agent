@@ -114,6 +114,26 @@ class TestAgentLoopTools:
         assert api_tools == []
         assert default_tools == []
 
+    def test_clarify_only_exposed_on_cli(self):
+        cli_tools = get_tool_definitions(
+            enabled_toolsets=["clarify"],
+            quiet_mode=True,
+            platform="cli",
+        )
+        telegram_tools = get_tool_definitions(
+            enabled_toolsets=["clarify"],
+            quiet_mode=True,
+            platform="telegram",
+        )
+        default_tools = get_tool_definitions(
+            enabled_toolsets=["clarify"],
+            quiet_mode=True,
+        )
+
+        assert [t["function"]["name"] for t in cli_tools] == ["clarify"]
+        assert telegram_tools == []
+        assert default_tools == []
+
     def test_self_nudge_only_exposed_on_gateway_platforms(self):
         telegram_tools = get_tool_definitions(
             enabled_toolsets=["user_updates"],
