@@ -499,7 +499,17 @@ class TestGeneratedUnitIncludesLocalBin:
         home = str(Path.home())
         assert f"{home}/.local/bin" in unit
 
-    def test_system_unit_includes_local_bin_in_path(self):
+    def test_system_unit_includes_local_bin_in_path(self, monkeypatch):
+        gateway_cli._service_identity_cache = None
+        gateway_cli._service_identity_cache_run_as_user = None
+        monkeypatch.setattr(
+            gateway_cli, "_system_service_identity",
+            lambda run_as_user=None: ("alice", "alice", "/home/alice"),
+        )
+        monkeypatch.setattr(
+            gateway_cli, "_build_user_local_paths",
+            lambda home_dir, existing: [f"{home_dir}/.local/bin"],
+        )
         unit = gateway_cli.generate_systemd_unit(system=True)
         # System unit uses the resolved home dir from _system_service_identity
         assert "/.local/bin" in unit
