@@ -254,6 +254,9 @@ class GatewayConfig:
     # Streaming configuration
     streaming: StreamingConfig = field(default_factory=StreamingConfig)
 
+    # Restart recovery
+    resume_inflight_sessions_on_restart: bool = False
+
     def get_connected_platforms(self) -> List[Platform]:
         """Return list of platforms that are enabled and configured."""
         connected = []
@@ -337,6 +340,7 @@ class GatewayConfig:
             "thread_sessions_per_user": self.thread_sessions_per_user,
             "unauthorized_dm_behavior": self.unauthorized_dm_behavior,
             "streaming": self.streaming.to_dict(),
+            "resume_inflight_sessions_on_restart": self.resume_inflight_sessions_on_restart,
         }
     
     @classmethod
@@ -398,6 +402,9 @@ class GatewayConfig:
             thread_sessions_per_user=_coerce_bool(thread_sessions_per_user, False),
             unauthorized_dm_behavior=unauthorized_dm_behavior,
             streaming=StreamingConfig.from_dict(data.get("streaming", {})),
+            resume_inflight_sessions_on_restart=_coerce_bool(
+                data.get("resume_inflight_sessions_on_restart"), False
+            ),
         )
 
     def get_unauthorized_dm_behavior(self, platform: Optional[Platform] = None) -> str:
@@ -489,6 +496,11 @@ def load_gateway_config() -> GatewayConfig:
                     yaml_cfg.get("unauthorized_dm_behavior"),
                     "pair",
                 )
+
+            if "resume_inflight_sessions_on_restart" in yaml_cfg:
+                gw_data["resume_inflight_sessions_on_restart"] = yaml_cfg[
+                    "resume_inflight_sessions_on_restart"
+                ]
 
             # Merge platforms section from config.yaml into gw_data so that
             # nested keys like platforms.webhook.extra.routes are loaded.
