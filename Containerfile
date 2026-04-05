@@ -1,5 +1,24 @@
 FROM debian:13.4
 
+# ── Build metadata ───────────────────────────────────────────────────────────
+
+ARG GIT_COMMIT=unknown
+ARG GIT_REF=unknown
+ARG BUILD_DATE=unknown
+ARG IMAGE_SOURCE=http://10.15.0.6:3300/angelos/hermes-agent
+
+LABEL org.opencontainers.image.title="hermes-agent" \
+      org.opencontainers.image.description="Self-improving AI agent — creates skills from experience" \
+      org.opencontainers.image.source="${IMAGE_SOURCE}" \
+      org.opencontainers.image.base.name="debian:13.4" \
+      org.opencontainers.image.revision="${GIT_COMMIT}" \
+      org.opencontainers.image.ref.name="${GIT_REF}" \
+      org.opencontainers.image.created="${BUILD_DATE}"
+
+RUN printf 'IMAGE_TITLE=hermes-agent\nIMAGE_SOURCE=%s\nGIT_COMMIT=%s\nGIT_REF=%s\nBUILD_DATE=%s\n' \
+    "${IMAGE_SOURCE}" "${GIT_COMMIT}" "${GIT_REF}" "${BUILD_DATE}" \
+    > /etc/hermes-release
+
 # ── System dependencies ──────────────────────────────────────────────────────
 
 RUN apt-get update && \
