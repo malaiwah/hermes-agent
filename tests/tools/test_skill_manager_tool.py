@@ -230,6 +230,37 @@ class TestCreateSkill:
         assert "Invalid category '../escape'" in result["error"]
         assert not (tmp_path / "escape").exists()
 
+
+class TestFindSkill:
+    def test_find_skill_respects_patched_skills_dir(self, tmp_path):
+        with patch("tools.skill_manager_tool.SKILLS_DIR", tmp_path):
+            _create_skill("my-skill", VALID_SKILL_CONTENT)
+            result = _find_skill("my-skill")
+
+        assert result is not None
+        assert result["path"] == tmp_path / "my-skill"
+
+    def test_find_skill_includes_external_dirs(self, tmp_path, monkeypatch):
+        local_skills = tmp_path / "local-skills"
+        external_skills = tmp_path / "external-skills"
+        local_skills.mkdir()
+        external_skills.mkdir()
+        (external_skills / "ext-skill").mkdir()
+        (external_skills / "ext-skill" / "SKILL.md").write_text(
+            VALID_SKILL_CONTENT,
+            encoding="utf-8",
+        )
+
+        with patch("tools.skill_manager_tool.SKILLS_DIR", local_skills):
+            monkeypatch.setattr(
+                "agent.skill_utils.get_external_skills_dirs",
+                lambda: [external_skills],
+            )
+            result = _find_skill("ext-skill")
+
+        assert result is not None
+        assert result["path"] == external_skills / "ext-skill"
+
     def test_create_rejects_absolute_category(self, tmp_path):
         skills_dir = tmp_path / "skills"
         skills_dir.mkdir()

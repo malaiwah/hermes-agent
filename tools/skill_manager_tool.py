@@ -204,8 +204,20 @@ def _find_skill(name: str) -> Optional[Dict[str, Any]]:
     external dirs configured via skills.external_dirs.  Returns
     {"path": Path} or None.
     """
-    from agent.skill_utils import get_all_skills_dirs
-    for skills_dir in get_all_skills_dirs():
+    # Use the module-level SKILLS_DIR first so tests and callers that
+    # monkeypatch it get the expected local-first behavior. Then append any
+    # configured external dirs.
+    all_dirs = [SKILLS_DIR]
+    try:
+        from agent.skill_utils import get_external_skills_dirs
+
+        for ext_dir in get_external_skills_dirs():
+            if ext_dir not in all_dirs:
+                all_dirs.append(ext_dir)
+    except Exception:
+        pass
+
+    for skills_dir in all_dirs:
         if not skills_dir.exists():
             continue
         for skill_md in skills_dir.rglob("SKILL.md"):
