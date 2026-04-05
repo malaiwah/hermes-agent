@@ -7374,8 +7374,9 @@ class GatewayRunner:
             # Prepend pending model switch note so the model knows about the switch
             _pending_notes = getattr(self, '_pending_model_notes', {})
             _msn = _pending_notes.pop(session_key, None) if session_key else None
+            prompt_message = message
             if _msn:
-                message = _msn + "\n\n" + message
+                prompt_message = _msn + "\n\n" + prompt_message
 
             _approval_session_key = session_key or ""
             _approval_session_token = set_current_session_key(_approval_session_key)
@@ -7395,7 +7396,7 @@ class GatewayRunner:
                             _run_kwargs["persist_user_message"] = persist_user_message
                     except Exception:
                         _run_kwargs["persist_user_message"] = persist_user_message
-                result = agent.run_conversation(message, **_run_kwargs)
+                result = agent.run_conversation(prompt_message, **_run_kwargs)
             finally:
                 unregister_gateway_notify(_approval_session_key)
                 reset_current_session_key(_approval_session_token)
