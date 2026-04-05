@@ -24,12 +24,26 @@ MAX_WORKSPACE_MAPPINGS = 8
 
 
 def resolve_parent_workspace_root() -> Path:
-    """Return the parent workspace root on the host filesystem."""
-    raw = os.getenv("TERMINAL_CWD") or os.getcwd()
-    root = Path(raw).expanduser().resolve()
+    """Return the parent workspace root on the host filesystem.
+
+    Tries TERMINAL_CWD first, falls back to HERMES_HOME (~/.hermes by default).
+    TERMINAL_CWD often points to a path inside the sandbox container (e.g.
+    /workspace) that does not exist on the gateway host, so the fallback
+    ensures the feature works in standard deployments.
+    """
+    from hermes_constants import get_hermes_home
+
+    raw = os.getenv("TERMINAL_CWD") or ""
+    if raw:
+        candidate = Path(raw).expanduser().resolve()
+        if candidate.exists() and candidate.is_dir():
+            return candidate
+
+    root = get_hermes_home().resolve()
     if not root.exists() or not root.is_dir():
         raise ValueError(
-            f"Cannot use delegated workspace visibility: parent workspace root is not a directory: {root}"
+            f"Cannot use delegated workspace visibility: neither TERMINAL_CWD nor "
+            f"HERMES_HOME ({root}) is a valid directory on this host."
         )
     return root
 
