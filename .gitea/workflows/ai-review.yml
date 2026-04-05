@@ -1,0 +1,60 @@
+name: AI Peer Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+concurrency:
+  group: ai-review-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine reviewer
+        id: pick
+        run: |
+          BRANCH="${{ github.event.pull_request.head.ref }}"
+          if [[ "$BRANCH" == codex/* ]]; then
+            echo "reviewer=claude" >> "$GITHUB_OUTPUT"
+            echo "reason=Codex-authored PR → reviewed by Claude" >> "$GITHUB_OUTPUT"
+          elif [[ "$BRANCH" == claude/* ]]; then
+            echo "reviewer=codex" >> "$GITHUB_OUTPUT"
+            echo "reason=Claude-authored PR → reviewed by Codex" >> "$GITHUB_OUTPUT"
+          else
+            echo "reviewer=claude" >> "$GITHUB_OUTPUT"
+            echo "reason=Human PR → reviewed by Claude (default)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install Codex CLI
+        if: steps.pick.outputs.reviewer == 'codex'
+        run: npm install -g @openai/codex
+
+      - name: Run AI review
+        env:
+          REVIEWER: ${{ steps.pick.outputs.reviewer }}
+          REVIEWER_REASON: ${{ steps.pick.outputs.reason }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          GITEA_API: http://10.15.0.6:3300/api/v1
+          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+          # Claude — via LiteLLM Anthropic-compatible endpoint
+          ANTHROPIC_API_KEY: ${{ secrets.LITELLM_API_KEY }}
+          ANTHROPIC_BASE_URL: http://10.15.0.6:4000
+          # Codex — via LiteLLM OpenAI-compatible endpoint
+          OPENAI_API_KEY: ${{ secrets.LITELLM_API_KEY }}
+          OPENAI_BASE_URL: http://10.15.0.6:4000
+        run: |
+          uv run --with claude-agent-sdk --with httpx \
+            python .gitea/scripts/ai_review.py
