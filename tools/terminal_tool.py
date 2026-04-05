@@ -1017,6 +1017,7 @@ def terminal_tool(
         # Get configuration
         config = _get_env_config()
         env_type = config["env_type"]
+        pre_exec_notice = ""
 
         # Use task_id for environment isolation
         effective_task_id = task_id or "default"
@@ -1156,7 +1157,7 @@ def terminal_tool(
                     "output": "",
                     "exit_code": -1,
                     "error": approval.get("message", fallback_msg),
-                    "status": "blocked"
+                        "status": "blocked"
                 }, ensure_ascii=False)
             # Track whether approval was explicitly granted by the user
             if approval.get("user_approved"):
@@ -1165,6 +1166,7 @@ def terminal_tool(
             elif approval.get("smart_approved"):
                 desc = approval.get("description", "flagged as dangerous")
                 approval_note = f"Command was flagged ({desc}) and auto-approved by smart approval."
+            pre_exec_notice = (approval.get("message") or "").strip()
 
         # Prepare command for execution
         if background:
@@ -1195,8 +1197,11 @@ def terminal_tool(
                         session_key=session_key,
                     )
 
+                result_output = "Background process started"
+                if pre_exec_notice:
+                    result_output = f"{pre_exec_notice}\n\n{result_output}"
                 result_data = {
-                    "output": "Background process started",
+                    "output": result_output,
                     "session_id": proc_session.id,
                     "pid": proc_session.pid,
                     "exit_code": 0,
@@ -1293,6 +1298,8 @@ def terminal_tool(
             
             # Add helpful message for sudo failures in messaging context
             output = _handle_sudo_failure(output, env_type)
+            if pre_exec_notice:
+                output = f"{pre_exec_notice}\n\n{output}" if output else pre_exec_notice
             
             # Truncate output if too long, keeping both head and tail
             MAX_OUTPUT_CHARS = 50000

@@ -3526,22 +3526,19 @@ class GatewayRunner:
     
     async def _handle_personality_command(self, event: MessageEvent) -> str:
         """Handle /personality command - list or set a personality."""
-        import yaml
-
         args = event.get_command_args().strip().lower()
         config_path = _hermes_home / 'config.yaml'
 
-        try:
-            if config_path.exists():
-                with open(config_path, 'r', encoding="utf-8") as f:
-                    config = yaml.safe_load(f) or {}
-                personalities = config.get("agent", {}).get("personalities", {})
-            else:
-                config = {}
-                personalities = {}
-        except Exception:
-            config = {}
-            personalities = {}
+        from hermes_cli.config import load_raw_config_mapping_result
+
+        config, error_result = load_raw_config_mapping_result(
+            config_path,
+            action="read personality settings",
+        )
+        if error_result is not None:
+            return f"⚠️ {error_result.error}"
+        assert config is not None
+        personalities = config.get("agent", {}).get("personalities", {})
 
         if not personalities:
             return "No personalities configured in `~/.hermes/config.yaml`"
@@ -3570,10 +3567,14 @@ class GatewayRunner:
 
         if args in ("none", "default", "neutral"):
             try:
+                from hermes_cli.config import describe_config_write_failure, save_yaml_config_result
+
                 if "agent" not in config or not isinstance(config.get("agent"), dict):
                     config["agent"] = {}
                 config["agent"]["system_prompt"] = ""
-                atomic_yaml_write(config_path, config)
+                result = save_yaml_config_result(config_path, config)
+                if not result:
+                    return f"⚠️ Personality cleared for this session only.\n\n{describe_config_write_failure(result, action='save the personality change')}"
             except Exception as e:
                 return f"⚠️ Failed to save personality change: {e}"
             self._ephemeral_system_prompt = ""
@@ -3583,10 +3584,18 @@ class GatewayRunner:
 
             # Write to config.yaml, same pattern as CLI save_config_value.
             try:
+                from hermes_cli.config import describe_config_write_failure, save_yaml_config_result
+
                 if "agent" not in config or not isinstance(config.get("agent"), dict):
                     config["agent"] = {}
                 config["agent"]["system_prompt"] = new_prompt
-                atomic_yaml_write(config_path, config)
+                result = save_yaml_config_result(config_path, config)
+                if not result:
+                    self._ephemeral_system_prompt = new_prompt
+                    return (
+                        f"🎭 Personality set to **{args}**\n_(session only — config is locked)_\n\n"
+                        f"{describe_config_write_failure(result, action='save the personality change')}"
+                    )
             except Exception as e:
                 return f"⚠️ Failed to save personality change: {e}"
 
@@ -3666,19 +3675,31 @@ class GatewayRunner:
         chat_name = source.chat_name or chat_id
         
         env_key = f"{platform_name.upper()}_HOME_CHANNEL"
+        try:
+            from gateway.config import HomeChannel
+
+            if getattr(self, "config", None) and source.platform in self.config.platforms:
+                self.config.platforms[source.platform].home_channel = HomeChannel(
+                    platform=source.platform,
+                    chat_id=str(chat_id),
+                    name=str(chat_name),
+                )
+        except Exception:
+            logger.debug("Failed to update in-memory home channel", exc_info=True)
         
         # Save to config.yaml
         try:
-            import yaml
-            config_path = _hermes_home / 'config.yaml'
-            user_config = {}
-            if config_path.exists():
-                with open(config_path, encoding="utf-8") as f:
-                    user_config = yaml.safe_load(f) or {}
-            user_config[env_key] = chat_id
-            atomic_yaml_write(config_path, user_config)
+            from hermes_cli.config import describe_config_write_failure, save_config_key_result
+
+            result = save_config_key_result(env_key, chat_id, config_path=_hermes_home / "config.yaml")
             # Also set in the current environment so it takes effect immediately
             os.environ[env_key] = str(chat_id)
+            if not result:
+                return (
+                    f"✅ Home channel set to **{chat_name}** (ID: {chat_id}) for this running gateway only.\n"
+                    f"_(could not persist to config)_\n\n"
+                    f"{describe_config_write_failure(result, action='save the home channel')}"
+                )
         except Exception as e:
             return f"Failed to save home channel: {e}"
         
@@ -4493,22 +4514,17 @@ class GatewayRunner:
         def _save_config_key(key_path: str, value):
             """Save a dot-separated key to config.yaml."""
             try:
-                user_config = {}
-                if config_path.exists():
-                    with open(config_path, encoding="utf-8") as f:
-                        user_config = yaml.safe_load(f) or {}
-                keys = key_path.split(".")
-                current = user_config
-                for k in keys[:-1]:
-                    if k not in current or not isinstance(current[k], dict):
-                        current[k] = {}
-                    current = current[k]
-                current[keys[-1]] = value
-                atomic_yaml_write(config_path, user_config)
-                return True
+                from hermes_cli.config import ConfigWriteResult, save_config_key_result
+
+                return save_config_key_result(key_path, value, config_path=config_path)
             except Exception as e:
                 logger.error("Failed to save config key %s: %s", key_path, e)
-                return False
+                return ConfigWriteResult(
+                    success=False,
+                    path=config_path,
+                    error=e,
+                    blocked=False,
+                )
 
         if not args:
             # Show current state
@@ -4530,13 +4546,25 @@ class GatewayRunner:
         # Display toggle
         if args in ("show", "on"):
             self._show_reasoning = True
-            _save_config_key("display.show_reasoning", True)
-            return "🧠 ✓ Reasoning display: **ON**\nModel thinking will be shown before each response."
+            result = _save_config_key("display.show_reasoning", True)
+            if result:
+                return "🧠 ✓ Reasoning display: **ON**\nModel thinking will be shown before each response."
+            from hermes_cli.config import describe_config_write_failure
+            return (
+                "🧠 ✓ Reasoning display: **ON**\n_(session only — config is locked)_\n\n"
+                f"{describe_config_write_failure(result, action='save reasoning display settings')}"
+            )
 
         if args in ("hide", "off"):
             self._show_reasoning = False
-            _save_config_key("display.show_reasoning", False)
-            return "🧠 ✓ Reasoning display: **OFF**"
+            result = _save_config_key("display.show_reasoning", False)
+            if result:
+                return "🧠 ✓ Reasoning display: **OFF**"
+            from hermes_cli.config import describe_config_write_failure
+            return (
+                "🧠 ✓ Reasoning display: **OFF**\n_(session only — config is locked)_\n\n"
+                f"{describe_config_write_failure(result, action='save reasoning display settings')}"
+            )
 
         # Effort level change
         effort = args.strip()
@@ -4552,10 +4580,14 @@ class GatewayRunner:
             )
 
         self._reasoning_config = parsed
-        if _save_config_key("agent.reasoning_effort", effort):
+        result = _save_config_key("agent.reasoning_effort", effort)
+        if result:
             return f"🧠 ✓ Reasoning effort set to `{effort}` (saved to config)\n_(takes effect on next message)_"
-        else:
-            return f"🧠 ✓ Reasoning effort set to `{effort}` (this session only)"
+        from hermes_cli.config import describe_config_write_failure
+        return (
+            f"🧠 ✓ Reasoning effort set to `{effort}` (this session only)\n\n"
+            f"{describe_config_write_failure(result, action='save reasoning effort')}"
+        )
 
     async def _handle_yolo_command(self, event: MessageEvent) -> str:
         """Handle /yolo — toggle dangerous command approval bypass."""
@@ -4574,19 +4606,19 @@ class GatewayRunner:
         When enabled, cycles the tool progress mode through off → new → all →
         verbose → off, same as the CLI.
         """
-        import yaml
-
         config_path = _hermes_home / "config.yaml"
 
         # --- check config gate ------------------------------------------------
-        try:
-            user_config = {}
-            if config_path.exists():
-                with open(config_path, encoding="utf-8") as f:
-                    user_config = yaml.safe_load(f) or {}
-            gate_enabled = user_config.get("display", {}).get("tool_progress_command", False)
-        except Exception:
-            gate_enabled = False
+        from hermes_cli.config import load_raw_config_mapping_result
+
+        user_config, error_result = load_raw_config_mapping_result(
+            config_path,
+            action="read `/verbose` settings",
+        )
+        if error_result is not None:
+            return f"⚠️ {error_result.error}"
+        assert user_config is not None
+        gate_enabled = user_config.get("display", {}).get("tool_progress_command", False)
 
         if not gate_enabled:
             return (
@@ -4619,11 +4651,18 @@ class GatewayRunner:
 
         # Save to config.yaml
         try:
+            from hermes_cli.config import describe_config_write_failure, save_yaml_config_result
+
             if "display" not in user_config or not isinstance(user_config.get("display"), dict):
                 user_config["display"] = {}
             user_config["display"]["tool_progress"] = new_mode
-            atomic_yaml_write(config_path, user_config)
-            return f"{descriptions[new_mode]}\n_(saved to config — takes effect on next message)_"
+            result = save_yaml_config_result(config_path, user_config)
+            if result:
+                return f"{descriptions[new_mode]}\n_(saved to config — takes effect on next message)_"
+            return (
+                f"{descriptions[new_mode]}\n_(session only — config is locked)_\n\n"
+                f"{describe_config_write_failure(result, action='save tool progress mode')}"
+            )
         except Exception as e:
             logger.warning("Failed to save tool_progress mode: %s", e)
             return f"{descriptions[new_mode]}\n_(could not save to config: {e})_"

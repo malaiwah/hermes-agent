@@ -17,7 +17,11 @@ from typing import Dict, List, Optional, Set
 
 
 from hermes_cli.config import (
-    load_config, save_config, get_env_value, save_env_value,
+    guard_config_command,
+    load_config,
+    save_config,
+    get_env_value,
+    save_env_value,
 )
 from hermes_cli.colors import Colors, color
 from hermes_cli.nous_subscription import (
@@ -1297,6 +1301,7 @@ def _reconfigure_simple_requirements(ts_key: str):
 
 # ─── Main Entry Point ─────────────────────────────────────────────────────────
 
+@guard_config_command
 def tools_command(args=None, first_install: bool = False, config: dict = None):
     """Entry point for `hermes tools` and `hermes setup tools`.
 
@@ -1740,6 +1745,7 @@ def _print_tools_list(enabled_toolsets: set, mcp_servers: dict, platform: str = 
                 _print_info(f"{srv_name}  {color('all tools enabled', Colors.DIM)}")
 
 
+@guard_config_command
 def tools_disable_enable_command(args):
     """Enable, disable, or list tools for a platform.
 

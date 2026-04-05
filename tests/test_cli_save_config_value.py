@@ -1,5 +1,6 @@
 """Tests for save_config_value() in cli.py — atomic write behavior."""
 
+import errno
 import os
 import yaml
 from pathlib import Path
@@ -78,3 +79,29 @@ class TestSaveConfigValueAtomic:
 
         assert result is False
         assert config_env.read_text() == original_content
+
+    def test_returns_structured_result_for_locked_config(self, config_env, monkeypatch):
+        """Read-only config saves should return a patch the user can apply manually."""
+        def locked_write(*args, **kwargs):
+            raise OSError(errno.EROFS, "Read-only file system")
+
+        monkeypatch.setattr("utils.atomic_yaml_write", locked_write)
+
+        from cli import save_config_value_result
+
+        result = save_config_value_result("display.skin", "mono")
+
+        assert not result
+        assert result.blocked is True
+        assert "display:" in result.diff
+        assert "+  skin: mono" in result.diff or "+skin: mono" in result.diff
+
+    def test_rejects_invalid_existing_yaml(self, config_env):
+        config_env.write_text("display: [broken\n", encoding="utf-8")
+
+        from cli import save_config_value_result
+
+        result = save_config_value_result("display.skin", "mono")
+
+        assert not result
+        assert "contains invalid YAML" in str(result.error)
