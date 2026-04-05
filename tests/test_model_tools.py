@@ -4,6 +4,7 @@ import json
 from unittest.mock import call, patch
 
 import pytest
+import tools.terminal_tool as terminal_tool_module
 
 from model_tools import (
     handle_function_call,
@@ -111,6 +112,26 @@ class TestAgentLoopTools:
         assert [t["function"]["name"] for t in cli_tools] == ["send_user_message"]
         assert api_tools == []
         assert default_tools == []
+
+    def test_terminal_gateway_local_param_hidden_when_unavailable(self, monkeypatch):
+        monkeypatch.setattr(terminal_tool_module, "can_offer_gateway_local", lambda config=None: False)
+        tools = get_tool_definitions(
+            enabled_toolsets=["terminal"],
+            quiet_mode=True,
+            platform="telegram",
+        )
+        terminal = next(t["function"] for t in tools if t["function"]["name"] == "terminal")
+        assert "gateway_local" not in terminal["parameters"]["properties"]
+
+    def test_terminal_gateway_local_param_exposed_when_available(self, monkeypatch):
+        monkeypatch.setattr(terminal_tool_module, "can_offer_gateway_local", lambda config=None: True)
+        tools = get_tool_definitions(
+            enabled_toolsets=["terminal"],
+            quiet_mode=True,
+            platform="telegram",
+        )
+        terminal = next(t["function"] for t in tools if t["function"]["name"] == "terminal")
+        assert "gateway_local" in terminal["parameters"]["properties"]
 
 
 # =========================================================================
