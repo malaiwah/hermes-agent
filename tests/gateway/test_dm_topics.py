@@ -280,6 +280,22 @@ def test_persist_dm_topic_thread_id_skips_if_already_set(tmp_path):
     assert topics[0]["thread_id"] == 500  # unchanged
 
 
+def test_persist_dm_topic_thread_id_does_not_overwrite_invalid_yaml(tmp_path, caplog):
+    config_file = tmp_path / ".hermes" / "config.yaml"
+    config_file.parent.mkdir(parents=True)
+    original = "platforms: [broken\n"
+    config_file.write_text(original, encoding="utf-8")
+
+    adapter = _make_adapter()
+
+    with patch.object(Path, "home", return_value=tmp_path), \
+         patch.dict(os.environ, {"HERMES_HOME": str(tmp_path / ".hermes")}):
+        adapter._persist_dm_topic_thread_id(111, "General", 999)
+
+    assert config_file.read_text(encoding="utf-8") == original
+    assert "contains invalid YAML" in caplog.text
+
+
 # ── _get_dm_topic_info ──
 
 

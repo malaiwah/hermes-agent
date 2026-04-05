@@ -319,6 +319,7 @@ from hermes_cli.config import (
     get_hermes_home,
     get_config_path,
     get_env_path,
+    guard_config_command,
     load_config,
     save_config,
     save_env_value,
@@ -2619,6 +2620,7 @@ RETURNING_USER_MENU_SECTION_KEYS = [
 ]
 
 
+@guard_config_command
 def run_setup_wizard(args):
     """Run the interactive setup wizard.
 

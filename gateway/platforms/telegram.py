@@ -357,14 +357,28 @@ class TelegramAdapter(BasePlatformAdapter):
         """Save a newly created thread_id back into config.yaml so it persists across restarts."""
         try:
             from hermes_constants import get_hermes_home
+            from hermes_cli.config import (
+                describe_config_write_failure,
+                load_raw_config_mapping_result,
+                save_yaml_config_result,
+            )
             config_path = get_hermes_home() / "config.yaml"
             if not config_path.exists():
                 logger.warning("[%s] Config file not found at %s, cannot persist thread_id", self.name, config_path)
                 return
 
-            import yaml as _yaml
-            with open(config_path, "r") as f:
-                config = _yaml.safe_load(f) or {}
+            config, load_error = load_raw_config_mapping_result(
+                config_path,
+                action="persist Telegram DM topic thread IDs",
+            )
+            if load_error is not None:
+                logger.warning(
+                    "[%s] %s",
+                    self.name,
+                    describe_config_write_failure(load_error, action="persist Telegram DM topic thread IDs"),
+                )
+                return
+            assert config is not None
 
             # Navigate to platforms.telegram.extra.dm_topics
             dm_topics = (
@@ -387,8 +401,14 @@ class TelegramAdapter(BasePlatformAdapter):
                         break
 
             if changed:
-                with open(config_path, "w") as f:
-                    _yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+                result = save_yaml_config_result(config_path, config, sort_keys=False)
+                if not result:
+                    logger.warning(
+                        "[%s] %s",
+                        self.name,
+                        describe_config_write_failure(result, action="persist Telegram DM topic thread IDs"),
+                    )
+                    return
                 logger.info(
                     "[%s] Persisted thread_id=%s for topic '%s' in config.yaml",
                     self.name, thread_id, topic_name,

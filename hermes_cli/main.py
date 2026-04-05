@@ -865,7 +865,15 @@ def cmd_setup(args):
 def cmd_model(args):
     """Select default model — starts with provider selection, then model picker."""
     _require_tty("model")
-    select_provider_and_model(args=args)
+    try:
+        select_provider_and_model(args=args)
+    except Exception as exc:
+        from hermes_cli.config import ConfigWriteError
+
+        if isinstance(exc, ConfigWriteError):
+            print(str(exc))
+            return
+        raise
 
 
 def select_provider_and_model(args=None):
@@ -1461,14 +1469,14 @@ def _model_flow_custom(config):
             context_length = None
 
     if model_name:
-        _save_model_choice(model_name)
-
-        # Update config and deactivate any OAuth provider
+        # Update config and deactivate any OAuth provider with a single save so
+        # locked/read-only config fallbacks can show the full intended patch.
         cfg = load_config()
         model = cfg.get("model")
         if not isinstance(model, dict):
             model = {"default": model} if model else {}
             cfg["model"] = model
+        model["default"] = model_name
         model["provider"] = "custom"
         model["base_url"] = effective_url
         if effective_key:

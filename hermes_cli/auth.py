@@ -2214,7 +2214,22 @@ def _update_config_for_provider(
     config_path = get_config_path()
     config_path.parent.mkdir(parents=True, exist_ok=True)
 
-    config = read_raw_config()
+    from hermes_cli.config import (
+        ConfigWriteError,
+        load_raw_config_mapping_result,
+        save_yaml_config_result,
+    )
+
+    config, load_error = load_raw_config_mapping_result(config_path, action="save provider settings")
+    if load_error is not None:
+        raise ConfigWriteError(
+            path=config_path,
+            action="save provider settings",
+            error=load_error.error or OSError("invalid existing config"),
+            blocked=load_error.blocked,
+            diff=load_error.diff,
+        )
+    assert config is not None
 
     current_model = config.get("model")
     if isinstance(current_model, dict):
@@ -2241,7 +2256,15 @@ def _update_config_for_provider(
 
     config["model"] = model_cfg
 
-    config_path.write_text(yaml.safe_dump(config, sort_keys=False))
+    result = save_yaml_config_result(config_path, config, sort_keys=False)
+    if not result:
+        raise ConfigWriteError(
+            path=config_path,
+            action="save provider settings",
+            error=result.error or OSError("unknown config write failure"),
+            blocked=result.blocked,
+            diff=result.diff,
+        )
     return config_path
 
 
@@ -2251,16 +2274,38 @@ def _reset_config_provider() -> Path:
     if not config_path.exists():
         return config_path
 
-    config = read_raw_config()
-    if not config:
-        return config_path
+    from hermes_cli.config import (
+        ConfigWriteError,
+        load_raw_config_mapping_result,
+        save_yaml_config_result,
+    )
+
+    config, load_error = load_raw_config_mapping_result(config_path, action="reset provider settings")
+    if load_error is not None:
+        raise ConfigWriteError(
+            path=config_path,
+            action="reset provider settings",
+            error=load_error.error or OSError("invalid existing config"),
+            blocked=load_error.blocked,
+            diff=load_error.diff,
+        )
+    assert config is not None
 
     model = config.get("model")
     if isinstance(model, dict):
         model["provider"] = "auto"
         if "base_url" in model:
             model["base_url"] = OPENROUTER_BASE_URL
-    config_path.write_text(yaml.safe_dump(config, sort_keys=False))
+
+    result = save_yaml_config_result(config_path, config, sort_keys=False)
+    if not result:
+        raise ConfigWriteError(
+            path=config_path,
+            action="reset provider settings",
+            error=result.error or OSError("unknown config write failure"),
+            blocked=result.blocked,
+            diff=result.diff,
+        )
     return config_path
 
 

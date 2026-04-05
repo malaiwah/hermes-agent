@@ -28,6 +28,7 @@ from agent.credential_pool import (
 )
 import hermes_cli.auth as auth_mod
 from hermes_cli.auth import PROVIDER_REGISTRY
+from hermes_cli.config import guard_config_command
 from hermes_constants import OPENROUTER_BASE_URL
 
 
@@ -500,6 +501,7 @@ def _interactive_strategy() -> None:
     print(f"Set {provider} strategy to: {strategy}")
 
 
+@guard_config_command
 def auth_command(args) -> None:
     action = getattr(args, "auth_action", "")
     if action == "add":

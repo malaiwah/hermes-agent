@@ -13,7 +13,7 @@ Config stored in ~/.hermes/config.yaml under:
 """
 from typing import List, Optional, Set
 
-from hermes_cli.config import load_config, save_config
+from hermes_cli.config import guard_config_command, load_config, save_config
 from hermes_cli.colors import Colors, color
 
 PLATFORMS = {
@@ -133,6 +133,7 @@ def _toggle_by_category(skills: List[dict], disabled: Set[str]) -> Set[str]:
 
 # ─── Entry Point ──────────────────────────────────────────────────────────────
 
+@guard_config_command
 def skills_command(args=None):
     """Entry point for `hermes skills`."""
     from hermes_cli.curses_ui import curses_checklist

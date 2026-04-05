@@ -3,6 +3,7 @@ import sys
 import types
 from contextlib import nullcontext
 from types import SimpleNamespace
+from pathlib import Path
 
 import pytest
 
@@ -556,7 +557,6 @@ def test_model_flow_custom_saves_verified_v1_base_url(monkeypatch, capsys):
     )
     saved_env = {}
     monkeypatch.setattr("hermes_cli.config.save_env_value", lambda key, value: saved_env.__setitem__(key, value))
-    monkeypatch.setattr("hermes_cli.auth._save_model_choice", lambda model: saved_env.__setitem__("MODEL", model))
     monkeypatch.setattr("hermes_cli.auth.deactivate_provider", lambda: None)
     monkeypatch.setattr("hermes_cli.main._save_custom_provider", lambda *args, **kwargs: None)
     monkeypatch.setattr(
@@ -569,11 +569,12 @@ def test_model_flow_custom_saves_verified_v1_base_url(monkeypatch, capsys):
             "used_fallback": True,
         },
     )
+    saved_cfg = {}
     monkeypatch.setattr(
         "hermes_cli.config.load_config",
         lambda: {"model": {"default": "", "provider": "custom", "base_url": ""}},
     )
-    monkeypatch.setattr("hermes_cli.config.save_config", lambda cfg: None)
+    monkeypatch.setattr("hermes_cli.config.save_config", lambda cfg: saved_cfg.update(cfg))
 
     # After the probe detects a single model ("llm"), the flow asks
     # "Use this model? [Y/n]:" — confirm with Enter, then context length.
@@ -588,7 +589,33 @@ def test_model_flow_custom_saves_verified_v1_base_url(monkeypatch, capsys):
     assert "Detected model: llm" in output
     # OPENAI_BASE_URL is no longer saved to .env — config.yaml is authoritative
     assert "OPENAI_BASE_URL" not in saved_env
-    assert saved_env["MODEL"] == "llm"
+    assert saved_cfg["model"]["default"] == "llm"
+    assert saved_cfg["model"]["provider"] == "custom"
+    assert saved_cfg["model"]["base_url"] == "http://localhost:8000/v1"
+    assert saved_cfg["model"]["api_key"] == "local-key"
+
+
+def test_cmd_model_prints_readable_config_error(monkeypatch, capsys):
+    from hermes_cli.config import ConfigWriteError
+
+    monkeypatch.setattr(hermes_main, "_require_tty", lambda *a: None)
+
+    def _boom(*args, **kwargs):
+        raise ConfigWriteError(
+            path=Path("/tmp/config.yaml"),
+            action="save configuration",
+            error=OSError(16, "Device or resource busy"),
+            blocked=True,
+            diff="--- /tmp/config.yaml\n+++ /tmp/config.yaml (proposed)",
+        )
+
+    monkeypatch.setattr(hermes_main, "select_provider_and_model", _boom)
+
+    hermes_main.cmd_model(SimpleNamespace())
+    output = capsys.readouterr().out
+
+    assert "read-only or otherwise locked" in output
+    assert "Apply this patch manually" in output
 
 
 def test_cmd_model_forwards_nous_login_tls_options(monkeypatch):

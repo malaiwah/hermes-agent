@@ -346,15 +346,31 @@ def load_permanent_allowlist() -> set:
         return set()
 
 
-def save_permanent_allowlist(patterns: set):
-    """Save permanently allowed command patterns to config."""
+def save_permanent_allowlist(patterns: set) -> str | None:
+    """Save permanently allowed command patterns to config.
+
+    Returns a user-facing warning when the allowlist could not be persisted.
+    """
     try:
-        from hermes_cli.config import load_config, save_config
+        from hermes_cli.config import ConfigWriteError, load_config, save_config
         config = load_config()
         config["command_allowlist"] = list(patterns)
         save_config(config)
+        return None
+    except ConfigWriteError as exc:
+        warning = (
+            "Permanent approval was applied for this session only because Hermes "
+            "could not persist the command allowlist.\n\n"
+            f"{exc}"
+        )
+        logger.warning("Could not save allowlist: %s", exc)
+        return warning
     except Exception as e:
         logger.warning("Could not save allowlist: %s", e)
+        return (
+            "Permanent approval was applied for this session only because Hermes "
+            f"could not persist the command allowlist: {e}"
+        )
 
 
 # =========================================================================
@@ -811,6 +827,7 @@ def check_all_command_guards(command: str, env_type: str,
                     "description": combined_desc,
                 }
 
+            persistence_warning = None
             # User approved — persist based on scope (same logic as CLI)
             for key, _, is_tirith in warnings:
                 if choice == "session" or (choice == "always" and is_tirith):
@@ -818,12 +835,18 @@ def check_all_command_guards(command: str, env_type: str,
                 elif choice == "always":
                     approve_session(session_key, key)
                     approve_permanent(key)
-                    save_permanent_allowlist(_permanent_approved)
+                    warning = save_permanent_allowlist(_permanent_approved)
+                    if warning and persistence_warning is None:
+                        persistence_warning = warning
                 # choice == "once": no persistence — command allowed this
                 # single time only, matching the CLI's behavior.
 
-            return {"approved": True, "message": None,
-                    "user_approved": True, "description": combined_desc}
+            return {
+                "approved": True,
+                "message": persistence_warning,
+                "user_approved": True,
+                "description": combined_desc,
+            }
 
         # Fallback: no gateway callback registered (e.g. cron, batch).
         # Return approval_required for backward compat.
@@ -858,6 +881,7 @@ def check_all_command_guards(command: str, env_type: str,
             "description": combined_desc,
         }
 
+    persistence_warning = None
     # Persist approval for each warning individually
     for key, _, is_tirith in warnings:
         if choice == "session" or (choice == "always" and is_tirith):
@@ -867,11 +891,13 @@ def check_all_command_guards(command: str, env_type: str,
             # dangerous patterns: permanent allowed
             approve_session(session_key, key)
             approve_permanent(key)
-            save_permanent_allowlist(_permanent_approved)
+            warning = save_permanent_allowlist(_permanent_approved)
+            if warning and persistence_warning is None:
+                persistence_warning = warning
 
-    return {"approved": True, "message": None,
-            "user_approved": True, "description": combined_desc}
-
-
-# Load permanent allowlist from config on module import
-load_permanent_allowlist()
+    return {
+        "approved": True,
+        "message": persistence_warning,
+        "user_approved": True,
+        "description": combined_desc,
+    }

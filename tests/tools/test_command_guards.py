@@ -267,6 +267,22 @@ class TestAlwaysVisibility:
         cb.assert_called_once()
         assert cb.call_args[1]["allow_permanent"] is True
 
+    @patch(_TIRITH_PATCH, return_value=_tirith_result("allow"))
+    def test_dangerous_only_reports_allowlist_persistence_failure(self, mock_tirith):
+        os.environ["HERMES_INTERACTIVE"] = "1"
+        cb = MagicMock(return_value="always")
+        with patch(
+            "tools.approval.save_permanent_allowlist",
+            return_value="Permanent approval was applied for this session only.",
+        ):
+            result = check_all_command_guards(
+                "rm -rf /tmp/test",
+                "local",
+                approval_callback=cb,
+            )
+        assert result["approved"] is True
+        assert "session only" in result["message"]
+
 
 # ---------------------------------------------------------------------------
 # tirith ImportError → treated as allow
