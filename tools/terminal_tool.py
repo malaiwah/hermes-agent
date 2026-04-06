@@ -594,6 +594,7 @@ def _get_env_config() -> Dict[str, Any]:
         "docker_network": os.getenv("TERMINAL_DOCKER_NETWORK", None),
         "docker_extra_hosts": _parse_env_var("TERMINAL_DOCKER_EXTRA_HOSTS", json.dumps(cfg.get("docker_extra_hosts", [])), json.loads, "valid JSON"),
         "docker_env_files": _parse_env_var("TERMINAL_DOCKER_ENV_FILES", json.dumps(cfg.get("docker_env_files", [])), json.loads, "valid JSON"),
+        "docker_env": cfg.get("docker_env", {}),
     }
 
 
@@ -1242,6 +1243,10 @@ def terminal_tool(
                                 "docker_env_files": overrides.get(
                                     "docker_env_files",
                                     config.get("docker_env_files", []),
+                                ),
+                                "docker_env": overrides.get(
+                                    "docker_env",
+                                    config.get("docker_env", {}),
                                 ),
                             }
 
