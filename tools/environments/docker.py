@@ -286,6 +286,7 @@ class DockerEnvironment(BaseEnvironment):
         host_cwd: str = None,
         auto_mount_cwd: bool = False,
         extra_hosts: list[str] | None = None,
+        env_files: list[str] | None = None,
     ):
         if cwd == "~":
             cwd = "/root"
@@ -295,6 +296,22 @@ class DockerEnvironment(BaseEnvironment):
         self._task_id = task_id
         self._forward_env = _normalize_forward_env_names(forward_env)
         self._env = _normalize_env_dict(env)
+
+        # Inject env vars from files: format "VAR_NAME:/path/to/file".
+        # Read at spawn time so the value is always fresh (e.g. session tokens).
+        for entry in (env_files or []):
+            try:
+                var_name, file_path = entry.split(":", 1)
+            except ValueError:
+                logger.warning(f"docker_env_files: invalid entry {entry!r}, expected 'VAR:path'")
+                continue
+            try:
+                with open(file_path) as fh:
+                    self._env[var_name.strip()] = fh.read().strip()
+                logger.info(f"docker_env_files: loaded {var_name} from {file_path}")
+            except OSError as e:
+                logger.warning(f"docker_env_files: could not read {file_path}: {e}")
+
         self._container_id: Optional[str] = None
         logger.info(f"DockerEnvironment volumes: {volumes}")
         # Ensure volumes is a list (config.yaml could be malformed)
