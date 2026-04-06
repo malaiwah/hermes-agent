@@ -659,6 +659,7 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
     docker_forward_env = cc.get("docker_forward_env", [])
     docker_env = cc.get("docker_env", {})
     docker_network = cc.get("docker_network", None)
+    docker_extra_hosts = cc.get("docker_extra_hosts", [])
 
     if env_type == "local":
         lc = local_config or {}
@@ -676,6 +677,7 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
             forward_env=docker_forward_env,
             env=docker_env,
             docker_network=docker_network,
+            extra_hosts=docker_extra_hosts,
         )
 
     elif env_type == "singularity":
@@ -1228,6 +1230,10 @@ def terminal_tool(
                                 "docker_network": overrides.get(
                                     "docker_network",
                                     config.get("docker_network", None),
+                                ),
+                                "docker_extra_hosts": overrides.get(
+                                    "docker_extra_hosts",
+                                    config.get("docker_extra_hosts", []),
                                 ),
                             }
 

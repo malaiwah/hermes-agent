@@ -285,6 +285,7 @@ class DockerEnvironment(BaseEnvironment):
         docker_network: str | None = None,
         host_cwd: str = None,
         auto_mount_cwd: bool = False,
+        extra_hosts: list[str] | None = None,
     ):
         if cwd == "~":
             cwd = "/root"
@@ -443,8 +444,12 @@ class DockerEnvironment(BaseEnvironment):
         for key in sorted(self._env):
             env_args.extend(["-e", f"{key}={self._env[key]}"])
 
+        host_args = []
+        for entry in (extra_hosts or []):
+            host_args.extend(["--add-host", entry])
+
         logger.info(f"Docker volume_args: {volume_args}")
-        all_run_args = list(_SECURITY_ARGS) + writable_args + resource_args + volume_args + env_args
+        all_run_args = list(_SECURITY_ARGS) + writable_args + resource_args + host_args + volume_args + env_args
         logger.info(f"Docker run_args: {all_run_args}")
 
         # Resolve the docker executable once so it works even when
