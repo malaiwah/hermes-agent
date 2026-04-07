@@ -1520,19 +1520,43 @@ class AIAgent:
     def _emit_user_message(self, message: str) -> str:
         """Send a natural-language update to the current user.
 
-        Prefers the dedicated ``message_callback`` so platforms can render
-        user-facing status naturally inside the current session. Falls back to
-        ``status_callback("agent_message", ...)`` for older embeddings that do
-        not wire the dedicated callback yet.
+        Parses MEDIA:<path> directives from the message before delivery:
+        - Cleaned text is sent via message_callback (skipped if empty after stripping)
+        - Media files are delivered via media_message_callback if wired
+        - If the message contains only MEDIA: tags, only the files are sent
+
+        Falls back to status_callback("agent_message", ...) for older embeddings
+        that do not wire the dedicated callbacks yet.
         """
-        text = str(message or "").strip()
-        if not text:
+        raw = str(message or "").strip()
+        if not raw:
             return json.dumps({"error": "Message text is required."}, ensure_ascii=False)
+
+        # Extract MEDIA: tags — reuse platform adapter logic if available
+        media_files: list = []
+        text = raw
+        try:
+            from gateway.platforms.base import BasePlatformAdapter
+            media_files, text = BasePlatformAdapter.extract_media(raw)
+            text = text.strip()
+        except Exception:
+            pass  # No gateway context (CLI, tests) — send raw text as-is
+
+        has_text = bool(text)
+        has_media = bool(media_files)
+
+        if not has_text and not has_media:
+            return json.dumps({"error": "Message text is required."}, ensure_ascii=False)
+
+        media_callback = getattr(self, "media_message_callback", None)
 
         if self.message_callback:
             try:
-                self.message_callback(text)
-                return json.dumps({"sent": True, "message": text}, ensure_ascii=False)
+                if has_text:
+                    self.message_callback(text)
+                if has_media and media_callback:
+                    media_callback(media_files)
+                return json.dumps({"sent": True, "message": text, "media": len(media_files)}, ensure_ascii=False)
             except Exception as exc:
                 return json.dumps(
                     {"error": f"Failed to send user message: {exc}"},
@@ -1541,8 +1565,11 @@ class AIAgent:
 
         if self.status_callback:
             try:
-                self.status_callback("agent_message", text)
-                return json.dumps({"sent": True, "message": text}, ensure_ascii=False)
+                if has_text:
+                    self.status_callback("agent_message", text)
+                if has_media and media_callback:
+                    media_callback(media_files)
+                return json.dumps({"sent": True, "message": text, "media": len(media_files)}, ensure_ascii=False)
             except Exception as exc:
                 return json.dumps(
                     {"error": f"Failed to send user message: {exc}"},

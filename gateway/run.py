@@ -7060,6 +7060,29 @@ class GatewayRunner:
             except Exception as _e:
                 logger.debug("message_callback error: %s", _e)
 
+        def _media_message_callback_sync(media_files: list) -> None:
+            """Deliver media files extracted from a send_user_message call."""
+            if not _status_adapter or not media_files:
+                return
+            from pathlib import Path
+            _AUDIO_EXTS = {'.ogg', '.opus', '.mp3', '.wav', '.m4a'}
+            _VIDEO_EXTS = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.3gp'}
+            _IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.webp', '.gif'}
+            for media_path, is_voice in media_files:
+                try:
+                    ext = Path(media_path).suffix.lower()
+                    if ext in _AUDIO_EXTS:
+                        coro = _status_adapter.send_voice(chat_id=_status_chat_id, audio_path=media_path, metadata=_status_thread_metadata)
+                    elif ext in _VIDEO_EXTS:
+                        coro = _status_adapter.send_video(chat_id=_status_chat_id, video_path=media_path, metadata=_status_thread_metadata)
+                    elif ext in _IMAGE_EXTS:
+                        coro = _status_adapter.send_image_file(chat_id=_status_chat_id, image_path=media_path, metadata=_status_thread_metadata)
+                    else:
+                        coro = _status_adapter.send_document(chat_id=_status_chat_id, file_path=media_path, metadata=_status_thread_metadata)
+                    asyncio.run_coroutine_threadsafe(coro, _loop_for_step)
+                except Exception as _e:
+                    logger.debug("media_message_callback error for %s: %s", media_path, _e)
+
         def _self_nudge_callback_sync(delay_seconds: int, note: str = "") -> dict:
             try:
                 future = asyncio.run_coroutine_threadsafe(
@@ -7209,6 +7232,7 @@ class GatewayRunner:
             agent.step_callback = _step_callback_sync if _hooks_ref.loaded_hooks else None
             agent.stream_delta_callback = _stream_delta_cb
             agent.message_callback = _message_callback_sync
+            agent.media_message_callback = _media_message_callback_sync
             agent.self_nudge_callback = _self_nudge_callback_sync
             agent.status_callback = _status_callback_sync
             agent.reasoning_config = reasoning_config
