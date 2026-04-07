@@ -186,6 +186,9 @@ class WebhookAdapter(BasePlatformAdapter):
         if deliver_type == "github_comment":
             return await self._deliver_github_comment(content, delivery)
 
+        if deliver_type == "gitea_comment":
+            return await self._deliver_gitea_comment(content, delivery)
+
         # Cross-platform delivery (telegram, discord, etc.)
         if self.gateway_runner and deliver_type in (
             "telegram",
@@ -333,6 +336,7 @@ class WebhookAdapter(BasePlatformAdapter):
         event_type = (
             request.headers.get("X-GitHub-Event", "")
             or request.headers.get("X-GitLab-Event", "")
+            or request.headers.get("X-Gitea-Event", "")
             or payload.get("event_type", "")
             or "unknown"
         )
@@ -386,7 +390,10 @@ class WebhookAdapter(BasePlatformAdapter):
         # Build a unique delivery ID
         delivery_id = request.headers.get(
             "X-GitHub-Delivery",
-            request.headers.get("X-Request-ID", str(int(time.time() * 1000))),
+            request.headers.get(
+                "X-Gitea-Delivery",
+                request.headers.get("X-Request-ID", str(int(time.time() * 1000))),
+            ),
         )
 
         # ── Idempotency ─────────────────────────────────────────
@@ -486,6 +493,14 @@ class WebhookAdapter(BasePlatformAdapter):
         gl_token = request.headers.get("X-Gitlab-Token", "")
         if gl_token:
             return hmac.compare_digest(gl_token, secret)
+
+        # Gitea: X-Gitea-Signature = <hex HMAC-SHA256> (no prefix)
+        gitea_sig = request.headers.get("X-Gitea-Signature", "")
+        if gitea_sig:
+            expected = hmac.new(
+                secret.encode(), body, hashlib.sha256
+            ).hexdigest()
+            return hmac.compare_digest(gitea_sig, expected)
 
         # Generic: X-Webhook-Signature = <hex HMAC-SHA256>
         generic_sig = request.headers.get("X-Webhook-Signature", "")
@@ -613,6 +628,76 @@ class WebhookAdapter(BasePlatformAdapter):
             )
         except Exception as e:
             logger.error("[webhook] github_comment delivery error: %s", e)
+            return SendResult(success=False, error=str(e))
+
+    async def _deliver_gitea_comment(
+        self, content: str, delivery: dict
+    ) -> SendResult:
+        """Post agent response as a Gitea PR/issue comment via the Gitea REST API.
+
+        deliver_extra keys:
+          repo        — "owner/repo" (required)
+          pr_number   — PR or issue index (required)
+          gitea_url   — base URL e.g. "http://10.15.0.6:3300"
+                        (falls back to GITEA_BASE_URL env var)
+          token_env   — env var holding the API token (default: GITEA_TOKEN)
+        """
+        extra = delivery.get("deliver_extra", {})
+        repo = extra.get("repo", "")
+        pr_number = extra.get("pr_number", "")
+        gitea_url = extra.get("gitea_url", os.getenv("GITEA_BASE_URL", ""))
+        token_env = extra.get("token_env", "GITEA_TOKEN")
+        token = os.getenv(token_env, "")
+
+        if not repo or not pr_number:
+            logger.error(
+                "[webhook] gitea_comment delivery missing repo or pr_number"
+            )
+            return SendResult(success=False, error="Missing repo or pr_number")
+        if not gitea_url:
+            logger.error(
+                "[webhook] gitea_comment delivery missing gitea_url "
+                "(set deliver_extra.gitea_url or GITEA_BASE_URL env var)"
+            )
+            return SendResult(success=False, error="Missing gitea_url")
+        if not token:
+            logger.error(
+                "[webhook] gitea_comment delivery: no token in env var %s",
+                token_env,
+            )
+            return SendResult(success=False, error=f"No token in {token_env}")
+
+        api_url = (
+            f"{gitea_url.rstrip('/')}/api/v1/repos/{repo}/issues/{pr_number}/comments"
+        )
+        try:
+            import aiohttp as _aiohttp
+
+            async with _aiohttp.ClientSession() as session:
+                async with session.post(
+                    api_url,
+                    json={"body": content},
+                    headers={"Authorization": f"token {token}"},
+                    timeout=_aiohttp.ClientTimeout(total=30),
+                ) as resp:
+                    if resp.status in (200, 201):
+                        logger.info(
+                            "[webhook] Posted Gitea comment on %s#%s",
+                            repo,
+                            pr_number,
+                        )
+                        return SendResult(success=True)
+                    resp_text = await resp.text()
+                    logger.error(
+                        "[webhook] Gitea API error %d: %s",
+                        resp.status,
+                        resp_text[:200],
+                    )
+                    return SendResult(
+                        success=False, error=f"Gitea API {resp.status}"
+                    )
+        except Exception as e:
+            logger.error("[webhook] gitea_comment delivery error: %s", e)
             return SendResult(success=False, error=str(e))
 
     async def _deliver_cross_platform(
