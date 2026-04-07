@@ -287,9 +287,16 @@ class DockerEnvironment(BaseEnvironment):
         auto_mount_cwd: bool = False,
         extra_hosts: list[str] | None = None,
         env_files: list[str] | None = None,
+        docker_user: str | None = None,
     ):
-        if cwd == "~":
+        # Resolve home directory based on user
+        home_dir = f"/home/{docker_user}" if docker_user and docker_user != "root" else "/root"
+        if cwd in ("~", "/root") and docker_user and docker_user != "root":
+            cwd = home_dir
+        elif cwd == "~":
             cwd = "/root"
+        self._docker_user = docker_user
+        self._home_path = home_dir
         super().__init__(cwd=cwd, timeout=timeout)
         self._base_image = image
         self._persistent = persistent_filesystem
@@ -381,7 +388,7 @@ class DockerEnvironment(BaseEnvironment):
             self._home_dir = str(sandbox / "home")
             os.makedirs(self._home_dir, exist_ok=True)
             writable_args.extend([
-                "-v", f"{self._home_dir}:/root",
+                "-v", f"{self._home_dir}:{self._home_path}",
             ])
             if not bind_host_cwd and not workspace_explicitly_mounted:
                 self._workspace_dir = str(sandbox / "workspace")
@@ -457,7 +464,10 @@ class DockerEnvironment(BaseEnvironment):
 
         # Explicit environment variables (docker_env config) — set at container
         # creation so they're available to all processes (including entrypoint).
+        # Override HOME when running as a non-root user so tools resolve dotfiles correctly.
         env_args = []
+        if self._docker_user and self._docker_user != "root":
+            env_args.extend(["-e", f"HOME={self._home_path}"])
         for key in sorted(self._env):
             env_args.extend(["-e", f"{key}={self._env[key]}"])
 
@@ -466,7 +476,8 @@ class DockerEnvironment(BaseEnvironment):
             host_args.extend(["--add-host", entry])
 
         logger.info(f"Docker volume_args: {volume_args}")
-        all_run_args = list(_SECURITY_ARGS) + writable_args + resource_args + host_args + volume_args + env_args
+        user_args = ["--user", self._docker_user] if self._docker_user else []
+        all_run_args = list(_SECURITY_ARGS) + user_args + writable_args + resource_args + host_args + volume_args + env_args
         logger.info(f"Docker run_args: {all_run_args}")
 
         # Resolve the docker executable once so it works even when

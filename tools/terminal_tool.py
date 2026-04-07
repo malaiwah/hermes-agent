@@ -595,6 +595,7 @@ def _get_env_config() -> Dict[str, Any]:
         "docker_extra_hosts": _parse_env_var("TERMINAL_DOCKER_EXTRA_HOSTS", json.dumps(cfg.get("docker_extra_hosts", [])), json.loads, "valid JSON"),
         "docker_env_files": _parse_env_var("TERMINAL_DOCKER_ENV_FILES", json.dumps(cfg.get("docker_env_files", [])), json.loads, "valid JSON"),
         "docker_env": cfg.get("docker_env", {}),
+        "docker_user": os.getenv("TERMINAL_DOCKER_USER", cfg.get("docker_user", None)),
     }
 
 
@@ -664,6 +665,7 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
     docker_network = cc.get("docker_network", None)
     docker_extra_hosts = cc.get("docker_extra_hosts", [])
     docker_env_files = cc.get("docker_env_files", [])
+    docker_user = cc.get("docker_user", None)
 
     if env_type == "local":
         lc = local_config or {}
@@ -683,6 +685,7 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
             docker_network=docker_network,
             extra_hosts=docker_extra_hosts,
             env_files=docker_env_files,
+            docker_user=docker_user,
         )
 
     elif env_type == "singularity":
@@ -1247,6 +1250,10 @@ def terminal_tool(
                                 "docker_env": overrides.get(
                                     "docker_env",
                                     config.get("docker_env", {}),
+                                ),
+                                "docker_user": overrides.get(
+                                    "docker_user",
+                                    config.get("docker_user", None),
                                 ),
                             }
 
