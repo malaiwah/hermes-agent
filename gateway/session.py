@@ -810,6 +810,9 @@ class SessionStore:
         self,
         session_key: str,
         last_prompt_tokens: int = None,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        total_tokens: int = 0,
     ) -> None:
         """Update lightweight session metadata after an interaction."""
         with self._lock:
@@ -820,6 +823,9 @@ class SessionStore:
                 entry.updated_at = _now()
                 if last_prompt_tokens is not None:
                     entry.last_prompt_tokens = last_prompt_tokens
+                entry.input_tokens += input_tokens
+                entry.output_tokens += output_tokens
+                entry.total_tokens += total_tokens
                 self._save()
 
     def reset_session(self, session_key: str) -> Optional[SessionEntry]:
