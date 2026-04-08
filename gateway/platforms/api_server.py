@@ -428,35 +428,43 @@ class APIServerAdapter(BasePlatformAdapter):
         return any(stripped.startswith(p) for p in APIServerAdapter._META_REQUEST_PREFIXES)
 
     @staticmethod
-    def _normalize_openai_content(content: Any) -> Tuple[str, List[str]]:
-        """Flatten an OpenAI chat content field to plain text.
+    def _normalize_openai_content(
+        content: Any,
+    ) -> Tuple[str, List[str], List[str]]:
+        """Flatten an OpenAI chat content field to plain text + image refs.
 
         The OpenAI chat completions API accepts ``content`` as either a
         plain string or a list of content parts (``{"type": "text", ...}``
         and ``{"type": "image_url", ...}`` for multimodal inputs).
 
-        Returns ``(text, non_text_types)``:
+        Returns ``(text, image_refs, unsupported_types)``:
             - ``text`` — the concatenation of every ``type="text"`` part
               (or the original string, unchanged).
-            - ``non_text_types`` — a sorted list of the part types that
-              were present but not reproduced in ``text`` (e.g.
-              ``["image_url"]``).  Callers use this to decide whether to
-              reject the request with a clear 400 until multimodal
-              forwarding is implemented.
+            - ``image_refs`` — the URL field of every ``image_url`` part,
+              in document order.  ``data:`` URIs are returned as-is here;
+              caller is responsible for persisting them to disk via
+              :func:`_persist_image_data_uri` if it wants a local path
+              the agent can hand to ``vision_analyze``.
+            - ``unsupported_types`` — sorted list of part types that
+              were present but Hermes doesn't yet know how to forward
+              (e.g. ``input_audio``, ``video_url``).  Callers reject
+              the request with a clear 400 if this is non-empty for
+              the active user turn.
 
         Silently coerces non-string, non-list content to ``str(content)``
         rather than raising, so a malformed request still produces a
         sensible error downstream instead of a 500.
         """
         if isinstance(content, str):
-            return content, []
+            return content, [], []
         if content is None:
-            return "", []
+            return "", [], []
         if not isinstance(content, list):
-            return str(content), []
+            return str(content), [], []
 
         text_parts: List[str] = []
-        non_text: Set[str] = set()
+        image_refs: List[str] = []
+        unsupported: Set[str] = set()
         for part in content:
             if isinstance(part, dict):
                 part_type = part.get("type", "")
@@ -465,15 +473,149 @@ class APIServerAdapter(BasePlatformAdapter):
                     if isinstance(text_value, str):
                         text_parts.append(text_value)
                     continue
+                if part_type == "image_url":
+                    image_url_field = part.get("image_url")
+                    url = ""
+                    if isinstance(image_url_field, dict):
+                        url = image_url_field.get("url", "") or ""
+                    elif isinstance(image_url_field, str):
+                        # Some clients pass the URL string directly.
+                        url = image_url_field
+                    if url:
+                        image_refs.append(url)
+                    continue
                 if part_type:
-                    non_text.add(part_type)
+                    unsupported.add(part_type)
                 else:
-                    non_text.add("unknown")
+                    unsupported.add("unknown")
             elif isinstance(part, str):
                 text_parts.append(part)
             else:
-                non_text.add(type(part).__name__)
-        return "".join(text_parts), sorted(non_text)
+                unsupported.add(type(part).__name__)
+        return "".join(text_parts), image_refs, sorted(unsupported)
+
+    # Compiled lazily on first call.
+    _DATA_URI_RE = None
+
+    @classmethod
+    def _persist_image_data_uri(
+        cls, data_uri: str, dest_dir: "Path", index: int
+    ) -> Optional[str]:
+        """Decode a ``data:image/...;base64,...`` URI and write it to disk.
+
+        Returns the absolute path of the written file, or ``None`` if
+        ``data_uri`` was not a valid base64 image data URI (in which
+        case the caller should fall through to treating it as a remote
+        URL).  Errors during write are logged and surfaced as ``None``
+        so a single broken attachment cannot fail the whole request.
+        """
+        import base64
+        import re
+
+        if cls._DATA_URI_RE is None:
+            cls._DATA_URI_RE = re.compile(
+                r"^data:image/(?P<ext>[a-zA-Z0-9.+-]+);base64,(?P<payload>.+)$",
+                re.DOTALL,
+            )
+        match = cls._DATA_URI_RE.match(data_uri)
+        if not match:
+            return None
+
+        ext_raw = match.group("ext").lower()
+        # Map common MIME subtypes to plain file extensions.
+        ext_map = {
+            "jpeg": "jpg",
+            "svg+xml": "svg",
+            "x-icon": "ico",
+        }
+        ext = ext_map.get(ext_raw, ext_raw)
+        # Defensive: keep the extension simple and filesystem-friendly.
+        ext = re.sub(r"[^a-z0-9]", "", ext)[:8] or "bin"
+
+        try:
+            payload = base64.b64decode(match.group("payload"), validate=False)
+        except Exception as exc:
+            logger.warning("Failed to decode data URI #%d: %s", index, exc)
+            return None
+
+        try:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            dest = dest_dir / f"image_{index:02d}.{ext}"
+            dest.write_bytes(payload)
+            return str(dest)
+        except OSError as exc:
+            logger.warning("Failed to write image attachment %s: %s", dest, exc)
+            return None
+
+    @classmethod
+    def _materialize_image_refs(
+        cls, refs: List[str], dest_dir: "Path"
+    ) -> List[str]:
+        """Convert a list of image_url values to references the agent can use.
+
+        - ``data:image/...;base64,...`` URIs are decoded and saved to
+          ``dest_dir``; the local path is returned in their place.
+        - ``http://`` and ``https://`` URLs are returned as-is so the
+          agent can pass them straight to ``vision_analyze`` (which
+          accepts both URLs and local paths).
+        - Anything else (e.g. an unsupported scheme, an empty string,
+          a malformed data URI that fails to decode) is dropped with a
+          warning so it does not poison the prompt.
+        """
+        out: List[str] = []
+        for idx, ref in enumerate(refs, start=1):
+            if not isinstance(ref, str) or not ref:
+                continue
+            if ref.startswith("data:image/"):
+                local = cls._persist_image_data_uri(ref, dest_dir, idx)
+                if local:
+                    out.append(local)
+                continue
+            if ref.startswith("http://") or ref.startswith("https://"):
+                out.append(ref)
+                continue
+            logger.warning(
+                "Dropping image_url with unsupported scheme: %r",
+                ref[:60],
+            )
+        return out
+
+    @staticmethod
+    def _cleanup_attachments(attachment_dir: "Path") -> None:
+        """Best-effort removal of an attachment directory.
+
+        Used both on early-return error paths (so a rejected request
+        does not leak files) and after the agent finishes a successful
+        completion.  Errors are swallowed and logged at debug — there
+        is nothing the caller can usefully do with them.
+        """
+        import shutil
+        try:
+            if attachment_dir.exists():
+                shutil.rmtree(attachment_dir, ignore_errors=True)
+        except Exception as exc:
+            logger.debug("attachment cleanup failed for %s: %s", attachment_dir, exc)
+
+    @staticmethod
+    def _build_image_attachment_hint(refs: List[str]) -> str:
+        """Build the text suffix that tells the agent images are attached.
+
+        The agent loads ``vision_analyze`` from the
+        ``hermes-api-server`` toolset, which accepts both local file
+        paths and remote URLs, so the same hint format works for
+        either input.  The wording explicitly tells the agent the
+        attachments are first-class context for the user's request,
+        so it knows to inspect them when relevant rather than
+        pretending it does not see anything.
+        """
+        if not refs:
+            return ""
+        bullets = "\n".join(f"- {r}" for r in refs)
+        return (
+            "\n\n[Attached images from the user — inspect with the "
+            "vision_analyze tool when relevant to the request:\n"
+            f"{bullets}\n]"
+        )
 
     def _create_agent(
         self,
@@ -577,35 +719,74 @@ class APIServerAdapter(BasePlatformAdapter):
 
         stream = body.get("stream", False)
 
+        # Image attachments from OpenAI structured content land in a
+        # per-request subdirectory under HERMES_HOME so cleanup is a
+        # single ``rmtree`` regardless of how many parts were attached
+        # and so concurrent requests cannot collide on filenames.  The
+        # directory is lazy-created by the first ``_persist_image_data_uri``
+        # call — text-only requests never touch the filesystem.
+        from hermes_cli.config import get_hermes_home
+        attachment_id = uuid.uuid4().hex
+        attachment_dir = (
+            get_hermes_home() / "api_server_attachments" / attachment_id
+        )
+
         # Extract system message (becomes ephemeral system prompt layered ON TOP of core)
         # OpenAI chat completions accepts ``content`` as either a plain
         # string or a list of structured parts (``{"type": "text"}``,
-        # ``{"type": "image_url"}``, etc.). Hermes does not yet forward
-        # multimodal parts to the underlying model through the API
-        # server, so flatten everything to text here and collect which
-        # non-text types we saw — we reject the whole request below with
-        # a clear 400 if any of them were present on the final user turn.
+        # ``{"type": "image_url"}``, etc.). We flatten everything to
+        # text here, persist any ``image_url`` parts to disk so the
+        # agent can hand them to ``vision_analyze``, and collect any
+        # part types we don't yet know how to forward — those still
+        # produce a 400 (only on the active user turn) until we grow
+        # support for them.
         system_prompt = None
         conversation_messages: List[Dict[str, str]] = []
-        rejected_content_types: Set[str] = set()
+        unsupported_content_types: Set[str] = set()
+        materialized_image_refs: List[str] = []
 
-        for msg in messages:
+        # Find the index of the last user message in the original
+        # ``messages`` array so the unsupported-parts check fires on
+        # the active turn only (historical multimodal parts are best-
+        # effort flattened so stale Open WebUI history with prior
+        # images doesn't hard-fail every text follow-up).  In normal
+        # usage the last message IS a user message; this lookup makes
+        # the rejection logic robust to trailing assistant turns.
+        last_user_idx = -1
+        for _idx in range(len(messages) - 1, -1, -1):
+            if messages[_idx].get("role") == "user":
+                last_user_idx = _idx
+                break
+
+        for idx, msg in enumerate(messages):
             role = msg.get("role", "")
-            text, dropped = self._normalize_openai_content(msg.get("content", ""))
+            text, image_refs, unsupported = self._normalize_openai_content(
+                msg.get("content", "")
+            )
             if role == "system":
-                # Accumulate system messages
                 if system_prompt is None:
                     system_prompt = text
                 else:
                     system_prompt = system_prompt + "\n" + text
-                # Multimodal parts on the system message are simply
-                # dropped — they are never meaningful there.
-            elif role in ("user", "assistant"):
-                conversation_messages.append({"role": role, "content": text})
-                # Only the final user turn's non-text parts matter for
-                # the reject decision; historical turns are best-effort
-                # flattened so stale Open WebUI chat history containing
-                # prior images does not hard-fail every follow-up.
+                # Multimodal parts on system messages are dropped —
+                # they are never meaningful there.  Not surfaced in
+                # ``unsupported_content_types``.
+                continue
+            if role not in ("user", "assistant"):
+                continue
+
+            if image_refs:
+                local_refs = self._materialize_image_refs(image_refs, attachment_dir)
+                materialized_image_refs.extend(local_refs)
+                if local_refs:
+                    text = (text or "") + self._build_image_attachment_hint(local_refs)
+
+            conversation_messages.append({"role": role, "content": text})
+
+            # Only the active user turn's unsupported parts trigger a
+            # 400 — historical turns are best-effort flattened.
+            if idx == last_user_idx:
+                unsupported_content_types.update(unsupported)
 
         # Extract the last user message as the primary input
         user_message = ""
@@ -613,53 +794,81 @@ class APIServerAdapter(BasePlatformAdapter):
         if conversation_messages:
             user_message = conversation_messages[-1].get("content", "")
             history = conversation_messages[:-1]
-            # Re-check the raw last message for non-text parts (the
-            # flattened ``conversation_messages`` has already dropped
-            # them).  This is the turn the user is actively sending.
-            last_raw = None
-            for msg in reversed(messages):
-                if msg.get("role") in ("user", "assistant"):
-                    last_raw = msg
-                    break
-            if last_raw is not None and last_raw.get("role") == "user":
-                _, rejected_content_types_list = self._normalize_openai_content(
-                    last_raw.get("content", "")
-                )
-                rejected_content_types.update(rejected_content_types_list)
 
-        if rejected_content_types:
-            # Multimodal forwarding is not implemented on this endpoint
-            # yet.  Fail fast with a clear 400 rather than silently
-            # dropping the attachment — the user needs to know their
-            # image was not seen.
-            types_list = ", ".join(rejected_content_types)
+        if unsupported_content_types:
+            # Audio / video / unknown parts on the active turn are
+            # still rejected with a clear 400 — only image_url is
+            # forwarded today.  Clean up any persisted images first
+            # so a rejected request doesn't leak attachment files.
+            self._cleanup_attachments(attachment_dir)
+            types_list = ", ".join(unsupported_content_types)
             logger.warning(
-                "Rejecting multimodal chat completion: unsupported content parts (%s)",
+                "Rejecting chat completion with unsupported content parts (%s)",
                 types_list,
             )
             return web.json_response(
                 {
                     "error": {
                         "message": (
-                            f"This endpoint does not yet support multimodal "
-                            f"content parts ({types_list}). Send a text-only "
-                            f"message, or use one of the gateway platforms "
-                            f"(Telegram, Discord, Matrix) which support "
-                            f"images natively."
+                            f"This endpoint does not yet support content "
+                            f"parts of type {types_list}. Send a text or "
+                            f"image-only message, or use one of the gateway "
+                            f"platforms (Telegram, Discord, Matrix) which "
+                            f"support audio and video natively."
                         ),
                         "type": "invalid_request_error",
-                        "code": "multimodal_not_supported",
+                        "code": "unsupported_content_part",
                     }
                 },
                 status=400,
             )
 
         if not user_message:
+            self._cleanup_attachments(attachment_dir)
             return web.json_response(
                 {"error": {"message": "No user message found in messages", "type": "invalid_request_error"}},
                 status=400,
             )
 
+        if materialized_image_refs:
+            logger.info(
+                "api_server: forwarded %d image attachment(s) for %s",
+                len(materialized_image_refs),
+                attachment_id,
+            )
+
+        # Wrap the rest of the handler in try/finally so persisted
+        # image attachments are removed exactly once, regardless of
+        # which return branch fires.  ``materialized_image_refs`` may
+        # be empty (text-only request) — the cleanup is a no-op then.
+        try:
+            return await self._dispatch_chat_completion(
+                request=request,
+                body=body,
+                user_message=user_message,
+                history=history,
+                system_prompt=system_prompt,
+                stream=stream,
+            )
+        finally:
+            if materialized_image_refs:
+                self._cleanup_attachments(attachment_dir)
+
+    async def _dispatch_chat_completion(
+        self,
+        request: "web.Request",
+        body: Dict[str, Any],
+        user_message: str,
+        history: List[Dict[str, Any]],
+        system_prompt: Optional[str],
+        stream: bool,
+    ) -> "web.Response":
+        """Run the agent and build the chat-completion response.
+
+        Split out from :meth:`_handle_chat_completions` purely so the
+        attachment-cleanup ``finally`` block in the parent stays small
+        and easy to read — the agent dispatch flow itself is unchanged.
+        """
         # Open WebUI meta-requests (follow-up suggestions, title generation) get a
         # btw-style run: ephemeral, no tools, not persisted.  The full chat history
         # is embedded in the prompt by Open WebUI, so we pass it as-is.

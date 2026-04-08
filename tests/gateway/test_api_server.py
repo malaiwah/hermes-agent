@@ -348,16 +348,105 @@ class TestChatCompletionsEndpoint:
             assert resp.status == 400
 
     @pytest.mark.asyncio
-    async def test_multimodal_image_content_returns_400_not_500(self, adapter):
+    async def test_multimodal_image_content_does_not_crash(self, adapter):
         """Regression: OpenAI structured content with image parts must
         not crash the request router.
 
-        Before the fix, ``_is_openwebui_meta_request`` called
+        Before the (a) hotfix, ``_is_openwebui_meta_request`` called
         ``user_message.lstrip()`` unconditionally, which raised
         ``AttributeError: 'list' object has no attribute 'lstrip'`` on
-        any multimodal request from Open WebUI and returned a bare
-        HTTP 500. The endpoint must now reject multimodal content with
-        a clear 400 instead.
+        any multimodal request from Open WebUI and returned a bare 500.
+        Since the (b) follow-up the endpoint forwards images to the
+        agent via ``vision_analyze``-friendly file paths, so this
+        request is now answered normally (200) instead of rejected.
+        """
+        app = _create_app(adapter)
+
+        captured_kwargs = {}
+
+        async def _fake_run_agent(**kwargs):
+            captured_kwargs.update(kwargs)
+            return (
+                {"final_response": "ok", "messages": [], "api_calls": 1},
+                {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+            )
+
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_run_agent", side_effect=_fake_run_agent):
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "test",
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": "See the attached image"},
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {
+                                            # Smallest valid base64 PNG
+                                            "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABAQMAAAAl21bKAAAAA1BMVEX///+nxBvIAAAACklEQVQI12NgAAAAAgAB4iG8MwAAAABJRU5ErkJggg=="
+                                        },
+                                    },
+                                ],
+                            }
+                        ],
+                    },
+                )
+        assert resp.status == 200, await resp.text()
+        # The agent received the user's text plus an inlined hint
+        # pointing at the on-disk attachment.
+        assert "See the attached image" in captured_kwargs["user_message"]
+        assert "vision_analyze" in captured_kwargs["user_message"]
+        assert "image_01.png" in captured_kwargs["user_message"]
+
+    @pytest.mark.asyncio
+    async def test_image_only_request_is_forwarded_with_hint_only(self, adapter):
+        """A request containing only an image (no text part) is still
+        valid: the user_message becomes just the attachment hint, and
+        the agent gets the file path so it can call vision_analyze.
+        """
+        app = _create_app(adapter)
+        captured = {}
+
+        async def _fake_run_agent(**kwargs):
+            captured.update(kwargs)
+            return (
+                {"final_response": "ok", "messages": [], "api_calls": 1},
+                {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+            )
+
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_run_agent", side_effect=_fake_run_agent):
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "test",
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABAQMAAAAl21bKAAAAA1BMVEX///+nxBvIAAAACklEQVQI12NgAAAAAgAB4iG8MwAAAABJRU5ErkJggg=="
+                                        },
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                )
+        assert resp.status == 200, await resp.text()
+        assert "vision_analyze" in captured["user_message"]
+        assert "image_01.png" in captured["user_message"]
+
+    @pytest.mark.asyncio
+    async def test_audio_content_part_still_rejected_with_clear_error(self, adapter):
+        """Audio / video / unknown parts are not forwarded yet — they
+        still produce a 400 with a clear error code so the client
+        knows what failed.
         """
         app = _create_app(adapter)
         async with TestClient(TestServer(app)) as cli:
@@ -369,12 +458,10 @@ class TestChatCompletionsEndpoint:
                         {
                             "role": "user",
                             "content": [
-                                {"type": "text", "text": "See the attached image"},
+                                {"type": "text", "text": "transcribe please"},
                                 {
-                                    "type": "image_url",
-                                    "image_url": {
-                                        "url": "data:image/png;base64,iVBORw0KGgo="
-                                    },
+                                    "type": "input_audio",
+                                    "input_audio": {"data": "xxx", "format": "wav"},
                                 },
                             ],
                         }
@@ -383,63 +470,62 @@ class TestChatCompletionsEndpoint:
             )
             assert resp.status == 400
             data = await resp.json()
-            assert data["error"]["type"] == "invalid_request_error"
-            assert data["error"]["code"] == "multimodal_not_supported"
-            assert "image_url" in data["error"]["message"]
+            assert data["error"]["code"] == "unsupported_content_part"
+            assert "input_audio" in data["error"]["message"]
 
     @pytest.mark.asyncio
-    async def test_image_only_request_rejected_with_clear_error(self, adapter):
-        """A request containing an image but no text part must surface
-        the multimodal rejection, not the generic 'No user message
-        found' 400 that fires for truly empty messages.
+    async def test_image_url_http_url_passed_through_as_is(self, adapter):
+        """Remote http(s) image URLs are forwarded to the agent as-is —
+        no fetch, no re-encoding. ``vision_analyze`` accepts URLs.
         """
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
-            resp = await cli.post(
-                "/v1/chat/completions",
-                json={
-                    "model": "test",
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "image_url",
-                                    "image_url": {
-                                        "url": "data:image/png;base64,AAAA"
-                                    },
-                                }
-                            ],
-                        }
-                    ],
-                },
+        captured = {}
+
+        async def _fake_run_agent(**kwargs):
+            captured.update(kwargs)
+            return (
+                {"final_response": "ok", "messages": [], "api_calls": 1},
+                {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
             )
-            assert resp.status == 400
-            data = await resp.json()
-            assert data["error"]["code"] == "multimodal_not_supported"
+
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_run_agent", side_effect=_fake_run_agent):
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "test",
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": "describe"},
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": "https://example.com/cat.png"
+                                        },
+                                    },
+                                ],
+                            }
+                        ],
+                    },
+                )
+        assert resp.status == 200
+        assert "https://example.com/cat.png" in captured["user_message"]
 
     @pytest.mark.asyncio
     async def test_stale_image_in_history_does_not_block_text_followup(self, adapter):
-        """Historical turns with multimodal parts must be flattened,
-        not hard-reject a plain text follow-up request.
-
-        OpenAI chat completions clients re-send the whole conversation
-        history on every turn.  If the user once sent an image in an
-        earlier turn, every subsequent text-only message would fail
-        unless historical multimodal parts are best-effort flattened
-        to their text part.  The rejection check applies only to the
-        active user turn.
+        """Historical turns with multimodal parts must be flattened
+        (with an image hint inlined), not hard-reject a plain text
+        follow-up request.
         """
         app = _create_app(adapter)
-
-        # Bypass the full agent stack — we only care that routing
-        # reaches the agent execution path and does not return 400.
-        from unittest.mock import patch, AsyncMock
+        captured = {}
 
         async def _fake_run_agent(**kwargs):
-            # Return a valid (result, usage) tuple shape.
+            captured.update(kwargs)
             return (
-                {"final_response": "ok", "error": None},
+                {"final_response": "ok", "messages": [], "api_calls": 1},
                 {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
             )
 
@@ -457,7 +543,7 @@ class TestChatCompletionsEndpoint:
                                     {
                                         "type": "image_url",
                                         "image_url": {
-                                            "url": "data:image/png;base64,iVBORw0KGgo="
+                                            "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABAQMAAAAl21bKAAAAA1BMVEX///+nxBvIAAAACklEQVQI12NgAAAAAgAB4iG8MwAAAABJRU5ErkJggg=="
                                         },
                                     },
                                 ],
@@ -467,19 +553,83 @@ class TestChatCompletionsEndpoint:
                         ],
                     },
                 )
-            # Final turn is plain text — request must succeed.
-            assert resp.status == 200, await resp.text()
+        # Final turn is plain text — request must succeed.
+        assert resp.status == 200, await resp.text()
+        # Final user_message is the active text turn, NOT the historical image
+        assert "what did you notice" in captured["user_message"]
+        # Historical user turn was inlined into history with the image hint
+        history = captured["conversation_history"]
+        assert any(
+            "look at this" in (m.get("content") or "")
+            and "vision_analyze" in (m.get("content") or "")
+            for m in history
+            if m.get("role") == "user"
+        )
+
+    @pytest.mark.asyncio
+    async def test_attachment_dir_cleaned_up_after_completion(self, adapter, monkeypatch):
+        """The per-request attachment directory must not leak after
+        the agent finishes.  ``_cleanup_attachments`` is called from
+        the ``finally`` block of ``_handle_chat_completions``.
+        """
+        from pathlib import Path
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            monkeypatch.setattr(
+                "hermes_cli.config.get_hermes_home", lambda: home
+            )
+
+            app = _create_app(adapter)
+
+            async def _fake_run_agent(**kwargs):
+                # While the agent is "running", the attachment dir must exist.
+                attach_root = home / "api_server_attachments"
+                assert attach_root.exists()
+                # Exactly one subdirectory (this completion's).
+                subs = list(attach_root.iterdir())
+                assert len(subs) == 1
+                files = list(subs[0].iterdir())
+                assert any(f.suffix == ".png" for f in files)
+                return (
+                    {"final_response": "ok", "messages": [], "api_calls": 1},
+                    {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                )
+
+            async with TestClient(TestServer(app)) as cli:
+                with patch.object(adapter, "_run_agent", side_effect=_fake_run_agent):
+                    resp = await cli.post(
+                        "/v1/chat/completions",
+                        json={
+                            "model": "test",
+                            "messages": [
+                                {
+                                    "role": "user",
+                                    "content": [
+                                        {"type": "text", "text": "describe"},
+                                        {
+                                            "type": "image_url",
+                                            "image_url": {
+                                                "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABAQMAAAAl21bKAAAAA1BMVEX///+nxBvIAAAACklEQVQI12NgAAAAAgAB4iG8MwAAAABJRU5ErkJggg=="
+                                            },
+                                        },
+                                    ],
+                                }
+                            ],
+                        },
+                    )
+            assert resp.status == 200
+            # After the response returns, the per-completion subdir
+            # is gone (the parent ``api_server_attachments`` may
+            # remain — that's fine, it's an empty parent dir).
+            attach_root = home / "api_server_attachments"
+            if attach_root.exists():
+                assert list(attach_root.iterdir()) == []
 
     @pytest.mark.asyncio
     async def test_meta_request_detection_tolerates_non_string_content(self, adapter):
-        """_is_openwebui_meta_request must not crash on list content.
-
-        Open WebUI never sends its background meta-tasks as multimodal
-        messages, so a list always means 'not a meta-request' — but
-        the pre-fix implementation raised AttributeError and bubbled a
-        500 up to the client.
-        """
-        # Direct call — no HTTP round-trip needed.
+        """_is_openwebui_meta_request must not crash on list content."""
         assert adapter._is_openwebui_meta_request("### Task:\nSuggest 3 follow-ups") is True
         assert (
             adapter._is_openwebui_meta_request(
@@ -491,38 +641,75 @@ class TestChatCompletionsEndpoint:
         assert adapter._is_openwebui_meta_request(42) is False
 
     def test_normalize_openai_content_strings_pass_through(self, adapter):
-        text, dropped = adapter._normalize_openai_content("hello world")
+        text, images, unsupported = adapter._normalize_openai_content("hello world")
         assert text == "hello world"
-        assert dropped == []
+        assert images == []
+        assert unsupported == []
 
     def test_normalize_openai_content_flattens_text_parts(self, adapter):
-        text, dropped = adapter._normalize_openai_content(
+        text, images, unsupported = adapter._normalize_openai_content(
             [
                 {"type": "text", "text": "part A "},
                 {"type": "text", "text": "part B"},
             ]
         )
         assert text == "part A part B"
-        assert dropped == []
+        assert images == []
+        assert unsupported == []
 
-    def test_normalize_openai_content_reports_non_text_parts(self, adapter):
-        text, dropped = adapter._normalize_openai_content(
+    def test_normalize_openai_content_extracts_image_urls(self, adapter):
+        text, images, unsupported = adapter._normalize_openai_content(
             [
-                {"type": "text", "text": "see this: "},
+                {"type": "text", "text": "see: "},
                 {
                     "type": "image_url",
                     "image_url": {"url": "data:image/png;base64,AAA="},
                 },
-                {"type": "input_audio", "input_audio": {"data": "xxx"}},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "https://example.com/x.jpg"},
+                },
             ]
         )
-        assert text == "see this: "
-        assert dropped == ["image_url", "input_audio"]
+        assert text == "see: "
+        assert images == [
+            "data:image/png;base64,AAA=",
+            "https://example.com/x.jpg",
+        ]
+        assert unsupported == []
+
+    def test_normalize_openai_content_reports_unsupported_types(self, adapter):
+        text, images, unsupported = adapter._normalize_openai_content(
+            [
+                {"type": "text", "text": "see: "},
+                {"type": "input_audio", "input_audio": {"data": "xxx"}},
+                {"type": "video_url", "video_url": {"url": "x"}},
+            ]
+        )
+        assert text == "see: "
+        assert images == []
+        assert unsupported == ["input_audio", "video_url"]
 
     def test_normalize_openai_content_handles_empty_and_none(self, adapter):
-        assert adapter._normalize_openai_content(None) == ("", [])
-        assert adapter._normalize_openai_content("") == ("", [])
-        assert adapter._normalize_openai_content([]) == ("", [])
+        assert adapter._normalize_openai_content(None) == ("", [], [])
+        assert adapter._normalize_openai_content("") == ("", [], [])
+        assert adapter._normalize_openai_content([]) == ("", [], [])
+
+    def test_normalize_openai_content_image_url_string_form(self, adapter):
+        """Some lax clients pass ``image_url`` as a bare string instead
+        of ``{"url": "..."}``.  Both forms must extract correctly.
+        """
+        text, images, unsupported = adapter._normalize_openai_content(
+            [
+                {
+                    "type": "image_url",
+                    "image_url": "https://example.com/y.png",
+                },
+            ]
+        )
+        assert text == ""
+        assert images == ["https://example.com/y.png"]
+        assert unsupported == []
 
     @pytest.mark.asyncio
     async def test_stream_true_returns_sse(self, adapter):
