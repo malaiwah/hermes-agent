@@ -348,6 +348,183 @@ class TestChatCompletionsEndpoint:
             assert resp.status == 400
 
     @pytest.mark.asyncio
+    async def test_multimodal_image_content_returns_400_not_500(self, adapter):
+        """Regression: OpenAI structured content with image parts must
+        not crash the request router.
+
+        Before the fix, ``_is_openwebui_meta_request`` called
+        ``user_message.lstrip()`` unconditionally, which raised
+        ``AttributeError: 'list' object has no attribute 'lstrip'`` on
+        any multimodal request from Open WebUI and returned a bare
+        HTTP 500. The endpoint must now reject multimodal content with
+        a clear 400 instead.
+        """
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "test",
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "See the attached image"},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": "data:image/png;base64,iVBORw0KGgo="
+                                    },
+                                },
+                            ],
+                        }
+                    ],
+                },
+            )
+            assert resp.status == 400
+            data = await resp.json()
+            assert data["error"]["type"] == "invalid_request_error"
+            assert data["error"]["code"] == "multimodal_not_supported"
+            assert "image_url" in data["error"]["message"]
+
+    @pytest.mark.asyncio
+    async def test_image_only_request_rejected_with_clear_error(self, adapter):
+        """A request containing an image but no text part must surface
+        the multimodal rejection, not the generic 'No user message
+        found' 400 that fires for truly empty messages.
+        """
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "test",
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": "data:image/png;base64,AAAA"
+                                    },
+                                }
+                            ],
+                        }
+                    ],
+                },
+            )
+            assert resp.status == 400
+            data = await resp.json()
+            assert data["error"]["code"] == "multimodal_not_supported"
+
+    @pytest.mark.asyncio
+    async def test_stale_image_in_history_does_not_block_text_followup(self, adapter):
+        """Historical turns with multimodal parts must be flattened,
+        not hard-reject a plain text follow-up request.
+
+        OpenAI chat completions clients re-send the whole conversation
+        history on every turn.  If the user once sent an image in an
+        earlier turn, every subsequent text-only message would fail
+        unless historical multimodal parts are best-effort flattened
+        to their text part.  The rejection check applies only to the
+        active user turn.
+        """
+        app = _create_app(adapter)
+
+        # Bypass the full agent stack — we only care that routing
+        # reaches the agent execution path and does not return 400.
+        from unittest.mock import patch, AsyncMock
+
+        async def _fake_run_agent(**kwargs):
+            # Return a valid (result, usage) tuple shape.
+            return (
+                {"final_response": "ok", "error": None},
+                {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+            )
+
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_run_agent", side_effect=_fake_run_agent):
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "test",
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": "look at this"},
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": "data:image/png;base64,iVBORw0KGgo="
+                                        },
+                                    },
+                                ],
+                            },
+                            {"role": "assistant", "content": "I see a screenshot."},
+                            {"role": "user", "content": "what did you notice?"},
+                        ],
+                    },
+                )
+            # Final turn is plain text — request must succeed.
+            assert resp.status == 200, await resp.text()
+
+    @pytest.mark.asyncio
+    async def test_meta_request_detection_tolerates_non_string_content(self, adapter):
+        """_is_openwebui_meta_request must not crash on list content.
+
+        Open WebUI never sends its background meta-tasks as multimodal
+        messages, so a list always means 'not a meta-request' — but
+        the pre-fix implementation raised AttributeError and bubbled a
+        500 up to the client.
+        """
+        # Direct call — no HTTP round-trip needed.
+        assert adapter._is_openwebui_meta_request("### Task:\nSuggest 3 follow-ups") is True
+        assert (
+            adapter._is_openwebui_meta_request(
+                [{"type": "text", "text": "### Task:\nSuggest"}]
+            )
+            is False
+        )
+        assert adapter._is_openwebui_meta_request(None) is False
+        assert adapter._is_openwebui_meta_request(42) is False
+
+    def test_normalize_openai_content_strings_pass_through(self, adapter):
+        text, dropped = adapter._normalize_openai_content("hello world")
+        assert text == "hello world"
+        assert dropped == []
+
+    def test_normalize_openai_content_flattens_text_parts(self, adapter):
+        text, dropped = adapter._normalize_openai_content(
+            [
+                {"type": "text", "text": "part A "},
+                {"type": "text", "text": "part B"},
+            ]
+        )
+        assert text == "part A part B"
+        assert dropped == []
+
+    def test_normalize_openai_content_reports_non_text_parts(self, adapter):
+        text, dropped = adapter._normalize_openai_content(
+            [
+                {"type": "text", "text": "see this: "},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,AAA="},
+                },
+                {"type": "input_audio", "input_audio": {"data": "xxx"}},
+            ]
+        )
+        assert text == "see this: "
+        assert dropped == ["image_url", "input_audio"]
+
+    def test_normalize_openai_content_handles_empty_and_none(self, adapter):
+        assert adapter._normalize_openai_content(None) == ("", [])
+        assert adapter._normalize_openai_content("") == ("", [])
+        assert adapter._normalize_openai_content([]) == ("", [])
+
+    @pytest.mark.asyncio
     async def test_stream_true_returns_sse(self, adapter):
         """stream=true returns SSE format with the full response."""
         app = _create_app(adapter)

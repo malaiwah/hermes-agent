@@ -27,7 +27,7 @@ import os
 import sqlite3
 import time
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 try:
     from aiohttp import web
@@ -410,15 +410,70 @@ class APIServerAdapter(BasePlatformAdapter):
     )
 
     @staticmethod
-    def _is_openwebui_meta_request(user_message: str) -> bool:
+    def _is_openwebui_meta_request(user_message: Any) -> bool:
         """Return True if this looks like an Open WebUI background meta-request.
 
         Open WebUI sends fire-and-forget requests for follow-up suggestions and
         title generation.  These should be answered with a plain LLM call — no
         tools, no session persistence — rather than a full agent loop.
+
+        Accepts either a plain string (the common case) or a structured
+        content list (OpenAI multimodal format).  Multimodal requests are
+        never meta-requests — Open WebUI always sends its background tasks
+        as plain text — so a list is reported as False without crashing.
         """
+        if not isinstance(user_message, str):
+            return False
         stripped = user_message.lstrip()
         return any(stripped.startswith(p) for p in APIServerAdapter._META_REQUEST_PREFIXES)
+
+    @staticmethod
+    def _normalize_openai_content(content: Any) -> Tuple[str, List[str]]:
+        """Flatten an OpenAI chat content field to plain text.
+
+        The OpenAI chat completions API accepts ``content`` as either a
+        plain string or a list of content parts (``{"type": "text", ...}``
+        and ``{"type": "image_url", ...}`` for multimodal inputs).
+
+        Returns ``(text, non_text_types)``:
+            - ``text`` — the concatenation of every ``type="text"`` part
+              (or the original string, unchanged).
+            - ``non_text_types`` — a sorted list of the part types that
+              were present but not reproduced in ``text`` (e.g.
+              ``["image_url"]``).  Callers use this to decide whether to
+              reject the request with a clear 400 until multimodal
+              forwarding is implemented.
+
+        Silently coerces non-string, non-list content to ``str(content)``
+        rather than raising, so a malformed request still produces a
+        sensible error downstream instead of a 500.
+        """
+        if isinstance(content, str):
+            return content, []
+        if content is None:
+            return "", []
+        if not isinstance(content, list):
+            return str(content), []
+
+        text_parts: List[str] = []
+        non_text: Set[str] = set()
+        for part in content:
+            if isinstance(part, dict):
+                part_type = part.get("type", "")
+                if part_type == "text":
+                    text_value = part.get("text", "")
+                    if isinstance(text_value, str):
+                        text_parts.append(text_value)
+                    continue
+                if part_type:
+                    non_text.add(part_type)
+                else:
+                    non_text.add("unknown")
+            elif isinstance(part, str):
+                text_parts.append(part)
+            else:
+                non_text.add(type(part).__name__)
+        return "".join(text_parts), sorted(non_text)
 
     def _create_agent(
         self,
@@ -523,20 +578,34 @@ class APIServerAdapter(BasePlatformAdapter):
         stream = body.get("stream", False)
 
         # Extract system message (becomes ephemeral system prompt layered ON TOP of core)
+        # OpenAI chat completions accepts ``content`` as either a plain
+        # string or a list of structured parts (``{"type": "text"}``,
+        # ``{"type": "image_url"}``, etc.). Hermes does not yet forward
+        # multimodal parts to the underlying model through the API
+        # server, so flatten everything to text here and collect which
+        # non-text types we saw — we reject the whole request below with
+        # a clear 400 if any of them were present on the final user turn.
         system_prompt = None
         conversation_messages: List[Dict[str, str]] = []
+        rejected_content_types: Set[str] = set()
 
         for msg in messages:
             role = msg.get("role", "")
-            content = msg.get("content", "")
+            text, dropped = self._normalize_openai_content(msg.get("content", ""))
             if role == "system":
                 # Accumulate system messages
                 if system_prompt is None:
-                    system_prompt = content
+                    system_prompt = text
                 else:
-                    system_prompt = system_prompt + "\n" + content
+                    system_prompt = system_prompt + "\n" + text
+                # Multimodal parts on the system message are simply
+                # dropped — they are never meaningful there.
             elif role in ("user", "assistant"):
-                conversation_messages.append({"role": role, "content": content})
+                conversation_messages.append({"role": role, "content": text})
+                # Only the final user turn's non-text parts matter for
+                # the reject decision; historical turns are best-effort
+                # flattened so stale Open WebUI chat history containing
+                # prior images does not hard-fail every follow-up.
 
         # Extract the last user message as the primary input
         user_message = ""
@@ -544,6 +613,46 @@ class APIServerAdapter(BasePlatformAdapter):
         if conversation_messages:
             user_message = conversation_messages[-1].get("content", "")
             history = conversation_messages[:-1]
+            # Re-check the raw last message for non-text parts (the
+            # flattened ``conversation_messages`` has already dropped
+            # them).  This is the turn the user is actively sending.
+            last_raw = None
+            for msg in reversed(messages):
+                if msg.get("role") in ("user", "assistant"):
+                    last_raw = msg
+                    break
+            if last_raw is not None and last_raw.get("role") == "user":
+                _, rejected_content_types_list = self._normalize_openai_content(
+                    last_raw.get("content", "")
+                )
+                rejected_content_types.update(rejected_content_types_list)
+
+        if rejected_content_types:
+            # Multimodal forwarding is not implemented on this endpoint
+            # yet.  Fail fast with a clear 400 rather than silently
+            # dropping the attachment — the user needs to know their
+            # image was not seen.
+            types_list = ", ".join(rejected_content_types)
+            logger.warning(
+                "Rejecting multimodal chat completion: unsupported content parts (%s)",
+                types_list,
+            )
+            return web.json_response(
+                {
+                    "error": {
+                        "message": (
+                            f"This endpoint does not yet support multimodal "
+                            f"content parts ({types_list}). Send a text-only "
+                            f"message, or use one of the gateway platforms "
+                            f"(Telegram, Discord, Matrix) which support "
+                            f"images natively."
+                        ),
+                        "type": "invalid_request_error",
+                        "code": "multimodal_not_supported",
+                    }
+                },
+                status=400,
+            )
 
         if not user_message:
             return web.json_response(
