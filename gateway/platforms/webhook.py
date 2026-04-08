@@ -352,6 +352,22 @@ class WebhookAdapter(BasePlatformAdapter):
                 {"status": "ignored", "event": event_type}
             )
 
+        # Check payload field filter (e.g. only handle certain actions)
+        payload_filter = route_config.get("payload_filter", {})
+        for field_path, allowed_values in payload_filter.items():
+            value: Any = payload
+            for part in field_path.split("."):
+                value = value.get(part) if isinstance(value, dict) else None
+            allowed = [allowed_values] if isinstance(allowed_values, str) else allowed_values
+            if value not in allowed:
+                logger.debug(
+                    "[webhook] Ignoring %s for route %s (%s=%s not in %s)",
+                    event_type, route_name, field_path, value, allowed,
+                )
+                return web.json_response(
+                    {"status": "ignored", "event": event_type, "reason": f"{field_path}={value}"}
+                )
+
         # Format prompt from template
         prompt_template = route_config.get("prompt", "")
         prompt = self._render_prompt(
@@ -457,6 +473,13 @@ class WebhookAdapter(BasePlatformAdapter):
             len(prompt),
             delivery_id,
         )
+
+        # Post acknowledgement reaction (👀) before agent starts, if configured
+        reaction_config = route_config.get("reaction")
+        if reaction_config:
+            rt = asyncio.create_task(self._post_reaction(reaction_config, payload))
+            self._background_tasks.add(rt)
+            rt.add_done_callback(self._background_tasks.discard)
 
         # Non-blocking — return 202 Accepted immediately
         task = asyncio.create_task(self.handle_message(event))
@@ -575,6 +598,64 @@ class WebhookAdapter(BasePlatformAdapter):
     # ------------------------------------------------------------------
     # Response delivery
     # ------------------------------------------------------------------
+
+    async def _post_reaction(self, reaction_config: dict, payload: dict) -> None:
+        """Post an emoji reaction to a Gitea issue, PR, or comment.
+
+        reaction_config keys:
+          type        — must be "gitea_reaction"
+          emoji       — reaction content (default: "eyes")
+          gitea_url   — base URL (falls back to GITEA_BASE_URL env var)
+          token_env   — env var for API token (default: GITEA_TOKEN)
+          repo        — "owner/repo" template (e.g. "{repository.full_name}")
+          issue_number — issue/PR index template (for PR and issue events)
+          comment_id  — comment ID template (for comment events)
+        """
+        if reaction_config.get("type") != "gitea_reaction":
+            return
+
+        gitea_url = self._render_prompt(
+            reaction_config.get("gitea_url", ""), payload, "", ""
+        ).rstrip("/") or os.getenv("GITEA_BASE_URL", "").rstrip("/")
+        token = os.getenv(reaction_config.get("token_env", "GITEA_TOKEN"), "")
+        repo = self._render_prompt(reaction_config.get("repo", ""), payload, "", "")
+        emoji = reaction_config.get("emoji", "eyes")
+
+        if not gitea_url or not token or not repo:
+            logger.debug("[webhook] _post_reaction: missing gitea_url/token/repo")
+            return
+
+        comment_id_tpl = reaction_config.get("comment_id", "")
+        issue_number_tpl = reaction_config.get("issue_number", "")
+
+        if comment_id_tpl:
+            cid = self._render_prompt(comment_id_tpl, payload, "", "")
+            url = f"{gitea_url}/api/v1/repos/{repo}/issues/comments/{cid}/reactions"
+        elif issue_number_tpl:
+            num = self._render_prompt(issue_number_tpl, payload, "", "")
+            url = f"{gitea_url}/api/v1/repos/{repo}/issues/{num}/reactions"
+        else:
+            return
+
+        try:
+            import aiohttp as _aiohttp
+            async with _aiohttp.ClientSession() as session:
+                async with session.post(
+                    url,
+                    json={"content": emoji},
+                    headers={"Authorization": f"token {token}"},
+                    timeout=_aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status in (200, 201):
+                        logger.debug("[webhook] Posted :%s: reaction to %s", emoji, url)
+                    else:
+                        body = await resp.text()
+                        logger.warning(
+                            "[webhook] Reaction POST %s returned %d: %s",
+                            url, resp.status, body[:120],
+                        )
+        except Exception as e:
+            logger.warning("[webhook] _post_reaction failed: %s", e)
 
     async def _deliver_github_comment(
         self, content: str, delivery: dict
