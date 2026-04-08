@@ -519,10 +519,6 @@ class APIServerAdapter(BasePlatformAdapter):
                 status=400,
             )
 
-        # TEMP: log extra fields on first message to identify fingerprint candidates
-        if messages:
-            extra = {k: v for k, v in messages[0].items() if k not in ("role", "content")}
-            logger.info("[api_server] messages[0] keys: role,content + %s", list(extra.keys()))
 
         stream = body.get("stream", False)
 
