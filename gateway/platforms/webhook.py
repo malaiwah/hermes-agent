@@ -365,7 +365,7 @@ class WebhookAdapter(BasePlatformAdapter):
                 else:
                     route_config[k] = v
 
-        # Check payload field filter (e.g. only handle certain actions)
+        # Check payload field filter (allowlist — ignore if field not in list)
         payload_filter = route_config.get("payload_filter", {})
         for field_path, allowed_values in payload_filter.items():
             value: Any = payload
@@ -379,6 +379,22 @@ class WebhookAdapter(BasePlatformAdapter):
                 )
                 return web.json_response(
                     {"status": "ignored", "event": event_type, "reason": f"{field_path}={value}"}
+                )
+
+        # Check payload exclude filter (denylist — ignore if field matches)
+        payload_exclude = route_config.get("payload_exclude", {})
+        for field_path, denied_values in payload_exclude.items():
+            value = payload
+            for part in field_path.split("."):
+                value = value.get(part) if isinstance(value, dict) else None
+            denied = [denied_values] if isinstance(denied_values, str) else denied_values
+            if value in denied:
+                logger.debug(
+                    "[webhook] Ignoring %s for route %s (%s=%s is excluded)",
+                    event_type, route_name, field_path, value,
+                )
+                return web.json_response(
+                    {"status": "ignored", "event": event_type, "reason": f"{field_path}={value} excluded"}
                 )
 
         # Format prompt from template
