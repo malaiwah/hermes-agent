@@ -514,27 +514,23 @@ class TestInit:
 
 class TestInterrupt:
     def test_interrupt_sets_flag(self, agent):
-        with patch("run_agent._set_interrupt"):
-            agent.interrupt()
-            assert agent._interrupt_requested is True
+        agent.interrupt()
+        assert agent._interrupt_requested is True
 
     def test_interrupt_with_message(self, agent):
-        with patch("run_agent._set_interrupt"):
-            agent.interrupt("new question")
-            assert agent._interrupt_message == "new question"
+        agent.interrupt("new question")
+        assert agent._interrupt_message == "new question"
 
     def test_clear_interrupt(self, agent):
-        with patch("run_agent._set_interrupt"):
-            agent.interrupt("msg")
-            agent.clear_interrupt()
-            assert agent._interrupt_requested is False
-            assert agent._interrupt_message is None
+        agent.interrupt("msg")
+        agent.clear_interrupt()
+        assert agent._interrupt_requested is False
+        assert agent._interrupt_message is None
 
     def test_is_interrupted_property(self, agent):
         assert agent.is_interrupted is False
-        with patch("run_agent._set_interrupt"):
-            agent.interrupt()
-            assert agent.is_interrupted is True
+        agent.interrupt()
+        assert agent.is_interrupted is True
 
 
 class TestHydrateTodoStore:
@@ -543,8 +539,7 @@ class TestHydrateTodoStore:
             {"role": "user", "content": "hello"},
             {"role": "assistant", "content": "hi"},
         ]
-        with patch("run_agent._set_interrupt"):
-            agent._hydrate_todo_store(history)
+        agent._hydrate_todo_store(history)
         assert not agent._todo_store.has_items()
 
     def test_recovers_from_history(self, agent):
@@ -558,8 +553,7 @@ class TestHydrateTodoStore:
                 "tool_call_id": "c1",
             },
         ]
-        with patch("run_agent._set_interrupt"):
-            agent._hydrate_todo_store(history)
+        agent._hydrate_todo_store(history)
         assert agent._todo_store.has_items()
 
     def test_skips_non_todo_tools(self, agent):
@@ -570,8 +564,7 @@ class TestHydrateTodoStore:
                 "tool_call_id": "c1",
             },
         ]
-        with patch("run_agent._set_interrupt"):
-            agent._hydrate_todo_store(history)
+        agent._hydrate_todo_store(history)
         assert not agent._todo_store.has_items()
 
     def test_invalid_json_skipped(self, agent):
@@ -582,8 +575,7 @@ class TestHydrateTodoStore:
                 "tool_call_id": "c1",
             },
         ]
-        with patch("run_agent._set_interrupt"):
-            agent._hydrate_todo_store(history)
+        agent._hydrate_todo_store(history)
         assert not agent._todo_store.has_items()
 
 
@@ -975,8 +967,7 @@ class TestExecuteToolCalls:
         mock_msg = _mock_assistant_msg(content="", tool_calls=[tc1, tc2])
         messages = []
 
-        with patch("run_agent._set_interrupt"):
-            agent.interrupt()
+        agent.interrupt()
 
         agent._execute_tool_calls(mock_msg, messages, "task-1")
         # Both calls should be skipped with cancellation messages
@@ -1224,8 +1215,7 @@ class TestConcurrentToolExecution:
         mock_msg = _mock_assistant_msg(content="", tool_calls=[tc1, tc2])
         messages = []
 
-        with patch("run_agent._set_interrupt"):
-            agent.interrupt()
+        agent.interrupt()
 
         agent._execute_tool_calls_concurrent(mock_msg, messages, "task-1")
         assert len(messages) == 2
@@ -1496,7 +1486,6 @@ class TestRunConversation:
             patch.object(agent, "_persist_session"),
             patch.object(agent, "_save_trajectory"),
             patch.object(agent, "_cleanup_task_resources"),
-            patch("run_agent._set_interrupt"),
             patch.object(
                 agent, "_interruptible_api_call", side_effect=interrupt_side_effect
             ),
@@ -3449,7 +3438,10 @@ class TestMemoryNudgeCounterPersistence:
     def test_counters_not_reset_in_preamble(self):
         """The run_conversation preamble must not zero the nudge counters."""
         import inspect
-        src = inspect.getsource(AIAgent.run_conversation)
+        # ``run_conversation`` is now a thin wrapper that binds the
+        # per-agent interrupt event; the actual conversation logic
+        # lives in ``_run_conversation_locked``.
+        src = inspect.getsource(AIAgent._run_conversation_locked)
         # The preamble resets many fields (retry counts, budget, etc.)
         # before the main loop. Find that reset block and verify our
         # counters aren't in it. The reset block ends at iteration_budget.
@@ -3464,7 +3456,7 @@ class TestDeadRetryCode:
 
     def test_no_unreachable_max_retries_after_backoff(self):
         import inspect
-        source = inspect.getsource(AIAgent.run_conversation)
+        source = inspect.getsource(AIAgent._run_conversation_locked)
         occurrences = source.count("if retry_count >= max_retries:")
         assert occurrences == 2, (
             f"Expected 2 occurrences of 'if retry_count >= max_retries:' "

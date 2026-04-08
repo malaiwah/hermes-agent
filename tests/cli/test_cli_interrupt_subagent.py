@@ -42,6 +42,7 @@ class TestCLISubagentInterrupt(unittest.TestCase):
         parent = AIAgent.__new__(AIAgent)
         parent._interrupt_requested = False
         parent._interrupt_message = None
+        parent._interrupt_event = threading.Event()
         parent._active_children = []
         parent._active_children_lock = threading.Lock()
         parent.quiet_mode = True
@@ -112,6 +113,7 @@ class TestCLISubagentInterrupt(unittest.TestCase):
                     mock_instance = MagicMock()
                     mock_instance._interrupt_requested = False
                     mock_instance._interrupt_message = None
+                    mock_instance._interrupt_event = threading.Event()
                     mock_instance._active_children = []
                     mock_instance._active_children_lock = threading.Lock()
                     mock_instance.quiet_mode = True

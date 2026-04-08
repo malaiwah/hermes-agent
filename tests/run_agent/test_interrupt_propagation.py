@@ -29,6 +29,7 @@ class TestInterruptPropagationToChild(unittest.TestCase):
         parent = AIAgent.__new__(AIAgent)
         parent._interrupt_requested = False
         parent._interrupt_message = None
+        parent._interrupt_event = threading.Event()
         parent._active_children = []
         parent._active_children_lock = threading.Lock()
         parent.quiet_mode = True
@@ -36,6 +37,7 @@ class TestInterruptPropagationToChild(unittest.TestCase):
         child = AIAgent.__new__(AIAgent)
         child._interrupt_requested = False
         child._interrupt_message = None
+        child._interrupt_event = threading.Event()
         child._active_children = []
         child._active_children_lock = threading.Lock()
         child.quiet_mode = True
@@ -47,31 +49,46 @@ class TestInterruptPropagationToChild(unittest.TestCase):
         assert parent._interrupt_requested is True
         assert child._interrupt_requested is True
         assert child._interrupt_message == "new user message"
-        assert is_interrupted() is True
+        # Both per-agent events are set; the global fallback remains
+        # untouched because per-agent isolation is now in effect.
+        assert parent._interrupt_event.is_set() is True
+        assert child._interrupt_event.is_set() is True
+        assert _interrupt_event.is_set() is False
 
-    def test_child_clear_interrupt_at_start_clears_global(self):
-        """child.clear_interrupt() at start of run_conversation clears the GLOBAL event.
-        
-        This is the intended behavior at startup, but verify it doesn't
-        accidentally clear an interrupt intended for a running child.
+    def test_child_clear_interrupt_does_not_affect_global(self):
+        """child.clear_interrupt() must clear only the child's per-agent event.
+
+        Historical behaviour reset the process-wide ``_interrupt_event``
+        too, which silently un-interrupted any other agent running
+        concurrently in the same process.  The fix isolates each
+        agent's interrupt state.
         """
         from run_agent import AIAgent
 
         child = AIAgent.__new__(AIAgent)
         child._interrupt_requested = True
         child._interrupt_message = "msg"
+        child._interrupt_event = threading.Event()
+        child._interrupt_event.set()
         child.quiet_mode = True
         child._active_children = []
         child._active_children_lock = threading.Lock()
 
-        # Global is set
+        # Independently, the global fallback is set (representing some
+        # other code path or an unrelated agent that has not yet been
+        # migrated to per-agent events).
         set_interrupt(True)
-        assert is_interrupted() is True
+        assert _interrupt_event.is_set() is True
 
-        # child.clear_interrupt() clears both
+        # Clearing the child only clears the child's own event.
         child.clear_interrupt()
         assert child._interrupt_requested is False
-        assert is_interrupted() is False
+        assert child._interrupt_event.is_set() is False
+        # Global fallback must remain untouched.
+        assert _interrupt_event.is_set() is True
+        # Manual cleanup so tearDown's set_interrupt(False) is a no-op
+        # equivalent.
+        set_interrupt(False)
 
     def test_interrupt_during_child_api_call_detected(self):
         """Interrupt set during _interruptible_api_call is detected within 0.5s."""
@@ -80,6 +97,7 @@ class TestInterruptPropagationToChild(unittest.TestCase):
         child = AIAgent.__new__(AIAgent)
         child._interrupt_requested = False
         child._interrupt_message = None
+        child._interrupt_event = threading.Event()
         child._active_children = []
         child._active_children_lock = threading.Lock()
         child.quiet_mode = True
@@ -122,6 +140,7 @@ class TestInterruptPropagationToChild(unittest.TestCase):
         parent = AIAgent.__new__(AIAgent)
         parent._interrupt_requested = False
         parent._interrupt_message = None
+        parent._interrupt_event = threading.Event()
         parent._active_children = []
         parent._active_children_lock = threading.Lock()
         parent.quiet_mode = True
@@ -129,6 +148,7 @@ class TestInterruptPropagationToChild(unittest.TestCase):
         child = AIAgent.__new__(AIAgent)
         child._interrupt_requested = False
         child._interrupt_message = None
+        child._interrupt_event = threading.Event()
         child._active_children = []
         child._active_children_lock = threading.Lock()
         child.quiet_mode = True

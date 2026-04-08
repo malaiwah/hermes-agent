@@ -23,6 +23,7 @@ Usage:
 import asyncio
 import base64
 import concurrent.futures
+import contextvars
 import copy
 import hashlib
 import json
@@ -68,7 +69,10 @@ from model_tools import (
 )
 from tools.terminal_tool import cleanup_vm, get_active_env
 from tools.tool_result_storage import maybe_persist_tool_result, enforce_turn_budget
-from tools.interrupt import set_interrupt as _set_interrupt
+from tools.interrupt import (
+    bind_event as _bind_interrupt_event,
+    unbind_event as _unbind_interrupt_event,
+)
 from tools.browser_tool import cleanup_browser
 
 
@@ -606,9 +610,15 @@ class AIAgent:
         # even when stream consumers are registered (no tokens streaming then)
         self._executing_tools = False
 
-        # Interrupt mechanism for breaking out of tool loops
+        # Interrupt mechanism for breaking out of tool loops.
+        # ``_interrupt_event`` is the per-agent signal that long-running
+        # tools poll via ``tools.interrupt.is_interrupted``. It is bound
+        # to a ``contextvars.ContextVar`` for the duration of
+        # ``run_conversation()`` so concurrent agents in the same process
+        # cannot interrupt each other's tool calls.
         self._interrupt_requested = False
         self._interrupt_message = None  # Optional message that triggered interrupt
+        self._interrupt_event = threading.Event()
         self._client_lock = threading.RLock()
         
         # Subagent delegation state
@@ -2474,8 +2484,14 @@ class AIAgent:
         """
         self._interrupt_requested = True
         self._interrupt_message = message
-        # Signal all tools to abort any in-flight operations immediately
-        _set_interrupt(True)
+        # Signal this agent's own tools to abort in-flight operations.
+        # Writing to ``self._interrupt_event`` directly (rather than the
+        # ``set_interrupt`` helper) bypasses the contextvar lookup, which
+        # is critical because ``interrupt()`` is typically called from a
+        # different thread (gateway message handler, SSE disconnect
+        # handler) where the contextvar may be unbound or bound to a
+        # different agent.
+        self._interrupt_event.set()
         # Propagate interrupt to any running child agents (subagent delegation)
         with self._active_children_lock:
             children_copy = list(self._active_children)
@@ -2488,10 +2504,17 @@ class AIAgent:
             print("\n⚡ Interrupt requested" + (f": '{message[:40]}...'" if message and len(message) > 40 else f": '{message}'" if message else ""))
     
     def clear_interrupt(self) -> None:
-        """Clear any pending interrupt request and the global tool interrupt signal."""
+        """Clear any pending interrupt request for this agent only.
+
+        Writes to ``self._interrupt_event`` directly so that clearing
+        one agent's interrupt does not silently un-interrupt another
+        agent running concurrently in the same process — for example
+        a fresh ``run_conversation()`` starting on the API server while
+        a sibling request is mid-tool.
+        """
         self._interrupt_requested = False
         self._interrupt_message = None
-        _set_interrupt(False)
+        self._interrupt_event.clear()
 
     def _touch_activity(self, desc: str) -> None:
         """Update the last-activity timestamp and description (thread-safe)."""
@@ -2563,7 +2586,10 @@ class AIAgent:
             self._todo_store.write(last_todo_response, merge=False)
             if not self.quiet_mode:
                 self._vprint(f"{self.log_prefix}📋 Restored {len(last_todo_response)} todo item(s) from history")
-        _set_interrupt(False)
+        # Clear stale interrupt state on this agent only — historical
+        # behaviour reset the process-wide flag here, which would race
+        # with concurrent agents in the same process.
+        self._interrupt_event.clear()
     
     @property
     def is_interrupted(self) -> bool:
@@ -6143,10 +6169,20 @@ class AIAgent:
 
         try:
             max_workers = min(num_tools, _MAX_TOOL_WORKERS)
+            # Snapshot the calling thread's context so each worker
+            # inherits the per-agent interrupt event bound by
+            # ``run_conversation`` via ``tools.interrupt``.
+            # ``ThreadPoolExecutor.submit`` does not propagate
+            # contextvars automatically, and a single ``Context``
+            # object cannot be ``run()`` from more than one thread, so
+            # we hand each worker a fresh ``copy()`` of the snapshot.
+            _parent_ctx = contextvars.copy_context()
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = []
                 for i, (tc, name, args) in enumerate(parsed_calls):
-                    f = executor.submit(_run_tool, i, tc, name, args)
+                    f = executor.submit(
+                        _parent_ctx.copy().run, _run_tool, i, tc, name, args
+                    )
                     futures.append(f)
 
                 # Wait for all to complete (exceptions are captured inside _run_tool)
@@ -6798,6 +6834,40 @@ class AIAgent:
         return final_response
 
     def run_conversation(
+        self,
+        user_message: str,
+        system_message: str = None,
+        conversation_history: List[Dict[str, Any]] = None,
+        task_id: str = None,
+        stream_callback: Optional[callable] = None,
+        persist_user_message: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Public entry point that binds this agent's interrupt event.
+
+        The actual conversation logic lives in
+        :meth:`_run_conversation_locked`.  This wrapper exists solely so
+        each turn binds ``self._interrupt_event`` to the
+        ``tools.interrupt`` context variable for its entire duration and
+        unbinds it on exit.  Without the binding, tools polling
+        :func:`tools.interrupt.is_interrupted` would observe the
+        process-wide fallback event and could see interrupts intended
+        for a different concurrent agent (or fail to see this agent's
+        interrupt at all).
+        """
+        _interrupt_token = _bind_interrupt_event(self._interrupt_event)
+        try:
+            return self._run_conversation_locked(
+                user_message=user_message,
+                system_message=system_message,
+                conversation_history=conversation_history,
+                task_id=task_id,
+                stream_callback=stream_callback,
+                persist_user_message=persist_user_message,
+            )
+        finally:
+            _unbind_interrupt_event(_interrupt_token)
+
+    def _run_conversation_locked(
         self,
         user_message: str,
         system_message: str = None,
