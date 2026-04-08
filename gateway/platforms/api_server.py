@@ -401,12 +401,32 @@ class APIServerAdapter(BasePlatformAdapter):
     # Agent creation helper
     # ------------------------------------------------------------------
 
+    # Patterns emitted by Open WebUI (and similar frontends) for background
+    # meta-tasks that should never touch the agent's tool loop or session.
+    _META_REQUEST_PREFIXES = (
+        "### Task:\nSuggest ",          # follow-up suggestions
+        "### Task:\nCreate a concise",  # title generation
+        "### Task:\nGenerate a concise",
+    )
+
+    @staticmethod
+    def _is_openwebui_meta_request(user_message: str) -> bool:
+        """Return True if this looks like an Open WebUI background meta-request.
+
+        Open WebUI sends fire-and-forget requests for follow-up suggestions and
+        title generation.  These should be answered with a plain LLM call — no
+        tools, no session persistence — rather than a full agent loop.
+        """
+        stripped = user_message.lstrip()
+        return any(stripped.startswith(p) for p in APIServerAdapter._META_REQUEST_PREFIXES)
+
     def _create_agent(
         self,
         ephemeral_system_prompt: Optional[str] = None,
         session_id: Optional[str] = None,
         stream_delta_callback=None,
         tool_progress_callback=None,
+        btw_mode: bool = False,
     ) -> Any:
         """
         Create an AIAgent instance using the gateway's runtime config.
@@ -440,13 +460,14 @@ class APIServerAdapter(BasePlatformAdapter):
             quiet_mode=True,
             verbose_logging=False,
             ephemeral_system_prompt=ephemeral_system_prompt or None,
-            enabled_toolsets=enabled_toolsets,
+            enabled_toolsets=[] if btw_mode else enabled_toolsets,
             session_id=session_id,
             platform="api_server",
             stream_delta_callback=stream_delta_callback,
             tool_progress_callback=tool_progress_callback,
             session_db=self._ensure_session_db(),
             fallback_model=fallback_model,
+            persist_session=not btw_mode,
         )
         return agent
 
@@ -528,6 +549,37 @@ class APIServerAdapter(BasePlatformAdapter):
                 {"error": {"message": "No user message found in messages", "type": "invalid_request_error"}},
                 status=400,
             )
+
+        # Open WebUI meta-requests (follow-up suggestions, title generation) get a
+        # btw-style run: ephemeral, no tools, not persisted.  The full chat history
+        # is embedded in the prompt by Open WebUI, so we pass it as-is.
+        if self._is_openwebui_meta_request(user_message):
+            completion_id = f"chatcmpl-{uuid.uuid4().hex[:29]}"
+            model_name = body.get("model", "hermes-agent")
+            created = int(time.time())
+            try:
+                result, usage = await self._run_agent(
+                    user_message=user_message,
+                    conversation_history=history,
+                    ephemeral_system_prompt=system_prompt,
+                    session_id=None,
+                    btw_mode=True,
+                )
+            except Exception as e:
+                logger.error("Error running meta-request agent: %s", e, exc_info=True)
+                return web.json_response(
+                    _openai_error(f"Internal server error: {e}", err_type="server_error"),
+                    status=500,
+                )
+            final_response = result.get("final_response", "") or result.get("error", "(No response)")
+            return web.json_response({
+                "id": completion_id,
+                "object": "chat.completion",
+                "created": created,
+                "model": model_name,
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": final_response}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": usage.get("input_tokens", 0), "completion_tokens": usage.get("output_tokens", 0), "total_tokens": usage.get("total_tokens", 0)},
+            })
 
         # Allow caller to continue an existing session by passing X-Hermes-Session-Id.
         # When provided, history is loaded from state.db instead of from the request body.
@@ -1292,6 +1344,7 @@ class APIServerAdapter(BasePlatformAdapter):
         stream_delta_callback=None,
         tool_progress_callback=None,
         agent_ref: Optional[list] = None,
+        btw_mode: bool = False,
     ) -> tuple:
         """
         Create an agent and run a conversation in a thread executor.
@@ -1312,6 +1365,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 session_id=session_id,
                 stream_delta_callback=stream_delta_callback,
                 tool_progress_callback=tool_progress_callback,
+                btw_mode=btw_mode,
             )
             if agent_ref is not None:
                 agent_ref[0] = agent
