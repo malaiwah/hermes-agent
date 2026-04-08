@@ -352,6 +352,19 @@ class WebhookAdapter(BasePlatformAdapter):
                 {"status": "ignored", "event": event_type}
             )
 
+        # Merge per-event overrides on top of route config.
+        # Keys in per_event[event_type] shadow route-level keys; nested dicts
+        # (reaction, deliver_extra) are shallow-merged so shared keys like
+        # gitea_url don't need repeating.
+        per_event = route_config.get("per_event", {})
+        if event_type in per_event:
+            route_config = dict(route_config)
+            for k, v in per_event[event_type].items():
+                if isinstance(v, dict) and isinstance(route_config.get(k), dict):
+                    route_config[k] = {**route_config[k], **v}
+                else:
+                    route_config[k] = v
+
         # Check payload field filter (e.g. only handle certain actions)
         payload_filter = route_config.get("payload_filter", {})
         for field_path, allowed_values in payload_filter.items():
