@@ -26,6 +26,7 @@ RUN printf 'IMAGE_TITLE=hermes-agent\nIMAGE_SOURCE=%s\nGIT_COMMIT=%s\nGIT_REF=%s
 # ── System dependencies ──────────────────────────────────────────────────────
 
 RUN apt-get update && \
+    apt-get upgrade -y --target-release=stable-security && \
     apt-get install -y --no-install-recommends \
         build-essential nodejs npm python3 python3-pip ripgrep ffmpeg gcc \
         python3-dev libffi-dev podman-remote && \
