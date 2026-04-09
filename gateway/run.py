@@ -3820,6 +3820,25 @@ class GatewayRunner:
             except Exception:
                 title = None
 
+        # Token display: prefer the live agent's lifetime total if we have an
+        # AIAgent instance for this session (the persisted entry accumulates
+        # via the gateway's update_session path, which historically had
+        # correctness issues — see the _lifetime_mirror logic in session.py
+        # for the in-memory delta tracking that fixes them going forward).
+        # When no live agent exists, fall back to the persisted total. The
+        # MAX of the two is the most honest answer because the live agent's
+        # lifetime can be smaller than the persisted total just after a
+        # gateway restart.
+        live_tokens = 0
+        live_agent = self._running_agents.get(session_key)
+        # _running_agents may hold the sentinel (`_AGENT_PENDING_SENTINEL`)
+        # for an agent that's been claimed but not yet instantiated. Skip
+        # the sentinel; the persisted total is what we have until the
+        # agent reports back.
+        if live_agent is not None and live_agent is not _AGENT_PENDING_SENTINEL:
+            live_tokens = getattr(live_agent, "session_total_tokens", 0) or 0
+        display_tokens = max(live_tokens, session_entry.total_tokens)
+
         lines = [
             "📊 **Hermes Gateway Status**",
             "",
@@ -3830,7 +3849,7 @@ class GatewayRunner:
         lines.extend([
             f"**Created:** {session_entry.created_at.strftime('%Y-%m-%d %H:%M')}",
             f"**Last Activity:** {session_entry.updated_at.strftime('%Y-%m-%d %H:%M')}",
-            f"**Tokens:** {session_entry.total_tokens:,}",
+            f"**Tokens:** {display_tokens:,}",
             f"**Agent Running:** {'Yes ⚡' if is_running else 'No'}",
             "",
             f"**Connected Platforms:** {', '.join(connected_platforms)}",
@@ -7553,11 +7572,13 @@ class GatewayRunner:
             _last_prompt_toks = 0
             _input_toks = 0
             _output_toks = 0
+            _total_toks = 0
             _agent = agent_holder[0]
             if _agent and hasattr(_agent, "context_compressor"):
                 _last_prompt_toks = getattr(_agent.context_compressor, "last_prompt_tokens", 0)
                 _input_toks = getattr(_agent, "session_prompt_tokens", 0)
                 _output_toks = getattr(_agent, "session_completion_tokens", 0)
+                _total_toks = getattr(_agent, "session_total_tokens", 0)
             _resolved_model = getattr(_agent, "model", None) if _agent else None
 
             if (
@@ -7584,6 +7605,7 @@ class GatewayRunner:
                     "last_prompt_tokens": _last_prompt_toks,
                     "input_tokens": _input_toks,
                     "output_tokens": _output_toks,
+                    "total_tokens": _total_toks,
                     "model": _resolved_model,
                 }
             
@@ -7673,6 +7695,7 @@ class GatewayRunner:
                 "last_prompt_tokens": _last_prompt_toks,
                 "input_tokens": _input_toks,
                 "output_tokens": _output_toks,
+                "total_tokens": _total_toks,
                 "model": _resolved_model,
                 "session_id": effective_session_id,
                 "self_nudge_armed": bool(

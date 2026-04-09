@@ -517,6 +517,18 @@ class SessionStore:
         self._loaded = False
         self._lock = threading.Lock()
         self._has_active_processes_fn = has_active_processes_fn
+        # Per-session lifetime mirrors used by `update_session` to convert the
+        # agent's lifetime token totals (which are monotonically growing per
+        # AIAgent instance) into per-call deltas before accumulating into
+        # the persisted SessionEntry. Without this we get quadratic growth:
+        # turn N adds the agent's running total at turn N, which already
+        # includes turns 1..N-1. In-memory only — does not persist across
+        # gateway restarts. On restart, the first update for each session
+        # treats the new agent's lifetime as a fresh delta, which is the
+        # correct behaviour: persisted SessionEntry totals continue from
+        # whatever was last persisted, and the new agent's tokens accumulate
+        # on top.
+        self._lifetime_mirror: Dict[str, Dict[str, int]] = {}
         
         # Initialize SQLite session database
         self._db = None
@@ -814,7 +826,25 @@ class SessionStore:
         output_tokens: int = 0,
         total_tokens: int = 0,
     ) -> None:
-        """Update lightweight session metadata after an interaction."""
+        """Update lightweight session metadata after an interaction.
+
+        ``input_tokens`` / ``output_tokens`` / ``total_tokens`` arguments are
+        the agent's CURRENT LIFETIME TOTALS (since the AIAgent instance was
+        created), not per-call deltas. We convert to per-call deltas via the
+        in-memory ``_lifetime_mirror`` so the persisted entry accumulates
+        correctly without quadratic blowup.
+
+        Lifetime semantics:
+          - First update for a session_key after gateway start: the entire
+            current lifetime is treated as the delta. The previous persisted
+            value continues from whatever was on disk.
+          - Subsequent updates: delta = max(0, current - mirror).
+          - If current < mirror (the agent was reset / replaced and a new
+            instance with a smaller lifetime took over): treat current as
+            the new delta from zero. We don't try to recover the
+            now-orphaned tokens between mirror and the previous lifetime;
+            they were already attributed at the previous update.
+        """
         with self._lock:
             self._ensure_loaded_locked()
 
@@ -823,9 +853,24 @@ class SessionStore:
                 entry.updated_at = _now()
                 if last_prompt_tokens is not None:
                     entry.last_prompt_tokens = last_prompt_tokens
-                entry.input_tokens += input_tokens
-                entry.output_tokens += output_tokens
-                entry.total_tokens += total_tokens
+
+                mirror = self._lifetime_mirror.setdefault(
+                    session_key, {"input": 0, "output": 0, "total": 0}
+                )
+
+                def _delta(name: str, current: int) -> int:
+                    prev = mirror[name]
+                    if current < prev:
+                        # Agent was reset; treat current as a fresh delta.
+                        delta = current
+                    else:
+                        delta = current - prev
+                    mirror[name] = current
+                    return delta
+
+                entry.input_tokens += _delta("input", input_tokens)
+                entry.output_tokens += _delta("output", output_tokens)
+                entry.total_tokens += _delta("total", total_tokens)
                 self._save()
 
     def reset_session(self, session_key: str) -> Optional[SessionEntry]:
