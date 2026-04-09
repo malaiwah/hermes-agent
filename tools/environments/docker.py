@@ -833,15 +833,40 @@ class DockerEnvironment(BaseEnvironment):
             logger.warning("_extra_env_for_exec raised, skipping all dynamic env: %s", e)
             extra = {}
         exec_env.update(extra)
+        # Track which keys came from the dynamic-injection hook so the
+        # log-line masker below can redact them by *origin* rather than
+        # by name-keyword heuristic. Anything coming through the hook is
+        # by construction a credential (otherwise why inject it per-exec?),
+        # regardless of whether its name happens to contain "TOKEN" /
+        # "SECRET" / etc.
+        _dynamic_keys = set(extra.keys())
 
         for key in sorted(exec_env):
             cmd.extend(["-e", f"{key}={exec_env[key]}"])
         cmd.extend([self._container_id, "bash", "-lc", exec_command])
 
-        # Log the exact exec command with secret values masked
-        _SENSITIVE = {"TOKEN", "KEY", "SECRET", "PASSWORD", "CREDENTIAL", "PASSWD"}
+        # Log the exact exec command with secret values masked. Two
+        # masking rules:
+        #   1. Origin: anything from `_extra_env_for_exec` is always
+        #      masked (the credential registry / docker_env_files path).
+        #   2. Name heuristic: env names whose UPPERCASE form contains a
+        #      sensitive token are masked. The list is conservative —
+        #      false positives just over-redact a log line, false
+        #      negatives leak a credential. Add more aggressively than
+        #      reluctantly. SESSION/AUTH/COOKIE/JWT/BEARER/SIGNATURE/PIN
+        #      were missing from the original list and are now included.
+        _SENSITIVE = {
+            "TOKEN", "KEY", "SECRET", "PASSWORD", "PASSWD",
+            "CREDENTIAL", "SESSION", "AUTH", "COOKIE",
+            "JWT", "BEARER", "SIGNATURE", "PIN", "PASSPHRASE",
+            "PRIVATE",
+        }
         def _mask(k, v):
-            return "***" if any(s in k.upper() for s in _SENSITIVE) else v
+            if k in _dynamic_keys:
+                return "***"
+            if any(s in k.upper() for s in _SENSITIVE):
+                return "***"
+            return v
         logged_cmd = []
         i = 0
         while i < len(cmd):
