@@ -317,19 +317,28 @@ class DockerEnvironment(BaseEnvironment):
         self._env = _normalize_env_dict(env)
 
         # Inject env vars from files: format "VAR_NAME:/path/to/file".
-        # Read at spawn time so the value is always fresh (e.g. session tokens).
+        #
+        # Stored as a parsed list of (var_name, file_path) tuples and re-read
+        # on every ``docker exec`` call (see ``_load_env_files`` and the exec
+        # path) so that rotating credentials propagate to the next tool call
+        # without having to respawn the container. The classic case is
+        # BW_SESSION from a Bitwarden-unlock sidecar: the file on the host
+        # gets rewritten when the vault is unlocked / re-unlocked, and the
+        # next ``docker exec`` picks up the fresh value automatically.
+        #
+        # The values are *not* baked into ``self._env`` (and therefore not
+        # passed to ``docker run`` either) — the long-lived container's own
+        # environment stays clean, and each exec gets a freshly read copy
+        # for the duration of that exec'd process only.
+        self._env_files: list[tuple[str, str]] = []
         for entry in (env_files or []):
             try:
                 var_name, file_path = entry.split(":", 1)
             except ValueError:
                 logger.warning(f"docker_env_files: invalid entry {entry!r}, expected 'VAR:path'")
                 continue
-            try:
-                with open(file_path) as fh:
-                    self._env[var_name.strip()] = fh.read().strip()
-                logger.info(f"docker_env_files: loaded {var_name} from {file_path}")
-            except OSError as e:
-                logger.warning(f"docker_env_files: could not read {file_path}: {e}")
+            self._env_files.append((var_name.strip(), file_path))
+            logger.info(f"docker_env_files: registered {var_name} ← {file_path}")
 
         self._container_id: Optional[str] = None
         logger.info(f"DockerEnvironment volumes: {volumes}")
@@ -606,6 +615,22 @@ class DockerEnvironment(BaseEnvironment):
                 value = hermes_env.get(key)
             if value is not None:
                 exec_env[key] = value
+
+        # Re-read docker_env_files on every exec so rotating credentials
+        # (e.g. BW_SESSION written by a Bitwarden sidecar) propagate to the
+        # next tool call without requiring the sandbox to respawn. Failures
+        # are non-fatal — we log a warning and skip the variable rather than
+        # blocking the exec entirely; the agent's tool call will get a clear
+        # error from whatever needed the credential.
+        for var_name, file_path in self._env_files:
+            try:
+                with open(file_path) as fh:
+                    exec_env[var_name] = fh.read().strip()
+            except OSError as e:
+                logger.warning(
+                    f"docker_env_files: could not re-read {file_path} for "
+                    f"{var_name} on exec; skipping ({e})"
+                )
 
         for key in sorted(exec_env):
             cmd.extend(["-e", f"{key}={exec_env[key]}"])
