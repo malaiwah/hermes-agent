@@ -344,10 +344,13 @@ class DockerEnvironment(BaseEnvironment):
 
         # Inject env vars from files: format "VAR_NAME:/path/to/file".
         #
-        # Stored as a parsed list of (var_name, file_path) tuples and re-read
-        # on every ``docker exec`` call (see ``_load_env_files`` and the exec
-        # path) so that rotating credentials propagate to the next tool call
-        # without having to respawn the container. The classic case is
+        # Each entry is parsed once at __init__, the path is canonicalized
+        # via Path.resolve() (no symlink swap mid-task), validated against
+        # an allowlist of safe parent directories, and stored as a tuple of
+        # (var_name, resolved_host_path). The exec path then re-reads the
+        # file on every ``docker exec`` call (see ``_extra_env_for_exec``)
+        # so that rotating credentials propagate to the next tool call
+        # without having to respawn the container. The canonical case is
         # BW_SESSION from a Bitwarden-unlock sidecar: the file on the host
         # gets rewritten when the vault is unlocked / re-unlocked, and the
         # next ``docker exec`` picks up the fresh value automatically.
@@ -356,15 +359,7 @@ class DockerEnvironment(BaseEnvironment):
         # passed to ``docker run`` either) — the long-lived container's own
         # environment stays clean, and each exec gets a freshly read copy
         # for the duration of that exec'd process only.
-        self._env_files: list[tuple[str, str]] = []
-        for entry in (env_files or []):
-            try:
-                var_name, file_path = entry.split(":", 1)
-            except ValueError:
-                logger.warning(f"docker_env_files: invalid entry {entry!r}, expected 'VAR:path'")
-                continue
-            self._env_files.append((var_name.strip(), file_path))
-            logger.info(f"docker_env_files: registered {var_name} ← {file_path}")
+        self._env_files: list[tuple[str, str]] = self._parse_env_files(env_files or [])
 
         self._container_id: Optional[str] = None
         logger.info(f"DockerEnvironment volumes: {volumes}")
@@ -555,6 +550,185 @@ class DockerEnvironment(BaseEnvironment):
         self._container_id = result.stdout.strip()
         logger.info(f"Started container {container_name} ({self._container_id[:12]})")
 
+    # Maximum size of a single env_files value. Linux's `execve` accepts at
+    # most ARG_MAX bytes total across all argv + envp; per-entry size is
+    # bounded by the same limit. We cap individual values at 64 KiB so a
+    # buggy or malicious sidecar that writes a huge file fails fast with a
+    # clear log line instead of a confusing E2BIG when the actual exec runs.
+    _ENV_FILES_MAX_SIZE = 64 * 1024
+
+    # Allowlist of safe parent directories for `docker_env_files` paths,
+    # checked at parse time after symlink resolution. The intent is
+    # defense-in-depth against a config that says "X:/etc/shadow" — for the
+    # canonical sidecar use case the file lives in /run/hermes-creds, the
+    # XDG runtime dir, or HERMES_HOME. Operators with unusual layouts can
+    # extend this via TERMINAL_DOCKER_ENV_FILES_ALLOWED_DIRS (colon-
+    # separated). Empty allowlist disables the check entirely (escape hatch
+    # for tests and operators who really know what they're doing).
+    @staticmethod
+    def _env_files_allowed_dirs() -> "list[Path]":
+        from pathlib import Path
+        override = os.getenv("TERMINAL_DOCKER_ENV_FILES_ALLOWED_DIRS")
+        if override is not None:
+            return [Path(p).resolve() for p in override.split(":") if p.strip()]
+        candidates = [
+            "/run/hermes-creds",
+            "/run/secrets",
+            os.getenv("XDG_RUNTIME_DIR") or "",
+        ]
+        try:
+            from hermes_constants import get_hermes_home
+            candidates.append(str(get_hermes_home()))
+        except Exception:
+            pass
+        return [Path(c).resolve() for c in candidates if c]
+
+    @classmethod
+    def _parse_env_files(cls, entries: list[str]) -> list[tuple[str, str]]:
+        """Parse and validate ``docker_env_files`` config entries.
+
+        Each entry is ``"VAR_NAME:/host/path"``. Returns a list of
+        ``(var_name, resolved_path)`` tuples. Invalid entries are logged
+        and skipped (non-fatal — the agent should still start even if one
+        credential source is misconfigured).
+
+        Validation:
+        - Format must be ``VAR:path`` with at least one ``:``.
+        - Path is resolved via ``Path.resolve()`` (follows symlinks once,
+          canonicalises) so that subsequent rewrites of the symlink target
+          cannot redirect reads at exec time.
+        - Resolved path must be inside one of the allowed parent
+          directories (see ``_env_files_allowed_dirs``). Empty allowlist
+          disables the check.
+        - Path does not need to exist at parse time — sidecar may not have
+          written the file yet. Existence is rechecked at exec time.
+        """
+        from pathlib import Path
+        parsed: list[tuple[str, str]] = []
+        allowed = cls._env_files_allowed_dirs()
+        for entry in entries:
+            try:
+                var_name, raw_path = entry.split(":", 1)
+            except ValueError:
+                logger.warning(
+                    "docker_env_files: invalid entry %r, expected 'VAR:path'",
+                    entry,
+                )
+                continue
+            var_name = var_name.strip()
+            if not var_name:
+                logger.warning("docker_env_files: empty var name in %r", entry)
+                continue
+            if not raw_path.strip():
+                logger.warning("docker_env_files: empty path for %s", var_name)
+                continue
+
+            # Resolve the path (follows symlinks, canonicalises). strict=False
+            # so missing files don't error — the sidecar may not have written
+            # the file yet at hermes-agent startup time.
+            try:
+                resolved = Path(raw_path).resolve(strict=False)
+            except (OSError, RuntimeError) as e:
+                logger.warning(
+                    "docker_env_files: could not resolve %s for %s: %s",
+                    raw_path, var_name, e,
+                )
+                continue
+
+            # Check the resolved path is inside an allowed directory.
+            if allowed:
+                ok = any(
+                    resolved == d or d in resolved.parents
+                    for d in allowed
+                )
+                if not ok:
+                    logger.warning(
+                        "docker_env_files: rejecting %s (resolves to %s, outside "
+                        "allowed dirs %s — set TERMINAL_DOCKER_ENV_FILES_ALLOWED_DIRS "
+                        "to override)",
+                        var_name, resolved,
+                        ", ".join(str(d) for d in allowed),
+                    )
+                    continue
+
+            parsed.append((var_name, str(resolved)))
+            logger.info(
+                "docker_env_files: registered %s ← %s", var_name, resolved,
+            )
+        return parsed
+
+    def _extra_env_for_exec(self) -> dict[str, str]:
+        """Return env vars to overlay onto every ``docker exec`` invocation.
+
+        Hook for per-exec dynamic env injection. The default implementation
+        re-reads the files registered via ``docker_env_files`` so that
+        rotating credentials propagate to the next tool call without
+        requiring the sandbox to respawn.
+
+        Subclasses or sibling subsystems (the credential registry being the
+        canonical example) can override this to inject additional values
+        from any source. Failures are non-fatal: the offending entry is
+        skipped with a warning, the rest still get applied.
+        """
+        out: dict[str, str] = {}
+        # Defensive getattr: tests may construct DockerEnvironment via
+        # __new__ without going through __init__, in which case _env_files
+        # is unset. Treat that as "no entries" rather than crashing.
+        for var_name, file_path in getattr(self, "_env_files", []) or []:
+            value = self._read_env_file_value(var_name, file_path)
+            if value is not None:
+                out[var_name] = value
+        return out
+
+    @classmethod
+    def _read_env_file_value(cls, var_name: str, file_path: str) -> Optional[str]:
+        """Read one credential file with size cap + minimal newline trim.
+
+        Returns the value, or None on any error (logged at WARNING).
+
+        - Caps reads at ``_ENV_FILES_MAX_SIZE`` (64 KiB). Larger files are
+          rejected with an explicit error rather than failing later inside
+          ``execve`` with a confusing E2BIG.
+        - Trims a single trailing newline (and only that — `.strip()` would
+          corrupt PEM bodies, JSON blobs, or any value with significant
+          leading whitespace). The trailing newline trim handles the common
+          ``echo $value > file`` shell pattern.
+        - Does NOT re-resolve symlinks at read time. The path was canonicalized
+          at parse time and stored absolute; reads always go to the resolved
+          target.
+        """
+        try:
+            with open(file_path, "rb") as fh:
+                data = fh.read(cls._ENV_FILES_MAX_SIZE + 1)
+        except OSError as e:
+            logger.warning(
+                "docker_env_files: could not read %s for %s on exec; skipping (%s)",
+                file_path, var_name, e,
+            )
+            return None
+        if len(data) > cls._ENV_FILES_MAX_SIZE:
+            logger.warning(
+                "docker_env_files: %s exceeds %d byte limit (file %s); skipping",
+                var_name, cls._ENV_FILES_MAX_SIZE, file_path,
+            )
+            return None
+        try:
+            value = data.decode("utf-8")
+        except UnicodeDecodeError as e:
+            logger.warning(
+                "docker_env_files: %s is not valid UTF-8 (file %s); skipping (%s)",
+                var_name, file_path, e,
+            )
+            return None
+        # Strip exactly one trailing newline (the common `echo > file` case),
+        # nothing else. PEM bodies, JSON blobs, and base64 with leading
+        # whitespace must round-trip unchanged.
+        if value.endswith("\r\n"):
+            value = value[:-2]
+        elif value.endswith("\n"):
+            value = value[:-1]
+        return value
+
     @staticmethod
     def _storage_opt_supported() -> bool:
         """Check if Docker's storage driver supports --storage-opt size=.
@@ -645,21 +819,20 @@ class DockerEnvironment(BaseEnvironment):
             if value is not None:
                 exec_env[key] = value
 
-        # Re-read docker_env_files on every exec so rotating credentials
-        # (e.g. BW_SESSION written by a Bitwarden sidecar) propagate to the
-        # next tool call without requiring the sandbox to respawn. Failures
-        # are non-fatal — we log a warning and skip the variable rather than
-        # blocking the exec entirely; the agent's tool call will get a clear
-        # error from whatever needed the credential.
-        for var_name, file_path in self._env_files:
-            try:
-                with open(file_path) as fh:
-                    exec_env[var_name] = fh.read().strip()
-            except OSError as e:
-                logger.warning(
-                    f"docker_env_files: could not re-read {file_path} for "
-                    f"{var_name} on exec; skipping ({e})"
-                )
+        # Per-exec dynamic env injection — overlay anything the
+        # ``_extra_env_for_exec`` hook returns. The default implementation
+        # re-reads ``docker_env_files`` so rotating credentials (e.g.
+        # BW_SESSION written by a Bitwarden sidecar) propagate to the next
+        # tool call without requiring the sandbox to respawn. Subclasses
+        # and sibling subsystems can override the hook to plug in any
+        # other dynamic source. Failures inside the hook are non-fatal:
+        # offending entries are skipped with a warning, rest are applied.
+        try:
+            extra = self._extra_env_for_exec()
+        except Exception as e:
+            logger.warning("_extra_env_for_exec raised, skipping all dynamic env: %s", e)
+            extra = {}
+        exec_env.update(extra)
 
         for key in sorted(exec_env):
             cmd.extend(["-e", f"{key}={exec_env[key]}"])

@@ -419,3 +419,189 @@ def test_normalize_env_dict_rejects_complex_values():
         "BAD_DICT": {"nested": True},
     })
     assert result == {"GOOD": "string"}
+
+
+# ---------------------------------------------------------------------------
+# docker_env_files: per-exec re-read with allowlist + size cap
+# ---------------------------------------------------------------------------
+
+def _allow_anywhere(monkeypatch):
+    """Disable the path allowlist for tests by emptying it via env var."""
+    monkeypatch.setenv("TERMINAL_DOCKER_ENV_FILES_ALLOWED_DIRS", "")
+
+
+def test_parse_env_files_valid_entry(monkeypatch, tmp_path):
+    _allow_anywhere(monkeypatch)
+    f = tmp_path / "session"
+    f.write_text("hello")
+    parsed = docker_env.DockerEnvironment._parse_env_files(
+        [f"BW_SESSION:{f}"]
+    )
+    assert len(parsed) == 1
+    assert parsed[0][0] == "BW_SESSION"
+    assert parsed[0][1] == str(f.resolve())
+
+
+def test_parse_env_files_invalid_format_skipped(monkeypatch, caplog):
+    _allow_anywhere(monkeypatch)
+    with caplog.at_level(logging.WARNING):
+        parsed = docker_env.DockerEnvironment._parse_env_files(["NO_COLON"])
+    assert parsed == []
+    assert any("invalid entry" in r.getMessage() for r in caplog.records)
+
+
+def test_parse_env_files_empty_var_name_skipped(monkeypatch, caplog, tmp_path):
+    _allow_anywhere(monkeypatch)
+    with caplog.at_level(logging.WARNING):
+        parsed = docker_env.DockerEnvironment._parse_env_files([f":{tmp_path / 'x'}"])
+    assert parsed == []
+
+
+def test_parse_env_files_resolves_symlink(monkeypatch, tmp_path):
+    """A symlink at parse time is followed; subsequent symlink swaps don't redirect reads."""
+    _allow_anywhere(monkeypatch)
+    target = tmp_path / "real"
+    target.write_text("real-value")
+    link = tmp_path / "link"
+    link.symlink_to(target)
+    parsed = docker_env.DockerEnvironment._parse_env_files([f"X:{link}"])
+    assert len(parsed) == 1
+    assert parsed[0][1] == str(target.resolve())  # canonicalized to real path
+
+
+def test_parse_env_files_path_does_not_have_to_exist(monkeypatch, tmp_path):
+    """Sidecar may not have written the file yet at parse time — must not error."""
+    _allow_anywhere(monkeypatch)
+    missing = tmp_path / "not-yet-written"
+    parsed = docker_env.DockerEnvironment._parse_env_files([f"X:{missing}"])
+    assert len(parsed) == 1
+
+
+def test_parse_env_files_allowlist_rejects_outside_paths(monkeypatch, tmp_path, caplog):
+    """With an allowlist set, paths outside it are rejected."""
+    safe_dir = tmp_path / "allowed"
+    safe_dir.mkdir()
+    bad = tmp_path / "elsewhere" / "secret"
+    bad.parent.mkdir()
+    bad.write_text("nope")
+    monkeypatch.setenv("TERMINAL_DOCKER_ENV_FILES_ALLOWED_DIRS", str(safe_dir))
+    with caplog.at_level(logging.WARNING):
+        parsed = docker_env.DockerEnvironment._parse_env_files([f"X:{bad}"])
+    assert parsed == []
+    assert any("outside allowed dirs" in r.getMessage() for r in caplog.records)
+
+
+def test_parse_env_files_allowlist_accepts_inside_paths(monkeypatch, tmp_path):
+    """With an allowlist set, paths inside it are accepted."""
+    safe_dir = tmp_path / "allowed"
+    safe_dir.mkdir()
+    good = safe_dir / "session"
+    good.write_text("ok")
+    monkeypatch.setenv("TERMINAL_DOCKER_ENV_FILES_ALLOWED_DIRS", str(safe_dir))
+    parsed = docker_env.DockerEnvironment._parse_env_files([f"X:{good}"])
+    assert len(parsed) == 1
+
+
+def test_read_env_file_value_strips_one_trailing_newline(monkeypatch, tmp_path):
+    f = tmp_path / "session"
+    f.write_text("abc\n")  # `echo abc > file` shape
+    assert docker_env.DockerEnvironment._read_env_file_value("X", str(f)) == "abc"
+
+
+def test_read_env_file_value_strips_crlf(monkeypatch, tmp_path):
+    f = tmp_path / "session"
+    f.write_bytes(b"abc\r\n")
+    assert docker_env.DockerEnvironment._read_env_file_value("X", str(f)) == "abc"
+
+
+def test_read_env_file_value_preserves_internal_whitespace(monkeypatch, tmp_path):
+    """`.strip()` would corrupt PEM bodies; we only trim one trailing newline."""
+    pem = "-----BEGIN PRIVATE KEY-----\n  base64body\n-----END PRIVATE KEY-----\n"
+    f = tmp_path / "key"
+    f.write_text(pem)
+    got = docker_env.DockerEnvironment._read_env_file_value("KEY", str(f))
+    # Trailing \n stripped, internal whitespace preserved exactly
+    assert got == pem[:-1]
+    assert "  base64body" in got
+    assert got.endswith("-----END PRIVATE KEY-----")
+
+
+def test_read_env_file_value_preserves_leading_whitespace(monkeypatch, tmp_path):
+    """JSON blobs with leading spaces must round-trip unchanged."""
+    f = tmp_path / "json"
+    f.write_text("  {\"key\": \"value\"}")  # no trailing newline
+    got = docker_env.DockerEnvironment._read_env_file_value("J", str(f))
+    assert got == "  {\"key\": \"value\"}"
+
+
+def test_read_env_file_value_size_limit(monkeypatch, tmp_path, caplog):
+    """Files larger than _ENV_FILES_MAX_SIZE are rejected with a clear log line."""
+    f = tmp_path / "huge"
+    f.write_bytes(b"A" * (docker_env.DockerEnvironment._ENV_FILES_MAX_SIZE + 100))
+    with caplog.at_level(logging.WARNING):
+        got = docker_env.DockerEnvironment._read_env_file_value("X", str(f))
+    assert got is None
+    assert any("exceeds" in r.getMessage() and "limit" in r.getMessage() for r in caplog.records)
+
+
+def test_read_env_file_value_size_limit_at_boundary(monkeypatch, tmp_path):
+    """A file at exactly the size limit is accepted."""
+    payload = b"A" * docker_env.DockerEnvironment._ENV_FILES_MAX_SIZE
+    f = tmp_path / "boundary"
+    f.write_bytes(payload)
+    got = docker_env.DockerEnvironment._read_env_file_value("X", str(f))
+    assert got == payload.decode()
+
+
+def test_read_env_file_value_missing_file_returns_none(monkeypatch, tmp_path, caplog):
+    with caplog.at_level(logging.WARNING):
+        got = docker_env.DockerEnvironment._read_env_file_value("X", str(tmp_path / "nope"))
+    assert got is None
+    assert any("could not read" in r.getMessage() for r in caplog.records)
+
+
+def test_read_env_file_value_non_utf8_returns_none(monkeypatch, tmp_path, caplog):
+    f = tmp_path / "binary"
+    f.write_bytes(b"\xff\xfe\xfd")
+    with caplog.at_level(logging.WARNING):
+        got = docker_env.DockerEnvironment._read_env_file_value("X", str(f))
+    assert got is None
+    assert any("not valid UTF-8" in r.getMessage() for r in caplog.records)
+
+
+def test_extra_env_for_exec_re_reads_file(monkeypatch, tmp_path):
+    """The exec hook re-reads the file each call so rotated values propagate."""
+    _allow_anywhere(monkeypatch)
+    f = tmp_path / "session"
+    f.write_text("session-A")
+    _mock_subprocess_run(monkeypatch)
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    env = _make_dummy_env()
+    # Inject the parsed entry directly (don't go through __init__'s env_files arg
+    # to avoid coupling this test to constructor wiring).
+    env._env_files = [("BW_SESSION", str(f.resolve()))]
+
+    first = env._extra_env_for_exec()
+    assert first == {"BW_SESSION": "session-A"}
+
+    f.write_text("session-B")  # rotation
+    second = env._extra_env_for_exec()
+    assert second == {"BW_SESSION": "session-B"}
+
+
+def test_extra_env_for_exec_skips_failed_entries(monkeypatch, tmp_path, caplog):
+    """A bad entry is skipped; good entries still get applied."""
+    _allow_anywhere(monkeypatch)
+    good = tmp_path / "good"
+    good.write_text("ok")
+    _mock_subprocess_run(monkeypatch)
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    env = _make_dummy_env()
+    env._env_files = [
+        ("GOOD", str(good.resolve())),
+        ("MISSING", str(tmp_path / "nope")),
+    ]
+    with caplog.at_level(logging.WARNING):
+        out = env._extra_env_for_exec()
+    assert out == {"GOOD": "ok"}
+    assert any("MISSING" in r.getMessage() for r in caplog.records)

@@ -152,6 +152,29 @@ terminal:
 #   docker_forward_env:
 #     - "GITHUB_TOKEN"
 #     - "NPM_TOKEN"
+#   #
+#   # Inject env vars from files on the host, re-read on every `docker exec`.
+#   # Use this for ROTATING credentials that a sidecar process keeps fresh on
+#   # disk: the sandbox container picks up the new value on the next tool call,
+#   # no respawn required. The canonical case is BW_SESSION written by a
+#   # Bitwarden-unlock sidecar, but the same pattern works for Vault tokens,
+#   # OIDC token mints, AWS credential helpers, refreshable OAuth access
+#   # tokens, etc.
+#   #
+#   # Format: "VAR_NAME:/host/path/to/file". The path is canonicalized at
+#   # startup (symlinks resolved once) and validated against an allowlist of
+#   # safe parent directories: /run/hermes-creds, /run/secrets, $XDG_RUNTIME_DIR,
+#   # and $HERMES_HOME by default. Override via the
+#   # TERMINAL_DOCKER_ENV_FILES_ALLOWED_DIRS env var (colon-separated, empty
+#   # disables the check). Files are capped at 64 KiB and a single trailing
+#   # newline is trimmed (`echo > file` shape). Missing files are non-fatal:
+#   # the variable is just skipped on that exec.
+#   #
+#   # Security: values from these files are NOT baked into the long-lived
+#   # container's environment (so `docker inspect` doesn't reveal them) —
+#   # they are scoped to the lifetime of each `docker exec` process only.
+#   docker_env_files:
+#     - "BW_SESSION:/run/hermes-creds/bw-session"
 
 # -----------------------------------------------------------------------------
 # OPTION 4: Singularity/Apptainer container
