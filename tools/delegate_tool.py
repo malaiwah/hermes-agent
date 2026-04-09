@@ -93,6 +93,31 @@ def _build_child_system_prompt(
     return "\n".join(parts)
 
 
+def _resolve_workspace_hint(parent_agent) -> Optional[str]:
+    """Best-effort local workspace hint for child prompts.
+
+    We only inject a path when we have a concrete absolute directory. This avoids
+    teaching subagents a fake container path while still helping them avoid
+    guessing `/workspace/...` for local repo tasks.
+    """
+    candidates = [
+        os.getenv("TERMINAL_CWD"),
+        getattr(getattr(parent_agent, "_subdirectory_hints", None), "working_dir", None),
+        getattr(parent_agent, "terminal_cwd", None),
+        getattr(parent_agent, "cwd", None),
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            text = os.path.abspath(os.path.expanduser(str(candidate)))
+        except Exception:
+            continue
+        if os.path.isabs(text) and os.path.isdir(text):
+            return text
+    return None
+
+
 def _configure_child_workspace(child, task_index: int, task_cfg: Dict[str, Any], delegation_cfg: Dict[str, Any]):
     """Resolve workspace visibility for a delegated child and attach task overrides."""
     from tools.subagent_workspace import (
