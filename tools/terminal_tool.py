@@ -924,6 +924,24 @@ def cleanup_all_environments():
     return cleaned
 
 
+def is_persistent_env(task_id: str) -> bool:
+    """Return True if the active environment for task_id is configured for
+    cross-turn persistence (``persistent_filesystem=True``).
+
+    Used by the agent loop to skip per-turn teardown for backends whose whole
+    point is to survive between turns (docker with ``container_persistent``,
+    daytona, modal, etc.). Non-persistent backends (e.g. Morph) still get torn
+    down at end-of-turn to prevent leakage. The idle reaper
+    (``_cleanup_inactive_envs``) handles persistent envs once they exceed
+    ``terminal.lifetime_seconds``.
+    """
+    with _env_lock:
+        env = _active_environments.get(task_id)
+    if env is None:
+        return False
+    return bool(getattr(env, "_persistent", False))
+
+
 def cleanup_vm(task_id: str):
     """Manually clean up a specific environment by task_id."""
     # Remove from tracking dicts while holding the lock, but defer the
