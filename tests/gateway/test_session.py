@@ -1001,3 +1001,120 @@ class TestRewriteTranscriptPreservesReasoning:
         assert after[0].get("reasoning") == "I need to think step by step."
         assert after[0].get("reasoning_details") == [{"type": "summary", "text": "step by step"}]
         assert after[0].get("codex_reasoning_items") == [{"id": "r1", "type": "reasoning"}]
+
+
+# ---------------------------------------------------------------------------
+# Lifetime-mirror delta tracking for token accumulation
+# (regression: /status showed Tokens: 0 because the gateway accumulated
+# the agent's lifetime totals each turn, causing quadratic growth on
+# input/output and a never-incremented total because total_tokens was
+# missing from the gateway's _run_agent return dict)
+# ---------------------------------------------------------------------------
+
+def _make_store(tmp_path):
+    config = GatewayConfig()
+    with patch("gateway.session.SessionStore._ensure_loaded"):
+        store = SessionStore(sessions_dir=tmp_path, config=config)
+    store._loaded = True
+    store._db = None
+    store._save = MagicMock()
+    from gateway.session import SessionEntry
+    from datetime import datetime
+    entry = SessionEntry(
+        session_key="k1",
+        session_id="s1",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+    )
+    store._entries = {"k1": entry}
+    return store, entry
+
+
+def test_update_session_lifetime_mirror_first_call_uses_full_value(tmp_path):
+    """First update_session call after gateway start treats the entire
+    current lifetime total as a delta."""
+    store, entry = _make_store(tmp_path)
+    store.update_session("k1", input_tokens=100, output_tokens=50, total_tokens=150)
+    assert entry.input_tokens == 100
+    assert entry.output_tokens == 50
+    assert entry.total_tokens == 150
+
+
+def test_update_session_lifetime_mirror_subsequent_call_uses_delta(tmp_path):
+    """Subsequent calls add only the delta from the previous mirror,
+    not the full lifetime total. Catches the quadratic-growth bug."""
+    store, entry = _make_store(tmp_path)
+    # Turn 1: agent has lifetime 100/50/150
+    store.update_session("k1", input_tokens=100, output_tokens=50, total_tokens=150)
+    # Turn 2: agent has lifetime 250/120/370 (added 150/70/220 since turn 1)
+    store.update_session("k1", input_tokens=250, output_tokens=120, total_tokens=370)
+    assert entry.input_tokens == 250  # NOT 350 (100 + 250)
+    assert entry.output_tokens == 120
+    assert entry.total_tokens == 370
+    # Turn 3: lifetime 400/200/600 (delta 150/80/230)
+    store.update_session("k1", input_tokens=400, output_tokens=200, total_tokens=600)
+    assert entry.input_tokens == 400
+    assert entry.output_tokens == 200
+    assert entry.total_tokens == 600
+
+
+def test_update_session_lifetime_mirror_handles_agent_reset(tmp_path):
+    """If the lifetime decreases (agent was reset / replaced), treat the
+    new value as a fresh delta from zero."""
+    store, entry = _make_store(tmp_path)
+    # Turn 1
+    store.update_session("k1", input_tokens=500, output_tokens=200, total_tokens=700)
+    assert entry.total_tokens == 700
+    # Agent reset; new instance lifetime starts at 0 then jumps to 30 on first call
+    store.update_session("k1", input_tokens=80, output_tokens=20, total_tokens=100)
+    # delta = 80 (since 80 < 500, treat as fresh); entry now 580
+    assert entry.input_tokens == 580
+    assert entry.output_tokens == 220
+    assert entry.total_tokens == 800
+    # Turn 3 on the new agent: lifetime 200/60/260 (delta 120/40/160)
+    store.update_session("k1", input_tokens=200, output_tokens=60, total_tokens=260)
+    assert entry.input_tokens == 700
+    assert entry.output_tokens == 260
+    assert entry.total_tokens == 960
+
+
+def test_update_session_lifetime_mirror_zero_value_is_noop(tmp_path):
+    """update_session with all zero token values (e.g. early-return paths
+    in the agent that don't include token data) should not advance the
+    mirror or change the entry."""
+    store, entry = _make_store(tmp_path)
+    store.update_session("k1", input_tokens=100, output_tokens=50, total_tokens=150)
+    assert entry.input_tokens == 100
+    # An early-return path passes 0/0/0
+    store.update_session("k1", input_tokens=0, output_tokens=0, total_tokens=0)
+    # Mirror was 100; new is 0; delta = max(0, 0-100) = 0 (treated as reset to 0).
+    # Actually our handling: 0 < 100 → treat as reset → delta = 0.
+    # Either way: no spurious accumulation.
+    assert entry.input_tokens == 100  # not 200, not bumped further
+    assert entry.output_tokens == 50
+    assert entry.total_tokens == 150
+
+
+def test_update_session_lifetime_mirror_independent_per_session_key(tmp_path):
+    """Each session_key has its own mirror; updates don't bleed across."""
+    store, entry_a = _make_store(tmp_path)
+    from gateway.session import SessionEntry
+    from datetime import datetime
+    entry_b = SessionEntry(
+        session_key="k2",
+        session_id="s2",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+    )
+    store._entries["k2"] = entry_b
+
+    store.update_session("k1", input_tokens=100, output_tokens=50, total_tokens=150)
+    store.update_session("k2", input_tokens=300, output_tokens=200, total_tokens=500)
+    assert entry_a.total_tokens == 150
+    assert entry_b.total_tokens == 500
+
+    store.update_session("k1", input_tokens=200, output_tokens=100, total_tokens=300)
+    store.update_session("k2", input_tokens=600, output_tokens=400, total_tokens=1000)
+    # k1 delta = 100/50/150, k2 delta = 300/200/500
+    assert entry_a.total_tokens == 300
+    assert entry_b.total_tokens == 1000
