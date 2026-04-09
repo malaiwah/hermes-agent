@@ -605,3 +605,100 @@ def test_extra_env_for_exec_skips_failed_entries(monkeypatch, tmp_path, caplog):
         out = env._extra_env_for_exec()
     assert out == {"GOOD": "ok"}
     assert any("MISSING" in r.getMessage() for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# docker exec cmd masking — both name-heuristic and origin-based
+# ---------------------------------------------------------------------------
+
+def _capture_exec_log(monkeypatch, env, env_overrides=None):
+    """Run env.execute() with mocked Popen and return the captured log line."""
+    popen_calls = []
+
+    class _FakePopen2:
+        def __init__(self, cmd, **kwargs):
+            popen_calls.append(cmd)
+            self.stdin = None
+            self.stdout = StringIO("")
+            self.stderr = None
+            self.returncode = 0
+        def wait(self, timeout=None):
+            return 0
+        def communicate(self, *a, **kw):
+            return ("", "")
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(docker_env.subprocess, "Popen", _FakePopen2)
+    captured_logs = []
+    real_warning = docker_env.logger.warning
+    def _capture_warning(msg, *args, **kwargs):
+        if args:
+            try:
+                captured_logs.append(msg % args)
+            except Exception:
+                captured_logs.append(str(msg))
+        else:
+            captured_logs.append(str(msg))
+        real_warning(msg, *args, **kwargs)
+    monkeypatch.setattr(docker_env.logger, "warning", _capture_warning)
+
+    if env_overrides:
+        for k, v in env_overrides.items():
+            monkeypatch.setenv(k, v)
+
+    env.execute("echo hi")
+    exec_lines = [l for l in captured_logs if "docker exec cmd:" in l]
+    return exec_lines[0] if exec_lines else ""
+
+
+def test_exec_log_masks_session_in_name(monkeypatch):
+    """SESSION-named env vars are masked even though the original heuristic missed them."""
+    _allow_anywhere(monkeypatch)
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    env = _make_execute_only_env()
+    env._env = {"BW_SESSION": "VERYSECRETSESSIONVALUE12345"}
+    log = _capture_exec_log(monkeypatch, env)
+    assert "VERYSECRETSESSIONVALUE12345" not in log, f"session leaked in log: {log}"
+    assert "BW_SESSION=***" in log
+
+
+def test_exec_log_masks_auth_cookie_jwt_bearer(monkeypatch):
+    """The expanded sensitive-name list catches more credential-like names."""
+    _allow_anywhere(monkeypatch)
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    env = _make_execute_only_env()
+    env._env = {
+        "AUTH_COOKIE": "auth-cookie-value-zzz",
+        "MY_JWT": "jwt.value.zzz",
+        "X_BEARER": "bearer-zzz",
+        "PASSPHRASE": "passphrase-zzz",
+    }
+    log = _capture_exec_log(monkeypatch, env)
+    for v in ("auth-cookie-value-zzz", "jwt.value.zzz", "bearer-zzz", "passphrase-zzz"):
+        assert v not in log, f"value {v} leaked in log: {log}"
+
+
+def test_exec_log_masks_dynamic_origin_regardless_of_name(monkeypatch, tmp_path):
+    """Anything from _extra_env_for_exec is masked, even with an innocuous name."""
+    _allow_anywhere(monkeypatch)
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    f = tmp_path / "innocuous"
+    f.write_text("DYNAMICALLY_INJECTED_VALUE")
+    env = _make_execute_only_env()
+    env._env_files = [("INNOCENT_VAR", str(f.resolve()))]  # NOT a sensitive-looking name
+    log = _capture_exec_log(monkeypatch, env)
+    assert "DYNAMICALLY_INJECTED_VALUE" not in log, f"dynamic value leaked: {log}"
+    assert "INNOCENT_VAR=***" in log
+
+
+def test_exec_log_does_not_mask_innocent_static_values(monkeypatch):
+    """Plain static env (not credential-like) is not over-masked — readability check."""
+    _allow_anywhere(monkeypatch)
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    env = _make_execute_only_env()
+    env._env = {"PORT": "8080", "DEBUG": "true", "HOME": "/root"}
+    log = _capture_exec_log(monkeypatch, env)
+    assert "PORT=8080" in log
+    assert "DEBUG=true" in log
+    assert "HOME=/root" in log
