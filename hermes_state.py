@@ -595,6 +595,39 @@ class SessionDB:
             row = cursor.fetchone()
         return dict(row) if row else None
 
+    def get_session_token_totals(self, session_id: str) -> Optional[Dict[str, int]]:
+        """Get token totals for a session from SessionDB.
+
+        Returns a dict with input_tokens, output_tokens, cache_read_tokens,
+        cache_write_tokens, reasoning_tokens, and total_tokens (sum of all).
+        Returns None if the session is not found.
+        """
+        with self._lock:
+            cursor = self._conn.execute(
+                """SELECT input_tokens, output_tokens, cache_read_tokens,
+                          cache_write_tokens, reasoning_tokens
+                   FROM sessions WHERE id = ?""",
+                (session_id,),
+            )
+            row = cursor.fetchone()
+        if row:
+            totals = {
+                "input_tokens": row["input_tokens"] or 0,
+                "output_tokens": row["output_tokens"] or 0,
+                "cache_read_tokens": row["cache_read_tokens"] or 0,
+                "cache_write_tokens": row["cache_write_tokens"] or 0,
+                "reasoning_tokens": row["reasoning_tokens"] or 0,
+            }
+            totals["total_tokens"] = (
+                totals["input_tokens"]
+                + totals["output_tokens"]
+                + totals["cache_read_tokens"]
+                + totals["cache_write_tokens"]
+                + totals["reasoning_tokens"]
+            )
+            return totals
+        return None
+
     def resolve_session_id(self, session_id_or_prefix: str) -> Optional[str]:
         """Resolve an exact or uniquely prefixed session ID to the full ID.
 
