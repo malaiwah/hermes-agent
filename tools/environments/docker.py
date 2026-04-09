@@ -137,15 +137,20 @@ def find_docker() -> Optional[str]:
 # Block privilege escalation and limit PIDs.
 # /tmp is size-limited and nosuid but allows exec (needed by pip/npm builds).
 #
-# Configurable via SANDBOX_NO_NEW_PRIVS environment variable:
-#   - "true" (default): enable no-new-privileges (maximum security)
-#   - "false": disable to allow sudo inside container (reduced security)
+# Configurable via env vars:
+#   SANDBOX_NO_NEW_PRIVS = "true" (default) | "false" — disable to allow sudo
+#   SANDBOX_PIDS_LIMIT   = integer (default "256") | "0"/"off"/"none" — disable
+#
+# ``--pids-limit`` is added later in the run command (see ``resource_args``)
+# rather than here, so it can be auto-disabled when the ``pids`` cgroup
+# controller is not delegated to this process (typical inside unprivileged
+# LXCs). Hardcoding it caused every container spawn to fail with
+# "controller `pids` is not available" on such hosts.
 _SECURITY_ARGS = [
     "--cap-drop", "ALL",
     "--cap-add", "DAC_OVERRIDE",
     "--cap-add", "CHOWN",
     "--cap-add", "FOWNER",
-    "--pids-limit", "256",
     "--tmpfs", "/tmp:rw,nosuid,size=512m",
     "--tmpfs", "/var/tmp:rw,noexec,nosuid,size=256m",
     "--tmpfs", "/run:rw,noexec,nosuid,size=64m",
@@ -166,12 +171,16 @@ _storage_opt_ok: Optional[bool] = None  # cached result across instances
 _cgroup_limits_ok: Optional[bool] = None  # cached result across instances
 
 
-def _cgroup_limits_available() -> bool:
-    """Probe whether cgroup resource limits (--cpus, --memory) work.
+def _cgroup_limits_available(image: str) -> bool:
+    """Probe whether cgroup resource limits (--cpus/--memory/--pids-limit) work.
 
-    In unprivileged LXC containers without cgroup controller delegation,
-    these flags cause container startup to fail. We test once with a
-    lightweight container and cache the result.
+    Spawns a throwaway container from *image* (the same sandbox image we are
+    about to use for real, so no extra pull and no dependency on a public
+    registry) with all three flags. The container runs ``sleep 0`` — sleep is
+    guaranteed to be present because the sandbox itself uses ``sleep 2h`` as
+    its long-lived entrypoint. On hosts without cgroup controller delegation
+    (typical inside unprivileged LXCs) these flags cause container startup to
+    fail; we cache the boolean result host-wide so the probe runs at most once.
     """
     global _cgroup_limits_ok
     if _cgroup_limits_ok is not None:
@@ -184,22 +193,39 @@ def _cgroup_limits_available() -> bool:
 
     try:
         result = subprocess.run(
-            [docker_exe, "run", "--rm", "--cpus", "0.5", "--memory", "64m",
-             "docker.io/library/alpine:latest", "true"],
-            capture_output=True, text=True, timeout=30,
+            [docker_exe, "run", "--rm",
+             "--cpus", "0.5", "--memory", "64m", "--pids-limit", "32",
+             image, "sleep", "0"],
+            capture_output=True, text=True, timeout=60,
         )
         _cgroup_limits_ok = result.returncode == 0
         if not _cgroup_limits_ok:
             logger.warning(
-                "Cgroup resource limits (--cpus/--memory) not available in this "
-                "environment. Containers will run without CPU/memory limits. "
-                "To enable limits, delegate cgroup controllers to this container."
+                "Cgroup resource limits (--cpus/--memory/--pids-limit) not "
+                "available in this environment. Containers will run without "
+                "CPU, memory or PID limits. To enable, delegate cgroup "
+                "controllers to this container. Probe stderr: %s",
+                (result.stderr or "").strip()[:500],
             )
-    except Exception:
+    except Exception as e:
         _cgroup_limits_ok = False
-        logger.warning("Cgroup limit probe failed; disabling resource limits.")
+        logger.warning("Cgroup limit probe failed; disabling resource limits: %s", e)
 
     return _cgroup_limits_ok
+
+
+def _resolve_pids_limit() -> Optional[str]:
+    """Return the configured ``--pids-limit`` value, or None if disabled.
+
+    Honors ``SANDBOX_PIDS_LIMIT``:
+      - unset / empty → default "256"
+      - "0", "off", "none", "false", "disable", "disabled" → None (no limit)
+      - any other value → that value (passed to docker as-is)
+    """
+    raw = os.getenv("SANDBOX_PIDS_LIMIT", "256").strip()
+    if not raw or raw.lower() in {"0", "off", "none", "false", "disable", "disabled"}:
+        return None
+    return raw
 
 
 def _ensure_docker_available() -> None:
@@ -343,10 +369,13 @@ class DockerEnvironment(BaseEnvironment):
 
         # Build resource limit args (gated by cgroup availability probe)
         resource_args = []
-        if cpu > 0 and _cgroup_limits_available():
+        if cpu > 0 and _cgroup_limits_available(self._base_image):
             resource_args.extend(["--cpus", str(cpu)])
-        if memory > 0 and _cgroup_limits_available():
+        if memory > 0 and _cgroup_limits_available(self._base_image):
             resource_args.extend(["--memory", f"{memory}m"])
+        pids_limit = _resolve_pids_limit()
+        if pids_limit is not None and _cgroup_limits_available(self._base_image):
+            resource_args.extend(["--pids-limit", pids_limit])
         if disk > 0 and sys.platform != "darwin":
             if self._storage_opt_supported():
                 resource_args.extend(["--storage-opt", f"size={disk}m"])
