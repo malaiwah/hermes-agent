@@ -136,17 +136,29 @@ def find_docker() -> Optional[str]:
 #   CHOWN/FOWNER - package managers (pip, npm, apt) need to set file ownership
 # Block privilege escalation and limit PIDs.
 # /tmp is size-limited and nosuid but allows exec (needed by pip/npm builds).
+#
+# Configurable via SANDBOX_NO_NEW_PRIVS environment variable:
+#   - "true" (default): enable no-new-privileges (maximum security)
+#   - "false": disable to allow sudo inside container (reduced security)
 _SECURITY_ARGS = [
     "--cap-drop", "ALL",
     "--cap-add", "DAC_OVERRIDE",
     "--cap-add", "CHOWN",
     "--cap-add", "FOWNER",
-    "--security-opt", "no-new-privileges",
-
+    "--pids-limit", "256",
     "--tmpfs", "/tmp:rw,nosuid,size=512m",
     "--tmpfs", "/var/tmp:rw,noexec,nosuid,size=256m",
     "--tmpfs", "/run:rw,noexec,nosuid,size=64m",
 ]
+
+# Add no-new-privileges unless explicitly disabled
+if os.getenv("SANDBOX_NO_NEW_PRIVS", "true").lower() != "false":
+    _SECURITY_ARGS.extend(["--security-opt", "no-new-privileges"])
+else:
+    logger.warning(
+        "SANDBOX_NO_NEW_PRIVS=false: containers can escalate privileges via sudo. "
+        "Only disable in trusted environments."
+    )
 
 
 _storage_opt_ok: Optional[bool] = None  # cached result across instances
