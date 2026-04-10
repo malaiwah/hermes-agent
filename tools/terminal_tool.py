@@ -1214,6 +1214,7 @@ def terminal_tool(
     force: bool = False,
     workdir: Optional[str] = None,
     check_interval: Optional[int] = None,
+    notify_on_complete: bool = False,
     pty: bool = False,
     gateway_local: bool = False,
 ) -> str:
@@ -1942,6 +1943,11 @@ TERMINAL_SCHEMA = {
                 "description": "Seconds between automatic status checks for background processes (gateway/messaging only, minimum 30). When set, I'll proactively report progress.",
                 "minimum": 30
             },
+            "notify_on_complete": {
+                "type": "boolean",
+                "description": "If true (and background=true), auto-notify the agent when the process exits. Great for builds, test suites, deployments — anything that takes more than a minute where you want to keep working and be told when it's done.",
+                "default": False
+            },
             "pty": {
                 "type": "boolean",
                 "description": "Run in pseudo-terminal (PTY) mode for interactive CLI tools like Codex, Claude Code, or Python REPL. Only works with local and SSH backends. Default: false.",
@@ -1966,6 +1972,7 @@ def _handle_terminal(args, **kw):
         task_id=kw.get("task_id"),
         workdir=args.get("workdir"),
         check_interval=args.get("check_interval"),
+        notify_on_complete=args.get("notify_on_complete", False),
         pty=args.get("pty", False),
         gateway_local=args.get("gateway_local", False),
     )
