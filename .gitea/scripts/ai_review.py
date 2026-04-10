@@ -1,26 +1,26 @@
 #!/usr/bin/env python3
 """AI peer review script.
 
-Routes to Claude Agent SDK (for Codex-authored PRs) or Codex CLI
-(for Claude-authored PRs) based on the REVIEWER env var.
+Uses Qwen 3.5 397B MoE on aibeast (10.15.0.166:8000) via the OpenAI-
+compatible vLLM endpoint. The model has a 524K context window, so even
+large diffs fit without truncation in most cases.
 
 Usage:
   Normal:   python ai_review.py
   Dry run:  python ai_review.py --dry-run
 """
-import asyncio
 import os
+import re
 import subprocess
 import sys
 
 import httpx
+from openai import OpenAI
 
 DRY_RUN = "--dry-run" in sys.argv
 
 base_sha = os.environ["BASE_SHA"]
 head_sha = os.environ["HEAD_SHA"]
-reviewer = os.environ.get("REVIEWER", "claude")
-reason = os.environ.get("REVIEWER_REASON", "")
 
 # ── Gather diff ───────────────────────────────────────────────────────────────
 
@@ -29,24 +29,49 @@ changed = subprocess.check_output(
     ["git", "diff", "--name-only", base_sha, head_sha], text=True
 ).strip()
 
-MAX_DIFF = 80_000
+MAX_DIFF = 200_000  # 200K chars — Qwen 3.5 has 524K context
 truncated = len(diff) > MAX_DIFF
 if truncated:
-    diff = diff[:MAX_DIFF] + "\n\n[diff truncated at 80K chars]"
+    diff = diff[:MAX_DIFF] + "\n\n[diff truncated at 200K chars]"
 
 if not diff.strip():
     print("Empty diff — nothing to review.")
     sys.exit(0)
 
-PROMPT = f"""You are peer-reviewing code changes made by an AI coding agent. \
-Be thorough and constructively critical. You have access to the full repository — \
-use it to understand context (imports, callers, tests) before drawing conclusions.
+# ── Gather extra context for key changed files ────────────────────────────────
+
+# Read the full content of up to 5 key changed files so the reviewer can
+# see imports, callers, and surrounding code — not just the diff hunks.
+context_files = ""
+key_extensions = {".py", ".yml", ".yaml", ".sh", ".toml"}
+files_added = 0
+for fname in changed.split("\n"):
+    if files_added >= 5:
+        break
+    fname = fname.strip()
+    if not fname:
+        continue
+    if not any(fname.endswith(ext) for ext in key_extensions):
+        continue
+    if not os.path.isfile(fname):
+        continue
+    try:
+        content = open(fname).read()
+        if len(content) > 20_000:
+            content = content[:20_000] + "\n[file truncated at 20K chars]"
+        context_files += f"\n\n--- {fname} (full file) ---\n{content}"
+        files_added += 1
+    except Exception:
+        pass
+
+PROMPT = f"""You are peer-reviewing code changes. Be thorough and constructively critical.
 
 Changed files:
 {changed}
 
 Diff:
 {diff}
+{context_files}
 
 Structure your review as:
 
@@ -64,45 +89,46 @@ If there are no issues in a category, omit it.
 One of: APPROVED | NEEDS_WORK | CRITICAL_ISSUES
 """
 
-# ── Run reviewer ──────────────────────────────────────────────────────────────
+# ── Call Qwen 3.5 397B MoE on aibeast ────────────────────────────────────────
 
-review = ""
+print(f"Reviewing {len(changed.split(chr(10)))} files "
+      f"({len(diff):,} chars diff) with Qwen 3.5 397B MoE...")
 
-if reviewer == "claude":
-    from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, query
+client = OpenAI(
+    api_key=os.environ.get("OPENAI_API_KEY", "not-needed"),
+    base_url=os.environ.get("OPENAI_BASE_URL", "http://10.15.0.166:8000/v1"),
+)
 
-    async def run_claude() -> str:
-        async for msg in query(
-            prompt=PROMPT,
-            options=ClaudeAgentOptions(
-                cwd=os.getcwd(),
-                allowed_tools=["Read", "Glob", "Grep"],
-                permission_mode="default",
-                max_turns=20,
-            ),
-        ):
-            if isinstance(msg, ResultMessage):
-                return msg.result
-        return ""
-
-    review = asyncio.run(run_claude())
-
-elif reviewer == "codex":
-    result = subprocess.run(
-        ["codex", "--full-auto", PROMPT],
-        capture_output=True,
-        text=True,
-        timeout=300,
-        cwd=os.getcwd(),
+try:
+    response = client.chat.completions.create(
+        model="qwen35-397b",
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are an expert code reviewer. Be thorough, specific, "
+                    "and cite file:line when pointing out issues. Focus on "
+                    "correctness, security, and maintainability."
+                ),
+            },
+            {"role": "user", "content": PROMPT},
+        ],
+        max_tokens=8192,
+        temperature=0.7,
+        # Qwen 3.5 MoE supports extended thinking
+        extra_body={
+            "chat_template_kwargs": {
+                "enable_thinking": True,
+            },
+        },
     )
-    review = result.stdout or result.stderr
-    if result.returncode != 0 and not review.strip():
-        print(f"Codex exited {result.returncode} with no output.", file=sys.stderr)
-        sys.exit(1)
+    review = response.choices[0].message.content or ""
 
-else:
-    print(f"Unknown REVIEWER={reviewer!r}", file=sys.stderr)
-    sys.exit(1)
+    # Strip thinking blocks if the model returned them
+    review = re.sub(r"<think>.*?</think>", "", review, flags=re.DOTALL).strip()
+
+except Exception as e:
+    review = f"API Error: {e}"
 
 if not review.strip():
     print("Reviewer produced no output — skipping comment.")
@@ -110,10 +136,17 @@ if not review.strip():
 
 # ── Format comment ────────────────────────────────────────────────────────────
 
-badge = "🤖 Claude" if reviewer == "claude" else "🤖 Codex"
-body = f"## {badge} Peer Review\n\n_{reason}_\n\n{review}"
+body = f"## 🤖 Qwen 3.5 Peer Review\n\n{review}"
 if truncated:
-    body += "\n\n> ⚠️ Diff exceeded 80K chars and was truncated."
+    body += "\n\n> ⚠️ Diff exceeded 200K chars and was truncated."
+
+# Add model info footer
+usage = getattr(response, "usage", None)
+if usage:
+    body += (
+        f"\n\n<sub>Model: Qwen 3.5 397B MoE on aibeast | "
+        f"Tokens: {usage.prompt_tokens:,} in / {usage.completion_tokens:,} out</sub>"
+    )
 
 print(body)
 
@@ -131,7 +164,7 @@ r = httpx.post(
         "Content-Type": "application/json",
     },
     json={"body": body},
-    timeout=30,
+    timeout=120,
 )
 r.raise_for_status()
 print(f"\nComment posted (id={r.json()['id']})")
