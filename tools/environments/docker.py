@@ -8,18 +8,14 @@ persistence via bind mounts.
 import logging
 import os
 import re
-import shlex
 import shutil
 import subprocess
 import sys
-import threading
-import time
 import uuid
 from typing import Optional
 
-from tools.environments.base import BaseEnvironment
+from tools.environments.base import BaseEnvironment, _popen_bash
 from tools.environments.local import _HERMES_PROVIDER_ENV_BLOCKLIST
-from tools.interrupt import is_interrupted
 
 logger = logging.getLogger(__name__)
 
