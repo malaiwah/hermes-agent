@@ -20,10 +20,6 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v5
 
-      - name: Install opencode
-        run: |
-          npm install -g @anthropics/opencode || npm install -g opencode
-
       - name: Run AI review
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
