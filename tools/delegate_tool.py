@@ -52,6 +52,10 @@ DEFAULT_ALLOWED_TOOLSETS = ["terminal", "file", "web", "mcp", "browser", "memory
 
 # Configuration constants
 _DEFAULT_MAX_CONCURRENT_CHILDREN = 3
+# Backwards-compatible alias — run_agent.py imports this name directly
+# for the guardrail that truncates excess delegate_task calls at the
+# agent-loop level (separate from the runtime check inside delegate_task).
+MAX_CONCURRENT_CHILDREN = _DEFAULT_MAX_CONCURRENT_CHILDREN
 
 
 def _get_max_concurrent_children() -> int:
