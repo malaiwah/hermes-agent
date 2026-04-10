@@ -1278,7 +1278,21 @@ class GatewayRunner:
         self._running_agents[session_key] = _AGENT_PENDING_SENTINEL
         self._running_agents_ts[session_key] = time.time()
         try:
-            await self._handle_message_with_agent(event, source, session_key)
+            response = await self._handle_message_with_agent(event, source, session_key)
+            # _handle_message_with_agent returns None when streaming already
+            # delivered the response. For self-nudge turns, streaming typically
+            # doesn't deliver (no user message to stream-edit), so we must
+            # explicitly send the response here.
+            if response and adapter:
+                _thread_meta = {"thread_id": source.thread_id} if source.thread_id else None
+                try:
+                    await adapter.send(
+                        source.chat_id,
+                        response,
+                        metadata=_thread_meta,
+                    )
+                except Exception as e:
+                    logger.warning("Failed to deliver self-nudge response: %s", e)
         finally:
             if self._running_agents.get(session_key) is _AGENT_PENDING_SENTINEL:
                 del self._running_agents[session_key]
