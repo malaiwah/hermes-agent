@@ -47,7 +47,7 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
 COPY . /opt/hermes
 WORKDIR /opt/hermes
 
-RUN uv pip install --system --no-cache -e ".[all]" && \
+RUN uv pip install --system --break-system-packages --no-cache -e ".[all]" && \
     npm install --prefer-offline --no-audit && \
     npx playwright install --with-deps chromium --only-shell && \
     cd /opt/hermes/scripts/whatsapp-bridge && \
