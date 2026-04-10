@@ -19,7 +19,7 @@ from unittest.mock import MagicMock, patch
 from tools.delegate_tool import (
     DELEGATE_BLOCKED_TOOLS,
     DELEGATE_TASK_SCHEMA,
-    MAX_CONCURRENT_CHILDREN,
+    _get_max_concurrent_children,
     MAX_DEPTH,
     check_delegate_requirements,
     delegate_task,
@@ -171,7 +171,7 @@ class TestDelegateTask(unittest.TestCase):
         parent = _make_mock_parent()
         tasks = [{"goal": f"Task {i}"} for i in range(5)]
         result = json.loads(delegate_task(tasks=tasks, parent_agent=parent))
-        # Should only run 3 tasks (MAX_CONCURRENT_CHILDREN)
+        # Should only run 3 tasks (_get_max_concurrent_children())
         self.assertEqual(mock_run.call_count, 3)
 
     @patch("tools.delegate_tool._run_single_child")
@@ -606,7 +606,7 @@ class TestBlockedTools(unittest.TestCase):
             self.assertIn(tool, DELEGATE_BLOCKED_TOOLS)
 
     def test_constants(self):
-        self.assertEqual(MAX_CONCURRENT_CHILDREN, 3)
+        self.assertEqual(_get_max_concurrent_children(), 3)
         self.assertEqual(MAX_DEPTH, 2)
 
 
