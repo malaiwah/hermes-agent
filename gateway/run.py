@@ -1265,6 +1265,16 @@ class GatewayRunner:
             persist_user_message="[System note: a self-nudge timer fired.]",
         )
 
+        # Send typing indicator so the user sees activity during the
+        # self-nudge hidden turn (same as the normal message path).
+        adapter = self.adapters.get(source.platform)
+        if adapter and hasattr(adapter, "send_typing"):
+            try:
+                _thread_meta = {"thread_id": source.thread_id} if source.thread_id else None
+                await adapter.send_typing(source.chat_id, metadata=_thread_meta)
+            except Exception:
+                pass
+
         self._running_agents[session_key] = _AGENT_PENDING_SENTINEL
         self._running_agents_ts[session_key] = time.time()
         try:
