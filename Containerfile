@@ -25,19 +25,29 @@ RUN printf 'IMAGE_TITLE=hermes-agent\nIMAGE_SOURCE=%s\nGIT_COMMIT=%s\nGIT_REF=%s
 
 # ── System dependencies ──────────────────────────────────────────────────────
 
-RUN apt-get update && \
+# Use apt-cacher-ng on the LAN for faster package downloads.
+# The proxy is only used during build (not baked into the image).
+ARG APT_PROXY=http://10.15.0.6:3142
+RUN echo "Acquire::HTTP::Proxy \"${APT_PROXY}\";" > /etc/apt/apt.conf.d/01proxy && \
+    apt-get update && \
     apt-get upgrade -y --target-release=stable-security && \
     apt-get install -y --no-install-recommends \
         build-essential nodejs npm python3 python3-pip ripgrep ffmpeg gcc \
-        python3-dev libffi-dev podman-remote && \
-    rm -rf /var/lib/apt/lists/*
+        python3-dev libffi-dev podman-remote curl && \
+    rm -rf /var/lib/apt/lists/* && \
+    rm -f /etc/apt/apt.conf.d/01proxy
+
+# ── Install uv (much faster than pip for dependency resolution) ──────────────
+
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
+    ln -sf /root/.local/bin/uv /usr/local/bin/uv
 
 # ── Application source (includes oikos patches) ─────────────────────────────
 
 COPY . /opt/hermes
 WORKDIR /opt/hermes
 
-RUN pip install --no-cache-dir -e ".[all]" --break-system-packages && \
+RUN uv pip install --system --no-cache -e ".[all]" && \
     npm install --prefer-offline --no-audit && \
     npx playwright install --with-deps chromium --only-shell && \
     cd /opt/hermes/scripts/whatsapp-bridge && \
