@@ -51,7 +51,27 @@ BLOCKED_TOOLSET_NAMES = frozenset([
 DEFAULT_ALLOWED_TOOLSETS = ["terminal", "file", "web", "mcp", "browser", "memory"]
 
 # Configuration constants
-MAX_CONCURRENT_CHILDREN = 3
+_DEFAULT_MAX_CONCURRENT_CHILDREN = 3
+
+
+def _get_max_concurrent_children() -> int:
+    """Read delegation.max_concurrent_children from config.yaml, falling back
+    to DELEGATION_MAX_CONCURRENT_CHILDREN env var, then the default (3)."""
+    env_val = os.getenv("DELEGATION_MAX_CONCURRENT_CHILDREN")
+    if env_val:
+        try:
+            return max(1, int(env_val))
+        except (TypeError, ValueError):
+            pass
+    try:
+        from hermes_cli.config import read_raw_config
+        cfg = read_raw_config()
+        val = cfg.get("delegation", {}).get("max_concurrent_children")
+        if val is not None:
+            return max(1, int(val))
+    except Exception:
+        pass
+    return _DEFAULT_MAX_CONCURRENT_CHILDREN
 MAX_DEPTH = 2  # parent (0) -> child (1) -> grandchild rejected (2)
 DEFAULT_MAX_ITERATIONS = 50
 DEFAULT_SUBAGENT_MEMORY_MODE = "read_only"  # "read_only" | "full" | "none"
@@ -619,8 +639,17 @@ def delegate_task(
         return tool_error(str(exc))
 
     # Normalize to task list
+    max_children = _get_max_concurrent_children()
     if tasks and isinstance(tasks, list):
-        task_list = tasks[:MAX_CONCURRENT_CHILDREN]
+        if len(tasks) > max_children:
+            return tool_error(
+                f"Too many tasks: {len(tasks)} provided, but "
+                f"max_concurrent_children is {max_children}. "
+                f"Either reduce the task count, split into multiple "
+                f"delegate_task calls, or increase "
+                f"delegation.max_concurrent_children in config.yaml."
+            )
+        task_list = tasks
     elif goal and isinstance(goal, str) and goal.strip():
         task_list = [{
             "goal": goal,
@@ -693,7 +722,7 @@ def delegate_task(
         completed_count = 0
         spinner_ref = getattr(parent_agent, '_delegate_spinner', None)
 
-        with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_CHILDREN) as executor:
+        with ThreadPoolExecutor(max_workers=max_children) as executor:
             futures = {}
             for i, t, child in children:
                 future = executor.submit(
@@ -1056,7 +1085,7 @@ DELEGATE_TASK_SCHEMA = {
                 },
                 "maxItems": 3,
                 "description": (
-                    "Batch mode: up to 3 tasks to run in parallel. Each gets "
+                    "Batch mode: tasks to run in parallel (limit configurable via delegation.max_concurrent_children, default 3). Each gets "
                     "its own subagent with isolated context and terminal session. "
                     "When provided, top-level goal/context are ignored. "
                     "Top-level toolsets and workspace visibility settings act as defaults."
