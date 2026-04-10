@@ -1122,7 +1122,7 @@ DELEGATE_TASK_SCHEMA = {
 
 
 # --- Registry ---
-from tools.registry import registry  # noqa: E402
+from tools.registry import registry, tool_error  # noqa: E402
 
 registry.register(
     name="delegate_task",

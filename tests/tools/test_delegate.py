@@ -169,10 +169,13 @@ class TestDelegateTask(unittest.TestCase):
             "summary": "Done", "api_calls": 1, "duration_seconds": 1.0
         }
         parent = _make_mock_parent()
-        tasks = [{"goal": f"Task {i}"} for i in range(5)]
+        limit = _get_max_concurrent_children()
+        tasks = [{"goal": f"Task {i}"} for i in range(limit + 2)]
         result = json.loads(delegate_task(tasks=tasks, parent_agent=parent))
-        # Should only run 3 tasks (_get_max_concurrent_children())
-        self.assertEqual(mock_run.call_count, 3)
+        # Should return an error instead of silently truncating
+        self.assertIn("error", result)
+        self.assertIn("Too many tasks", result["error"])
+        mock_run.assert_not_called()
 
     @patch("tools.delegate_tool._run_single_child")
     def test_batch_ignores_toplevel_goal(self, mock_run):
