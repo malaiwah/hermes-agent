@@ -526,6 +526,17 @@ def _run_single_child(
         }
 
     finally:
+        # Release the credential pool lease acquired at the top of the try
+        # block. Without this, every delegated child leaks a lease, and the
+        # pool gradually marks all entries as exhausted. Upstream has this;
+        # the fork's rewrite for workspace env overrides accidentally dropped
+        # it. Restored here.
+        if child_pool is not None and leased_cred_id is not None:
+            try:
+                child_pool.release_lease(leased_cred_id)
+            except Exception:
+                logger.debug("Failed to release credential lease %s", leased_cred_id, exc_info=True)
+
         child_task_id = getattr(child, "_delegate_task_id", None) or getattr(child, "session_id", None)
         child_env_overrides = getattr(child, "_delegate_task_env_overrides", None)
         if child_task_id and child_env_overrides:
