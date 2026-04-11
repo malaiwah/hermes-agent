@@ -223,8 +223,28 @@ def _is_known_provider_base_url(base_url: str) -> bool:
     return _infer_provider_from_url(base_url) is not None
 
 
+def _load_local_endpoints() -> set:
+    """Load additional local endpoint hostnames from config.
+
+    Reads ``model.local_endpoints`` from config.yaml — a list of hostnames
+    that should be treated as local even though they aren't IPs or localhost.
+    Typical use: Docker/Podman DNS names for LiteLLM or other local proxies.
+    """
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config()
+        model_cfg = cfg.get("model", {})
+        if isinstance(model_cfg, dict):
+            entries = model_cfg.get("local_endpoints", [])
+            if isinstance(entries, list):
+                return {str(e).strip().lower() for e in entries if e}
+    except Exception:
+        pass
+    return set()
+
+
 def is_local_endpoint(base_url: str) -> bool:
-    """Return True if base_url points to a local machine (localhost / RFC-1918 / WSL)."""
+    """Return True if base_url points to a local machine (localhost / RFC-1918 / WSL / configured hostnames)."""
     normalized = _normalize_base_url(base_url)
     if not normalized:
         return False
@@ -236,12 +256,23 @@ def is_local_endpoint(base_url: str) -> bool:
         return False
     if host in _LOCAL_HOSTS:
         return True
-    # RFC-1918 private ranges and link-local
+    # Check configured local endpoints (e.g. Docker DNS names like hermes-litellm)
+    if host.lower() in _load_local_endpoints():
+        return True
+    # Try resolving hostname to IP and check if it's private
     import ipaddress
     try:
         addr = ipaddress.ip_address(host)
         return addr.is_private or addr.is_loopback or addr.is_link_local
     except ValueError:
+        pass
+    # DNS resolution fallback — resolve hostname and check if IP is private
+    import socket
+    try:
+        resolved_ip = socket.gethostbyname(host)
+        addr = ipaddress.ip_address(resolved_ip)
+        return addr.is_private or addr.is_loopback or addr.is_link_local
+    except (socket.gaierror, ValueError):
         pass
     # Bare IP that looks like a private range (e.g. 172.26.x.x for WSL)
     parts = host.split(".")
