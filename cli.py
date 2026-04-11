@@ -2555,7 +2555,7 @@ class HermesCLI:
         """Resolve model/runtime overrides for a single user turn."""
         from agent.smart_model_routing import resolve_turn_route
 
-        return resolve_turn_route(
+        result = resolve_turn_route(
             user_message,
             self._smart_model_routing,
             {
@@ -2569,6 +2569,9 @@ class HermesCLI:
                 "credential_pool": getattr(self, "_credential_pool", None),
             },
         )
+        if result.get("label"):
+            logger.info("smart_model_routing: %s (message: %r)", result["label"], user_message[:80])
+        return result
 
     def _init_agent(self, *, model_override: str = None, runtime_override: dict = None, route_label: str = None) -> bool:
         """

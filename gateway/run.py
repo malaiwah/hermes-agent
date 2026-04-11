@@ -812,7 +812,10 @@ class GatewayRunner:
             "args": list(runtime_kwargs.get("args") or []),
             "credential_pool": runtime_kwargs.get("credential_pool"),
         }
-        return resolve_turn_route(user_message, getattr(self, "_smart_model_routing", {}), primary)
+        result = resolve_turn_route(user_message, getattr(self, "_smart_model_routing", {}), primary)
+        if result.get("label"):
+            logger.info("smart_model_routing: %s (message: %r)", result["label"], user_message[:80])
+        return result
 
     async def _handle_adapter_fatal_error(self, adapter: BasePlatformAdapter) -> None:
         """React to an adapter failure after startup.
