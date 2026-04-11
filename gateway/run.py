@@ -7415,6 +7415,27 @@ class GatewayRunner:
 
             turn_route = self._resolve_turn_agent_config(message, model, runtime_kwargs, context_tokens=_est_context_tokens)
 
+            # Smart routing context trim: when routing to a cheap model with
+            # a large context, trim conversation history from the head (keep
+            # the most recent messages) to fit within the cheap model's
+            # comfortable context window.
+            _trim_to = turn_route.get("trim_to_tokens")
+            if _trim_to and history:
+                _kept = []
+                _token_budget = _trim_to
+                for msg in reversed(history):
+                    msg_tokens = len(str(msg.get("content", ""))) // 4
+                    if _token_budget - msg_tokens < 0 and _kept:
+                        break
+                    _kept.append(msg)
+                    _token_budget -= msg_tokens
+                history = list(reversed(_kept))
+                logger.info(
+                    "smart_model_routing: trimmed history from ~%s to ~%s tokens (%d→%d messages)",
+                    f"{_est_context_tokens:,}", f"{_trim_to:,}",
+                    len(history) + (len(history) - len(_kept)), len(history),
+                )
+
             # Check agent cache — reuse the AIAgent from the previous message
             # in this session to preserve the frozen system prompt and tool
             # schemas for prompt cache hits.

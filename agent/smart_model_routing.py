@@ -84,11 +84,11 @@ def choose_cheap_model_route(
     if not provider or not model:
         return None
 
-    # Context size guard: don't route to the cheap model if the conversation
-    # context exceeds max_context_tokens.  The cheap model is meant to be fast;
-    # sending it a large context makes it slower than the primary model.
+    # Context size guard: the cheap model is meant to be fast.  If the
+    # conversation context is too large, either trim it or skip the route.
     max_context = _coerce_int(cfg.get("max_context_tokens"), 0)
-    if max_context > 0 and context_tokens > max_context:
+    trim_context = _coerce_bool(cfg.get("trim_context"), False)
+    if max_context > 0 and context_tokens > max_context and not trim_context:
         return None
 
     text = (user_message or "").strip()
@@ -118,6 +118,11 @@ def choose_cheap_model_route(
     route["provider"] = provider
     route["model"] = model
     route["routing_reason"] = "simple_turn"
+    # When trim_context is enabled and context exceeds the cap, signal the
+    # caller to trim conversation history to max_context_tokens before
+    # sending to the cheap model.
+    if trim_context and max_context > 0 and context_tokens > max_context:
+        route["trim_to_tokens"] = max_context
     return route
 
 
@@ -191,7 +196,7 @@ def resolve_turn_route(
             ),
         }
 
-    return {
+    result = {
         "model": route.get("model"),
         "runtime": {
             "api_key": runtime.get("api_key"),
@@ -211,3 +216,6 @@ def resolve_turn_route(
             tuple(runtime.get("args") or ()),
         ),
     }
+    if route.get("trim_to_tokens"):
+        result["trim_to_tokens"] = route["trim_to_tokens"]
+    return result
