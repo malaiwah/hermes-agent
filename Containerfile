@@ -68,3 +68,5 @@ RUN printf '#!/bin/sh\nprintf "%%s podman-remote-shim: %%s\n" "$(date -u +%%Y-%%
 ENV HERMES_HOME=/opt/data
 VOLUME ["/opt/data"]
 ENTRYPOINT ["/opt/hermes/docker/wait-for-honcho.sh"]
+
+# ffmpeg confirmed present for TTS voice bubble conversion
