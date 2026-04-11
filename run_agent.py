@@ -6800,6 +6800,12 @@ class AIAgent:
                 tool_duration = time.time() - tool_start_time
                 if self.quiet_mode:
                     self._vprint(f"  {_get_cute_tool_message_impl('self_nudge', function_args, tool_duration, result=function_result)}")
+            elif function_name == "list_models":
+                from tools.delegate_tool import list_models as _list_models
+                function_result = _list_models(parent_agent=self)
+                tool_duration = time.time() - tool_start_time
+                if self.quiet_mode:
+                    self._vprint(f"  {_get_cute_tool_message_impl('list_models', function_args, tool_duration, result=function_result)}")
             elif function_name == "delegate_task":
                 from tools.delegate_tool import delegate_task as _delegate_task
                 tasks_arg = function_args.get("tasks")
