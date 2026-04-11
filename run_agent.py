@@ -6412,8 +6412,12 @@ class AIAgent:
                 toolsets=function_args.get("toolsets"),
                 tasks=function_args.get("tasks"),
                 max_iterations=function_args.get("max_iterations"),
+                model=function_args.get("model"),
                 parent_agent=self,
             )
+        elif function_name == "list_models":
+            from tools.delegate_tool import list_models as _list_models
+            return _list_models(parent_agent=self)
         else:
             return handle_function_call(
                 function_name, function_args, effective_task_id,
@@ -6818,6 +6822,7 @@ class AIAgent:
                         toolsets=function_args.get("toolsets"),
                         tasks=tasks_arg,
                         max_iterations=function_args.get("max_iterations"),
+                        model=function_args.get("model"),
                         parent_agent=self,
                     )
                     _delegate_result = function_result

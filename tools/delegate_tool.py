@@ -639,12 +639,10 @@ def delegate_task(
     except ValueError as exc:
         return tool_error(str(exc))
 
-    # Per-call model override: the agent can request a specific model for this
-    # delegation (e.g. a smaller/faster model for simple tasks).  The model name
-    # must be resolvable via the same provider as the delegation config, or the
-    # parent's provider if no delegation provider is configured.
+    # Per-call model override: the agent can request a specific model or tier
+    # (small/medium/large) for this delegation.
     if model and isinstance(model, str) and model.strip():
-        creds["model"] = model.strip()
+        creds["model"] = _resolve_model_or_tier(model.strip())
 
     # Normalize to task list
     max_children = _get_max_concurrent_children()
@@ -697,7 +695,8 @@ def delegate_task(
     try:
         for i, t in enumerate(task_list):
             # Per-task model override takes precedence over top-level model
-            task_model = str(t.get("model") or "").strip() or creds["model"]
+            raw_task_model = str(t.get("model") or "").strip()
+            task_model = _resolve_model_or_tier(raw_task_model) if raw_task_model else creds["model"]
             child = _build_child_agent(
                 task_index=i, goal=t["goal"], context=t.get("context"),
                 toolsets=t.get("toolsets") or toolsets, model=task_model,
@@ -952,6 +951,135 @@ def _load_config() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Model tier resolution
+# ---------------------------------------------------------------------------
+
+_DEFAULT_TIERS = {"small": None, "medium": None, "large": None}
+
+
+def _load_model_tiers() -> dict:
+    """Load model_tiers from delegation config.
+
+    Returns a dict mapping tier names (small/medium/large) to model names.
+    Falls back to empty tiers when unconfigured.
+    """
+    cfg = _load_config()
+    tiers = cfg.get("model_tiers", {})
+    if not isinstance(tiers, dict):
+        return dict(_DEFAULT_TIERS)
+    result = dict(_DEFAULT_TIERS)
+    for tier in result:
+        val = str(tiers.get(tier) or "").strip()
+        if val:
+            result[tier] = val
+    return result
+
+
+def _resolve_model_or_tier(model_spec: str) -> str:
+    """Resolve a model specification that may be a tier name or a model name.
+
+    If model_spec is 'small', 'medium', or 'large', resolves to the
+    configured model name for that tier.  Otherwise returns model_spec
+    as-is (assumed to be a direct model name).
+    """
+    if not model_spec:
+        return model_spec
+    lowered = model_spec.strip().lower()
+    if lowered in ("small", "medium", "large"):
+        tiers = _load_model_tiers()
+        resolved = tiers.get(lowered)
+        if resolved:
+            logger.info("model tier '%s' resolved to '%s'", lowered, resolved)
+            return resolved
+        logger.warning(
+            "model tier '%s' requested but not configured in "
+            "delegation.model_tiers; falling back to default model",
+            lowered,
+        )
+        return ""  # empty → inherit default
+    return model_spec
+
+
+def list_models(parent_agent=None) -> str:
+    """Return available models and their delegation tiers as JSON.
+
+    Reads custom_providers from config.yaml to enumerate models, and
+    delegation.model_tiers for tier assignments.
+    """
+    # Load custom providers to enumerate available models
+    models = []
+    try:
+        from cli import CLI_CONFIG
+        full_cfg = CLI_CONFIG
+    except Exception:
+        try:
+            from hermes_cli.config import load_config
+            full_cfg = load_config()
+        except Exception:
+            full_cfg = {}
+
+    # Get the current/default model
+    model_cfg = full_cfg.get("model", {})
+    if isinstance(model_cfg, dict):
+        default_model = model_cfg.get("default", "")
+    else:
+        default_model = str(model_cfg or "")
+
+    # Enumerate models from custom_providers
+    for cp in full_cfg.get("custom_providers", []):
+        provider_name = cp.get("name", "unknown")
+        for model_name, model_info in (cp.get("models") or {}).items():
+            ctx = None
+            if isinstance(model_info, dict):
+                ctx = model_info.get("context_length")
+            models.append({
+                "name": model_name,
+                "provider": provider_name,
+                "context_length": ctx,
+            })
+
+    # Load tiers
+    tiers = _load_model_tiers()
+
+    # Assign tier labels to models
+    tier_by_model = {}
+    for tier_name, tier_model in tiers.items():
+        if tier_model:
+            tier_by_model[tier_model] = tier_name
+
+    for m in models:
+        m["tier"] = tier_by_model.get(m["name"])
+        m["is_default"] = m["name"] == default_model
+
+    return json.dumps({
+        "models": models,
+        "tiers": {k: v for k, v in tiers.items() if v},
+        "default_model": default_model,
+        "usage_hint": (
+            "Use 'small' for simple tasks (summarization, formatting, file listing). "
+            "Use 'medium' (default) for standard work. "
+            "Use 'large' for complex reasoning, peer review, or when you're stuck. "
+            "You can pass tier names ('small', 'medium', 'large') or model names directly "
+            "as the 'model' parameter in delegate_task."
+        ),
+    }, indent=2)
+
+
+LIST_MODELS_SCHEMA = {
+    "name": "list_models",
+    "description": (
+        "List available models for delegation with their tiers (small/medium/large). "
+        "Use this to discover which models are available before delegating tasks. "
+        "Returns model names, providers, context lengths, and tier assignments."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {},
+    },
+}
+
+
+# ---------------------------------------------------------------------------
 # OpenAI Function-Calling Schema
 # ---------------------------------------------------------------------------
 
@@ -982,11 +1110,16 @@ DELEGATE_TASK_SCHEMA = {
         "- Each subagent gets its own terminal session (separate working directory and state).\n"
         "- workspace_visibility defaults to 'inherit'. Use 'full_ro' or 'mapped' "
         "when you need stricter filesystem isolation in Docker sandboxes.\n"
-        "- Results are always returned as an array, one entry per task.\n"
-        "- You can route subagents to a smaller/faster model for simple tasks "
-        "(e.g. summarization, formatting, simple lookups) by setting 'model'. "
-        "Use the default (primary model) for complex reasoning, debugging, "
-        "or multi-step implementation work."
+        "- Results are always returned as an array, one entry per task.\n\n"
+        "MODEL SELECTION:\n"
+        "- You can set 'model' to a tier name ('small', 'medium', 'large') "
+        "or a specific model name. Use list_models to see available options.\n"
+        "- 'small': fast/cheap model for simple tasks (file exploration, "
+        "summarization, formatting, lookups)\n"
+        "- 'medium' or omit: default model for standard work\n"
+        "- 'large': most capable model for complex reasoning, peer review, "
+        "or when you're stuck and need to escalate\n"
+        "- Each task in a batch can use a different model."
     ),
     "parameters": {
         "type": "object",
@@ -1164,9 +1297,18 @@ registry.register(
         workspace_mappings=args.get("workspace_mappings"),
         tasks=args.get("tasks"),
         max_iterations=args.get("max_iterations"),
+        model=args.get("model"),
         acp_command=args.get("acp_command"),
         acp_args=args.get("acp_args"),
         parent_agent=kw.get("parent_agent")),
     check_fn=check_delegate_requirements,
     emoji="🔀",
+)
+
+registry.register(
+    name="list_models",
+    toolset="delegation",
+    schema=LIST_MODELS_SCHEMA,
+    handler=lambda args, **kw: list_models(parent_agent=kw.get("parent_agent")),
+    emoji="📋",
 )
