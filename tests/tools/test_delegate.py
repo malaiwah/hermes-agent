@@ -28,6 +28,7 @@ from tools.delegate_tool import (
     _strip_blocked_tools,
     _resolve_child_credential_pool,
     _resolve_delegation_credentials,
+    _resolve_model_override,
 )
 
 
@@ -68,7 +69,15 @@ class TestDelegateRequirements(unittest.TestCase):
         self.assertIn("workspace_visibility", props)
         self.assertIn("workspace_mappings", props)
         self.assertIn("max_iterations", props)
-        self.assertEqual(props["tasks"]["maxItems"], 3)
+        self.assertNotIn("maxItems", props["tasks"])  # removed — limit is now runtime-configurable
+        # Per-task model override: advertised both at the top level
+        # (applies to single-task calls / default for batch) and inside
+        # each task object (per-subagent overrides).
+        self.assertIn("model", props)
+        self.assertEqual(props["model"]["type"], "string")
+        task_item_props = props["tasks"]["items"]["properties"]
+        self.assertIn("model", task_item_props)
+        self.assertEqual(task_item_props["model"]["type"], "string")
 
 
 class TestChildSystemPrompt(unittest.TestCase):
@@ -750,6 +759,306 @@ class TestDelegationCredentialResolution(unittest.TestCase):
         creds = _resolve_delegation_credentials(cfg, parent)
         self.assertIsNone(creds["model"])
         self.assertIsNone(creds["provider"])
+
+
+class TestResolveModelOverride(unittest.TestCase):
+    """Tests for the _resolve_model_override helper that wraps switch_model()."""
+
+    def _fake_result(self, **overrides):
+        """Build a MagicMock that mimics ModelSwitchResult for return values."""
+        result = MagicMock()
+        defaults = {
+            "success": True,
+            "new_model": "claude-sonnet-4-6",
+            "target_provider": "anthropic",
+            "api_key": "ant-test-key",
+            "base_url": "https://api.anthropic.com/v1",
+            "api_mode": "anthropic_messages",
+            "error_message": "",
+        }
+        defaults.update(overrides)
+        for k, v in defaults.items():
+            setattr(result, k, v)
+        return result
+
+    @patch("hermes_cli.model_switch.switch_model")
+    def test_resolves_bare_model_name(self, mock_switch):
+        """A bare model string returns a full credential bundle."""
+        mock_switch.return_value = self._fake_result()
+        parent = _make_mock_parent(depth=0)
+
+        creds = _resolve_model_override("sonnet", parent)
+
+        self.assertEqual(creds["model"], "claude-sonnet-4-6")
+        self.assertEqual(creds["provider"], "anthropic")
+        self.assertEqual(creds["base_url"], "https://api.anthropic.com/v1")
+        self.assertEqual(creds["api_key"], "ant-test-key")
+        self.assertEqual(creds["api_mode"], "anthropic_messages")
+
+        # switch_model should be called with parent's current context
+        _, kwargs = mock_switch.call_args
+        self.assertEqual(kwargs["raw_input"], "sonnet")
+        self.assertEqual(kwargs["current_provider"], parent.provider)
+        self.assertEqual(kwargs["current_model"], parent.model)
+        self.assertFalse(kwargs["is_global"])  # per-task override must not persist
+        self.assertEqual(kwargs["explicit_provider"], "")
+
+    @patch("hermes_cli.model_switch.switch_model")
+    def test_passes_explicit_provider_flag(self, mock_switch):
+        """Model strings with --provider flag forward the provider to switch_model."""
+        mock_switch.return_value = self._fake_result(
+            new_model="claude-opus-4-6",
+            target_provider="anthropic",
+        )
+        parent = _make_mock_parent(depth=0)
+
+        _resolve_model_override("opus --provider anthropic", parent)
+
+        _, kwargs = mock_switch.call_args
+        self.assertEqual(kwargs["raw_input"], "opus")
+        self.assertEqual(kwargs["explicit_provider"], "anthropic")
+
+    @patch("hermes_cli.model_switch.switch_model")
+    def test_strips_global_flag_never_persists(self, mock_switch):
+        """`--global` is stripped but ignored — per-task overrides must not persist."""
+        mock_switch.return_value = self._fake_result()
+        parent = _make_mock_parent(depth=0)
+
+        _resolve_model_override("sonnet --global", parent)
+
+        _, kwargs = mock_switch.call_args
+        self.assertEqual(kwargs["raw_input"], "sonnet")
+        # Critical: is_global must stay False so a subagent override never
+        # rewrites config.yaml for the parent process.
+        self.assertFalse(kwargs["is_global"])
+
+    @patch("hermes_cli.model_switch.switch_model")
+    def test_resolution_failure_raises_value_error(self, mock_switch):
+        """When switch_model returns success=False, helper raises ValueError."""
+        mock_switch.return_value = self._fake_result(
+            success=False,
+            error_message="Unknown model 'banana-42'",
+        )
+        parent = _make_mock_parent(depth=0)
+
+        with self.assertRaises(ValueError) as ctx:
+            _resolve_model_override("banana-42", parent)
+        self.assertIn("banana-42", str(ctx.exception))
+        self.assertIn("Unknown model", str(ctx.exception))
+
+    def test_empty_input_raises(self):
+        parent = _make_mock_parent(depth=0)
+        with self.assertRaises(ValueError):
+            _resolve_model_override("", parent)
+        with self.assertRaises(ValueError):
+            _resolve_model_override("   ", parent)
+
+
+class TestDelegateTaskModelOverride(unittest.TestCase):
+    """Integration tests: delegate_task(model=...) routes to _build_child_agent."""
+
+    @patch("tools.delegate_tool._load_config")
+    @patch("tools.delegate_tool._resolve_model_override")
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    def test_top_level_model_overrides_config(self, mock_creds, mock_override, mock_cfg):
+        """Top-level model= wins over delegation.model config."""
+        mock_cfg.return_value = {"max_iterations": 45}
+        # Delegation config points at a "default" model...
+        mock_creds.return_value = {
+            "model": "openai/gpt-4",
+            "provider": "openrouter",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key": "sk-or-default",
+            "api_mode": "chat_completions",
+        }
+        # ...but the LLM passes an on-the-fly override.
+        mock_override.return_value = {
+            "model": "claude-sonnet-4-6",
+            "provider": "anthropic",
+            "base_url": "https://api.anthropic.com/v1",
+            "api_key": "ant-override",
+            "api_mode": "anthropic_messages",
+        }
+        parent = _make_mock_parent(depth=0)
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            mock_child.run_conversation.return_value = {
+                "final_response": "done", "completed": True, "api_calls": 1
+            }
+            MockAgent.return_value = mock_child
+
+            delegate_task(goal="Reason hard", model="sonnet", parent_agent=parent)
+
+            mock_override.assert_called_once_with("sonnet", parent)
+            _, kwargs = MockAgent.call_args
+            # Child agent must use the override, NOT delegation.model
+            self.assertEqual(kwargs["model"], "claude-sonnet-4-6")
+            self.assertEqual(kwargs["provider"], "anthropic")
+            self.assertEqual(kwargs["api_key"], "ant-override")
+            self.assertEqual(kwargs["base_url"], "https://api.anthropic.com/v1")
+            self.assertEqual(kwargs["api_mode"], "anthropic_messages")
+
+    @patch("tools.delegate_tool._load_config")
+    @patch("tools.delegate_tool._resolve_model_override")
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    def test_per_task_model_beats_top_level(self, mock_creds, mock_override, mock_cfg):
+        """Per-task model overrides the top-level model for that task only."""
+        mock_cfg.return_value = {"max_iterations": 45}
+        mock_creds.return_value = {
+            "model": None, "provider": None, "base_url": None,
+            "api_key": None, "api_mode": None,
+        }
+
+        def fake_override(raw, _parent):
+            return {
+                "sonnet": {
+                    "model": "claude-sonnet-4-6",
+                    "provider": "anthropic",
+                    "base_url": "https://api.anthropic.com/v1",
+                    "api_key": "ant-sonnet",
+                    "api_mode": "anthropic_messages",
+                },
+                "haiku": {
+                    "model": "claude-haiku-4-5",
+                    "provider": "anthropic",
+                    "base_url": "https://api.anthropic.com/v1",
+                    "api_key": "ant-haiku",
+                    "api_mode": "anthropic_messages",
+                },
+                "glm-4.7": {
+                    "model": "glm-4.7",
+                    "provider": "z-ai",
+                    "base_url": "https://api.z.ai/v1",
+                    "api_key": "zai-key",
+                    "api_mode": "chat_completions",
+                },
+            }[raw]
+
+        mock_override.side_effect = fake_override
+        parent = _make_mock_parent(depth=0)
+
+        with patch("tools.delegate_tool._build_child_agent") as mock_build, \
+             patch("tools.delegate_tool._run_single_child") as mock_run:
+            mock_build.return_value = MagicMock()
+            mock_run.return_value = {
+                "task_index": 0, "status": "completed", "summary": "Done",
+                "api_calls": 1, "duration_seconds": 1.0,
+            }
+
+            tasks = [
+                {"goal": "Task A", "model": "haiku"},      # overrides top-level
+                {"goal": "Task B"},                          # uses top-level "sonnet"
+                {"goal": "Task C", "model": "glm-4.7"},     # different provider
+            ]
+            delegate_task(tasks=tasks, model="sonnet", parent_agent=parent)
+
+            self.assertEqual(mock_build.call_count, 3)
+            # Per-task model resolution for every task plus the top-level
+            # default (which is re-resolved for Task B). We assert on the
+            # kwargs that reach _build_child_agent, not on override call
+            # ordering.
+            task_models = [c.kwargs["model"] for c in mock_build.call_args_list]
+            self.assertEqual(task_models, ["claude-haiku-4-5", "claude-sonnet-4-6", "glm-4.7"])
+
+            task_providers = [c.kwargs["override_provider"] for c in mock_build.call_args_list]
+            self.assertEqual(task_providers, ["anthropic", "anthropic", "z-ai"])
+
+            task_api_keys = [c.kwargs["override_api_key"] for c in mock_build.call_args_list]
+            self.assertEqual(task_api_keys, ["ant-haiku", "ant-sonnet", "zai-key"])
+
+    @patch("tools.delegate_tool._load_config")
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    def test_no_model_override_uses_delegation_creds(self, mock_creds, mock_cfg):
+        """Without any model param, delegation config credentials flow unchanged."""
+        mock_cfg.return_value = {"max_iterations": 45}
+        mock_creds.return_value = {
+            "model": "openai/gpt-5",
+            "provider": "openrouter",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key": "sk-or-default",
+            "api_mode": "chat_completions",
+        }
+        parent = _make_mock_parent(depth=0)
+
+        with patch("run_agent.AIAgent") as MockAgent, \
+             patch("tools.delegate_tool._resolve_model_override") as mock_override:
+            mock_child = MagicMock()
+            mock_child.run_conversation.return_value = {
+                "final_response": "done", "completed": True, "api_calls": 1
+            }
+            MockAgent.return_value = mock_child
+
+            delegate_task(goal="No override", parent_agent=parent)
+
+            # _resolve_model_override must NOT be called when no model is passed
+            mock_override.assert_not_called()
+            _, kwargs = MockAgent.call_args
+            self.assertEqual(kwargs["model"], "openai/gpt-5")
+            self.assertEqual(kwargs["provider"], "openrouter")
+            self.assertEqual(kwargs["api_key"], "sk-or-default")
+
+    @patch("tools.delegate_tool._load_config")
+    @patch("tools.delegate_tool._resolve_model_override")
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    def test_model_override_failure_returns_json_error(
+        self, mock_creds, mock_override, mock_cfg,
+    ):
+        """A bad model name from the LLM surfaces as a tool_error JSON payload."""
+        mock_cfg.return_value = {"max_iterations": 45}
+        mock_creds.return_value = {
+            "model": None, "provider": None, "base_url": None,
+            "api_key": None, "api_mode": None,
+        }
+        mock_override.side_effect = ValueError("Cannot resolve model 'banana'")
+        parent = _make_mock_parent(depth=0)
+
+        result = json.loads(
+            delegate_task(goal="Bad model", model="banana", parent_agent=parent)
+        )
+        self.assertIn("error", result)
+        self.assertIn("banana", result["error"])
+
+    @patch("tools.delegate_tool._load_config")
+    @patch("tools.delegate_tool._resolve_model_override")
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    def test_registry_handler_forwards_model_arg(self, mock_creds, mock_override, mock_cfg):
+        """The registry handler lambda must forward args['model'] to delegate_task."""
+        from tools.registry import registry
+
+        mock_cfg.return_value = {"max_iterations": 45}
+        mock_creds.return_value = {
+            "model": None, "provider": None, "base_url": None,
+            "api_key": None, "api_mode": None,
+        }
+        mock_override.return_value = {
+            "model": "glm-4.7",
+            "provider": "z-ai",
+            "base_url": "https://api.z.ai/v1",
+            "api_key": "zai-test",
+            "api_mode": "chat_completions",
+        }
+        parent = _make_mock_parent(depth=0)
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            mock_child.run_conversation.return_value = {
+                "final_response": "done", "completed": True, "api_calls": 1
+            }
+            MockAgent.return_value = mock_child
+
+            # Exercise the full registry dispatch path — this is what the
+            # LLM-driven tool-call pipeline actually goes through.
+            registry.dispatch(
+                "delegate_task",
+                {"goal": "Registry dispatch test", "model": "glm-4.7"},
+                parent_agent=parent,
+            )
+
+            mock_override.assert_called_once_with("glm-4.7", parent)
+            _, kwargs = MockAgent.call_args
+            self.assertEqual(kwargs["model"], "glm-4.7")
+            self.assertEqual(kwargs["provider"], "z-ai")
 
 
 class TestDelegationProviderIntegration(unittest.TestCase):
