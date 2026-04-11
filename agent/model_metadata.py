@@ -256,7 +256,12 @@ def is_local_endpoint(base_url: str) -> bool:
         return False
     if host in _LOCAL_HOSTS:
         return True
-    # Check configured local endpoints (e.g. Docker DNS names like hermes-litellm)
+    # Unqualified hostnames (no dots) are local — Docker/Podman DNS, mDNS,
+    # /etc/hosts entries. A hostname like "hermes-litellm" or "ollama" is
+    # always on the local network.
+    if "." not in host:
+        return True
+    # Check configured local endpoints (e.g. custom DNS names)
     if host.lower() in _load_local_endpoints():
         return True
     # Try resolving hostname to IP and check if it's private
