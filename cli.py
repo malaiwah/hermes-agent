@@ -2551,7 +2551,7 @@ class HermesCLI:
 
         return True
 
-    def _resolve_turn_agent_config(self, user_message: str) -> dict:
+    def _resolve_turn_agent_config(self, user_message: str, context_tokens: int = 0) -> dict:
         """Resolve model/runtime overrides for a single user turn."""
         from agent.smart_model_routing import resolve_turn_route
 
@@ -2568,9 +2568,10 @@ class HermesCLI:
                 "args": list(self.acp_args or []),
                 "credential_pool": getattr(self, "_credential_pool", None),
             },
+            context_tokens=context_tokens,
         )
         if result.get("label"):
-            logger.info("smart_model_routing: %s (message: %r)", result["label"], user_message[:80])
+            logger.info("smart_model_routing: %s (context: ~%s tokens, message: %r)", result["label"], f"{context_tokens:,}" if context_tokens else "unknown", user_message[:80])
         return result
 
     def _init_agent(self, *, model_override: str = None, runtime_override: dict = None, route_label: str = None) -> bool:
@@ -6828,7 +6829,9 @@ class HermesCLI:
         if not self._ensure_runtime_credentials():
             return None
 
-        turn_route = self._resolve_turn_agent_config(message)
+        # Estimate context tokens from conversation history for smart routing
+        _est_ctx = sum(len(str(m.get("content", ""))) for m in self.conversation_history) // 4 if self.conversation_history else 0
+        turn_route = self._resolve_turn_agent_config(message, context_tokens=_est_ctx)
         if turn_route["signature"] != self._active_agent_route_signature:
             self.agent = None
 

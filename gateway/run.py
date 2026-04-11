@@ -799,7 +799,7 @@ class GatewayRunner:
             thread_sessions_per_user=getattr(config, "thread_sessions_per_user", False),
         )
 
-    def _resolve_turn_agent_config(self, user_message: str, model: str, runtime_kwargs: dict) -> dict:
+    def _resolve_turn_agent_config(self, user_message: str, model: str, runtime_kwargs: dict, context_tokens: int = 0) -> dict:
         from agent.smart_model_routing import resolve_turn_route
 
         primary = {
@@ -812,9 +812,9 @@ class GatewayRunner:
             "args": list(runtime_kwargs.get("args") or []),
             "credential_pool": runtime_kwargs.get("credential_pool"),
         }
-        result = resolve_turn_route(user_message, getattr(self, "_smart_model_routing", {}), primary)
+        result = resolve_turn_route(user_message, getattr(self, "_smart_model_routing", {}), primary, context_tokens=context_tokens)
         if result.get("label"):
-            logger.info("smart_model_routing: %s (message: %r)", result["label"], user_message[:80])
+            logger.info("smart_model_routing: %s (context: ~%s tokens, message: %r)", result["label"], f"{context_tokens:,}" if context_tokens else "unknown", user_message[:80])
         return result
 
     async def _handle_adapter_fatal_error(self, adapter: BasePlatformAdapter) -> None:
@@ -7398,7 +7398,22 @@ class GatewayRunner:
                 except Exception as _sc_err:
                     logger.debug("Could not set up stream consumer: %s", _sc_err)
 
-            turn_route = self._resolve_turn_agent_config(message, model, runtime_kwargs)
+            # Estimate context tokens for smart routing decision.
+            # Use cached agent's last prompt tokens if available; otherwise
+            # rough estimate from history length (4 chars ≈ 1 token).
+            _est_context_tokens = 0
+            _cache_lock = getattr(self, "_agent_cache_lock", None)
+            _cache = getattr(self, "_agent_cache", None)
+            if _cache_lock and _cache is not None:
+                with _cache_lock:
+                    _cached_entry = _cache.get(session_key)
+                    if _cached_entry:
+                        _cached_agent = _cached_entry[0]
+                        _est_context_tokens = getattr(_cached_agent, "session_prompt_tokens", 0) or 0
+            if not _est_context_tokens and history:
+                _est_context_tokens = sum(len(str(m.get("content", ""))) for m in history) // 4
+
+            turn_route = self._resolve_turn_agent_config(message, model, runtime_kwargs, context_tokens=_est_context_tokens)
 
             # Check agent cache — reuse the AIAgent from the previous message
             # in this session to preserve the frozen system prompt and tool
@@ -7410,8 +7425,6 @@ class GatewayRunner:
                 combined_ephemeral,
             )
             agent = None
-            _cache_lock = getattr(self, "_agent_cache_lock", None)
-            _cache = getattr(self, "_agent_cache", None)
             if _cache_lock and _cache is not None:
                 with _cache_lock:
                     cached = _cache.get(session_key)

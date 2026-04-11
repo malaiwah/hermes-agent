@@ -59,11 +59,18 @@ def _coerce_int(value: Any, default: int) -> int:
         return default
 
 
-def choose_cheap_model_route(user_message: str, routing_config: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+def choose_cheap_model_route(
+    user_message: str,
+    routing_config: Optional[Dict[str, Any]],
+    context_tokens: int = 0,
+) -> Optional[Dict[str, Any]]:
     """Return the configured cheap-model route when a message looks simple.
 
     Conservative by design: if the message has signs of code/tool/debugging/
-    long-form work, keep the primary model.
+    long-form work, keep the primary model.  Also skips routing when the
+    conversation context is too large for the cheap model to be fast —
+    the whole point of routing is speed, and a slow prefill on a small
+    model defeats the purpose.
     """
     cfg = routing_config or {}
     if not _coerce_bool(cfg.get("enabled"), False):
@@ -75,6 +82,13 @@ def choose_cheap_model_route(user_message: str, routing_config: Optional[Dict[st
     provider = str(cheap_model.get("provider") or "").strip().lower()
     model = str(cheap_model.get("model") or "").strip()
     if not provider or not model:
+        return None
+
+    # Context size guard: don't route to the cheap model if the conversation
+    # context exceeds max_context_tokens.  The cheap model is meant to be fast;
+    # sending it a large context makes it slower than the primary model.
+    max_context = _coerce_int(cfg.get("max_context_tokens"), 0)
+    if max_context > 0 and context_tokens > max_context:
         return None
 
     text = (user_message or "").strip()
@@ -107,12 +121,17 @@ def choose_cheap_model_route(user_message: str, routing_config: Optional[Dict[st
     return route
 
 
-def resolve_turn_route(user_message: str, routing_config: Optional[Dict[str, Any]], primary: Dict[str, Any]) -> Dict[str, Any]:
+def resolve_turn_route(
+    user_message: str,
+    routing_config: Optional[Dict[str, Any]],
+    primary: Dict[str, Any],
+    context_tokens: int = 0,
+) -> Dict[str, Any]:
     """Resolve the effective model/runtime for one turn.
 
     Returns a dict with model/runtime/signature/label fields.
     """
-    route = choose_cheap_model_route(user_message, routing_config)
+    route = choose_cheap_model_route(user_message, routing_config, context_tokens=context_tokens)
     if not route:
         return {
             "model": primary.get("model"),
