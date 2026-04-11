@@ -597,6 +597,7 @@ def delegate_task(
     workspace_mappings: Optional[List[Dict[str, Any]]] = None,
     tasks: Optional[List[Dict[str, Any]]] = None,
     max_iterations: Optional[int] = None,
+    model: Optional[str] = None,
     acp_command: Optional[str] = None,
     acp_args: Optional[List[str]] = None,
     parent_agent=None,
@@ -637,6 +638,13 @@ def delegate_task(
         creds = _resolve_delegation_credentials(cfg, parent_agent)
     except ValueError as exc:
         return tool_error(str(exc))
+
+    # Per-call model override: the agent can request a specific model for this
+    # delegation (e.g. a smaller/faster model for simple tasks).  The model name
+    # must be resolvable via the same provider as the delegation config, or the
+    # parent's provider if no delegation provider is configured.
+    if model and isinstance(model, str) and model.strip():
+        creds["model"] = model.strip()
 
     # Normalize to task list
     max_children = _get_max_concurrent_children()
@@ -688,9 +696,11 @@ def delegate_task(
     children = []
     try:
         for i, t in enumerate(task_list):
+            # Per-task model override takes precedence over top-level model
+            task_model = str(t.get("model") or "").strip() or creds["model"]
             child = _build_child_agent(
                 task_index=i, goal=t["goal"], context=t.get("context"),
-                toolsets=t.get("toolsets") or toolsets, model=creds["model"],
+                toolsets=t.get("toolsets") or toolsets, model=task_model,
                 max_iterations=effective_max_iter, parent_agent=parent_agent,
                 override_provider=creds["provider"], override_base_url=creds["base_url"],
                 override_api_key=creds["api_key"],
@@ -972,7 +982,11 @@ DELEGATE_TASK_SCHEMA = {
         "- Each subagent gets its own terminal session (separate working directory and state).\n"
         "- workspace_visibility defaults to 'inherit'. Use 'full_ro' or 'mapped' "
         "when you need stricter filesystem isolation in Docker sandboxes.\n"
-        "- Results are always returned as an array, one entry per task."
+        "- Results are always returned as an array, one entry per task.\n"
+        "- You can route subagents to a smaller/faster model for simple tasks "
+        "(e.g. summarization, formatting, simple lookups) by setting 'model'. "
+        "Use the default (primary model) for complex reasoning, debugging, "
+        "or multi-step implementation work."
     ),
     "parameters": {
         "type": "object",
@@ -1002,6 +1016,16 @@ DELEGATE_TASK_SCHEMA = {
                     "Common patterns: ['terminal', 'file'] for code work, "
                     "['web'] for research, ['terminal', 'file', 'web'] for "
                     "full-stack tasks."
+                ),
+            },
+            "model": {
+                "type": "string",
+                "description": (
+                    "Model to use for this subagent. Default: inherits from "
+                    "delegation config or parent model. Use a smaller/faster model "
+                    "(e.g. 'gemma4-nothink') for simple tasks like summarization, "
+                    "formatting, or lookups. Keep the default for complex reasoning, "
+                    "debugging, or multi-step implementation."
                 ),
             },
             "workspace_visibility": {
@@ -1052,6 +1076,10 @@ DELEGATE_TASK_SCHEMA = {
                             "type": "array",
                             "items": {"type": "string"},
                             "description": "Toolsets for this specific task. Use 'web' for network access, 'terminal' for shell.",
+                        },
+                        "model": {
+                            "type": "string",
+                            "description": "Model override for this task (e.g. 'gemma4-nothink' for simple work).",
                         },
                         "acp_command": {
                             "type": "string",
