@@ -79,6 +79,29 @@ class TestDelegateRequirements(unittest.TestCase):
         self.assertIn("model", task_item_props)
         self.assertEqual(task_item_props["model"]["type"], "string")
 
+    def test_schema_documents_provider_switch_syntax(self):
+        """The model schema must teach the LLM the correct --provider syntax.
+
+        Regression guard: an earlier version of the schema just said
+        "supports optional --provider flag" without showing a concrete
+        example. The LLM consequently invented 'openrouter:model-name'
+        colon-prefix syntax (which is NOT supported) and the request
+        was sent raw to the parent's provider, which rejected it.
+        """
+        props = DELEGATE_TASK_SCHEMA["parameters"]["properties"]
+        top_desc = props["model"]["description"]
+        task_desc = props["tasks"]["items"]["properties"]["model"]["description"]
+
+        # Concrete --provider example must appear (top-level)
+        self.assertIn("--provider openrouter", top_desc)
+        # Anti-pattern must be explicitly called out
+        self.assertIn("colon-prefix", top_desc.lower())
+        self.assertIn("DO NOT", top_desc)
+
+        # Per-task description must also show the --provider syntax
+        self.assertIn("--provider", task_desc)
+        self.assertIn("colon", task_desc.lower())
+
 
 class TestChildSystemPrompt(unittest.TestCase):
     def test_goal_only(self):

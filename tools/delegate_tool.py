@@ -1200,10 +1200,15 @@ DELEGATE_TASK_SCHEMA = {
         "- Tasks needing user interaction -> subagents cannot use clarify\n\n"
         "MODEL SELECTION:\n"
         "- Pass 'model' (top-level or per-task) to route a subagent to a "
-        "specific model, using the same syntax as the /model slash command "
-        "('sonnet', 'glm-4.7', 'gpt-5', 'haiku', etc.). Default: inherit "
-        "parent's model. Use this to match model capability to task "
-        "complexity (cheap/fast for simple tasks, strong for reasoning-heavy).\n\n"
+        "specific model. Same syntax as the /model slash command:\n"
+        "  * Bare IDs / aliases on current provider: 'glm-4.7', 'sonnet', "
+        "'haiku', 'gpt-5'\n"
+        "  * Provider switch: append '--provider <slug>' — e.g. "
+        "'stepfun/step-3.5-flash --provider openrouter'\n"
+        "  * Do NOT use 'provider:model' colon-prefix syntax. It's unsupported.\n"
+        "- See the 'model' parameter description for the full syntax guide. "
+        "Use this to match model capability to task complexity (cheap/fast "
+        "for lookups, strong for reasoning-heavy).\n\n"
         "IMPORTANT:\n"
         "- Subagents have NO memory of your conversation. Pass all relevant "
         "info (file paths, error messages, constraints) via the 'context' field.\n"
@@ -1293,11 +1298,19 @@ DELEGATE_TASK_SCHEMA = {
             "model": {
                 "type": "string",
                 "description": (
-                    "Override the subagent's model. Accepts tier names "
-                    "('small', 'medium', 'large') or model names/aliases "
-                    "resolved via the /model pipeline. Use 'small' for "
-                    "fast/cheap tasks, 'large' for complex reasoning or "
-                    "peer review. Call list_models to see available options. "
+                    "Override the subagent's model for this delegation. "
+                    "Accepts tier names ('small', 'medium', 'large') that "
+                    "resolve to configured models (call list_models to see "
+                    "available tiers), or model names/aliases resolved via "
+                    "the /model pipeline.\n\n"
+                    "SYNTAX:\n"
+                    "1. Tier name — 'small', 'medium', 'large'\n"
+                    "2. Bare model ID — 'glm-4.7', 'claude-sonnet-4-6'\n"
+                    "3. Short alias — 'sonnet', 'opus', 'haiku', 'gemini'\n"
+                    "4. Provider switch — 'model --provider slug'\n\n"
+                    "DO NOT use 'provider:model' colon-prefix syntax.\n\n"
+                    "Match model to task: 'small' for lookups, default for "
+                    "standard work, 'large' for complex reasoning or review. "
                     "In batch mode, prefer per-task 'model' inside 'tasks'."
                 ),
             },
@@ -1316,8 +1329,9 @@ DELEGATE_TASK_SCHEMA = {
                         "model": {
                             "type": "string",
                             "description": (
-                                "Per-task model — tier name ('small', 'large') or "
-                                "model name/alias. Overrides top-level 'model'."
+                                "Per-task model — tier name ('small', 'large') "
+                                "or model name/alias. Same syntax as top-level "
+                                "'model'. Overrides for this task only."
                             ),
                         },
                         "acp_command": {
