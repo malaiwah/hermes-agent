@@ -7419,7 +7419,11 @@ class GatewayRunner:
             # a large context, trim conversation history from the head (keep
             # the most recent messages) to fit within the cheap model's
             # comfortable context window.
+            # NOTE: uses _trimmed_history to avoid reassigning the `history`
+            # parameter — Python treats any assignment as local, causing
+            # UnboundLocalError on earlier reads.
             _trim_to = turn_route.get("trim_to_tokens")
+            _trimmed_history = None
             if _trim_to and history:
                 _kept = []
                 _token_budget = _trim_to
@@ -7429,12 +7433,13 @@ class GatewayRunner:
                         break
                     _kept.append(msg)
                     _token_budget -= msg_tokens
-                history = list(reversed(_kept))
-                logger.info(
-                    "smart_model_routing: trimmed history from ~%s to ~%s tokens (%d→%d messages)",
-                    f"{_est_context_tokens:,}", f"{_trim_to:,}",
-                    len(history) + (len(history) - len(_kept)), len(history),
-                )
+                if len(_kept) < len(history):
+                    _trimmed_history = list(reversed(_kept))
+                    logger.info(
+                        "smart_model_routing: trimmed history from ~%s to ~%s tokens (%d→%d messages)",
+                        f"{_est_context_tokens:,}", f"{_trim_to:,}",
+                        len(history), len(_trimmed_history),
+                    )
 
             # Check agent cache — reuse the AIAgent from the previous message
             # in this session to preserve the frozen system prompt and tool
@@ -7525,7 +7530,8 @@ class GatewayRunner:
             #      - These must be passed through intact so the API sees valid
             #        assistant→tool sequences (dropping tool_calls causes 500 errors)
             agent_history = []
-            for msg in history:
+            _effective_history = _trimmed_history if _trimmed_history is not None else history
+            for msg in _effective_history:
                 role = msg.get("role")
                 if not role:
                     continue
