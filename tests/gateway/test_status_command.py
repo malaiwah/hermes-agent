@@ -227,8 +227,9 @@ async def test_status_command_shows_live_context_metrics():
 
 @pytest.mark.asyncio
 async def test_status_command_shows_idle_context_from_last_prompt_tokens(monkeypatch):
-    """When no live agent exists but session has last_prompt_tokens, show
-    estimated context from model metadata (idle fallback, inspired by PR #4678)."""
+    """When no live agent exists but session has last_prompt_tokens and
+    compression_count, show estimated context and persisted compaction
+    count (idle fallback, inspired by PR #4678 and issue #7317)."""
     session_entry = SessionEntry(
         session_key=build_session_key(_make_source()),
         session_id="sess-1",
@@ -237,6 +238,7 @@ async def test_status_command_shows_idle_context_from_last_prompt_tokens(monkeyp
         platform=Platform.TELEGRAM,
         chat_type="dm",
         last_prompt_tokens=45000,
+        compression_count=3,
     )
     runner = _make_runner(session_entry)
     runner._session_db.get_session.return_value = {
@@ -250,8 +252,7 @@ async def test_status_command_shows_idle_context_from_last_prompt_tokens(monkeyp
 
     result = await runner._handle_message(_make_event("/status"))
 
-    assert "**Context:** 45,000 / 200,000 (22%)" in result
-    assert "**Compactions:**" not in result
+    assert "**Context:** 45,000 / 200,000 (22%) · **Compactions:** 3" in result
 
 
 @pytest.mark.asyncio
@@ -454,6 +455,7 @@ async def test_handle_message_persists_agent_token_counts(monkeypatch):
     runner.session_store.update_session.assert_called_once_with(
         session_entry.session_key,
         last_prompt_tokens=80,
+        compression_count=0,
     )
 
 

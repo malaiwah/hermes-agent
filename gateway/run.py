@@ -3597,6 +3597,7 @@ class GatewayRunner:
             self.session_store.update_session(
                 session_entry.session_key,
                 last_prompt_tokens=agent_result.get("last_prompt_tokens", 0),
+                compression_count=agent_result.get("compression_count", 0),
             )
 
             # Auto voice reply: send TTS audio before the text response
@@ -4054,9 +4055,16 @@ class GatewayRunner:
         else:
             # Idle fallback: estimate context from last known prompt tokens
             # and model's context window (inspired by PR #4678).
+            # Also restore persisted compression_count so idle sessions
+            # can show compression history.
             idle_prompt = safe_status_int(
                 getattr(session_entry, "last_prompt_tokens", 0), default=0
             )
+            idle_compactions = safe_status_int(
+                getattr(session_entry, "compression_count", 0), default=0
+            )
+            if idle_compactions:
+                compactions = idle_compactions
             if idle_prompt or model:
                 try:
                     from agent.model_metadata import get_model_context_length
