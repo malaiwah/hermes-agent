@@ -126,6 +126,12 @@ if _config_path.exists():
                 "docker_volumes": "TERMINAL_DOCKER_VOLUMES",
                 "sandbox_dir": "TERMINAL_SANDBOX_DIR",
                 "persistent_shell": "TERMINAL_PERSISTENT_SHELL",
+                "podman_image": "TERMINAL_PODMAN_IMAGE",
+                "podman_rootful": "TERMINAL_PODMAN_ROOTFUL",
+                "podman_privileged": "TERMINAL_PODMAN_PRIVILEGED",
+                "podman_userns": "TERMINAL_PODMAN_USERNS",
+                "podman_extra_capabilities": "TERMINAL_PODMAN_EXTRA_CAPABILITIES",
+                "podman_extra_args": "TERMINAL_PODMAN_EXTRA_ARGS",
             }
             for _cfg_key, _env_var in _terminal_env_map.items():
                 if _cfg_key in _terminal_cfg:

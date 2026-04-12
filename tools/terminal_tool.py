@@ -507,6 +507,7 @@ from tools.environments.local import LocalEnvironment as _LocalEnvironment
 from tools.environments.singularity import SingularityEnvironment as _SingularityEnvironment
 from tools.environments.ssh import SSHEnvironment as _SSHEnvironment
 from tools.environments.docker import DockerEnvironment as _DockerEnvironment
+from tools.environments.podman import PodmanEnvironment as _PodmanEnvironment
 from tools.environments.modal import ModalEnvironment as _ModalEnvironment
 from tools.environments.managed_modal import ManagedModalEnvironment as _ManagedModalEnvironment
 from tools.managed_tool_gateway import is_managed_tool_gateway_ready
@@ -624,7 +625,7 @@ def _get_env_config() -> Dict[str, Any]:
     cwd = os.getenv("TERMINAL_CWD", default_cwd)
     host_cwd = None
     host_prefixes = ("/Users/", "/home/", "C:\\", "C:/")
-    if env_type == "docker" and mount_docker_cwd:
+    if env_type in ("docker", "podman") and mount_docker_cwd:
         docker_cwd_source = os.getenv("TERMINAL_CWD") or os.getcwd()
         candidate = os.path.abspath(os.path.expanduser(docker_cwd_source))
         if (
@@ -633,7 +634,7 @@ def _get_env_config() -> Dict[str, Any]:
         ):
             host_cwd = candidate
             cwd = "/workspace"
-    elif env_type in ("modal", "docker", "singularity", "daytona") and cwd:
+    elif env_type in ("modal", "docker", "podman", "singularity", "daytona") and cwd:
         # Host paths and relative paths that won't work inside containers
         is_host_path = any(cwd.startswith(p) for p in host_prefixes)
         is_relative = not os.path.isabs(cwd)  # e.g. "." or "src/"
@@ -675,6 +676,13 @@ def _get_env_config() -> Dict[str, Any]:
         "container_disk": _parse_env_var("TERMINAL_CONTAINER_DISK", "51200"),        # MB (default 50GB)
         "container_persistent": os.getenv("TERMINAL_CONTAINER_PERSISTENT", "true").lower() in ("true", "1", "yes"),
         "docker_volumes": _parse_env_var("TERMINAL_DOCKER_VOLUMES", "[]", json.loads, "valid JSON"),
+        # Podman-specific config
+        "podman_image": os.getenv("TERMINAL_PODMAN_IMAGE", f"docker.io/{default_image}"),
+        "podman_rootful": os.getenv("TERMINAL_PODMAN_ROOTFUL", str(cfg.get("podman_rootful", "false"))).lower() in ("true", "1", "yes"),
+        "podman_privileged": os.getenv("TERMINAL_PODMAN_PRIVILEGED", str(cfg.get("podman_privileged", "false"))).lower() in ("true", "1", "yes"),
+        "podman_userns": os.getenv("TERMINAL_PODMAN_USERNS", str(cfg.get("podman_userns", ""))),
+        "podman_extra_capabilities": _parse_env_var("TERMINAL_PODMAN_EXTRA_CAPABILITIES", "[]", json.loads, "valid JSON"),
+        "podman_extra_args": _parse_env_var("TERMINAL_PODMAN_EXTRA_ARGS", "[]", json.loads, "valid JSON"),
     }
 
 
@@ -731,7 +739,25 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
             forward_env=docker_forward_env,
             env=docker_env,
         )
-    
+
+    elif env_type == "podman":
+        return _PodmanEnvironment(
+            image=image, cwd=cwd, timeout=timeout,
+            cpu=cpu, memory=memory, disk=disk,
+            persistent_filesystem=persistent, task_id=task_id,
+            volumes=volumes,
+            host_cwd=host_cwd,
+            auto_mount_cwd=cc.get("docker_mount_cwd_to_workspace", False),
+            forward_env=docker_forward_env,
+            env=docker_env,
+            network=cc.get("network", True),
+            rootful=cc.get("podman_rootful", False),
+            privileged=cc.get("podman_privileged", False),
+            userns=cc.get("podman_userns", ""),
+            extra_capabilities=cc.get("podman_extra_capabilities", []),
+            extra_args=cc.get("podman_extra_args", []),
+        )
+
     elif env_type == "singularity":
         return _SingularityEnvironment(
             image=image, cwd=cwd, timeout=timeout,
@@ -813,7 +839,7 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
         )
 
     else:
-        raise ValueError(f"Unknown environment type: {env_type}. Use 'local', 'docker', 'singularity', 'modal', 'daytona', or 'ssh'")
+        raise ValueError(f"Unknown environment type: {env_type}. Use 'local', 'docker', 'podman', 'singularity', 'modal', 'daytona', or 'ssh'")
 
 
 def _cleanup_inactive_envs(lifetime_seconds: int = 300):
@@ -1198,6 +1224,8 @@ def terminal_tool(
         # Select image based on env type, with per-task override support
         if env_type == "docker":
             image = overrides.get("docker_image") or config["docker_image"]
+        elif env_type == "podman":
+            image = overrides.get("podman_image") or config["podman_image"]
         elif env_type == "singularity":
             image = overrides.get("singularity_image") or config["singularity_image"]
         elif env_type == "modal":
@@ -1268,7 +1296,7 @@ def terminal_tool(
                             }
 
                         container_config = None
-                        if env_type in ("docker", "singularity", "modal", "daytona"):
+                        if env_type in ("docker", "podman", "singularity", "modal", "daytona"):
                             container_config = {
                                 "container_cpu": config.get("container_cpu", 1),
                                 "container_memory": config.get("container_memory", 5120),
@@ -1278,6 +1306,12 @@ def terminal_tool(
                                 "docker_volumes": config.get("docker_volumes", []),
                                 "docker_mount_cwd_to_workspace": config.get("docker_mount_cwd_to_workspace", False),
                             }
+                            if env_type == "podman":
+                                container_config["podman_rootful"] = config.get("podman_rootful", False)
+                                container_config["podman_privileged"] = config.get("podman_privileged", False)
+                                container_config["podman_userns"] = config.get("podman_userns", "")
+                                container_config["podman_extra_capabilities"] = config.get("podman_extra_capabilities", [])
+                                container_config["podman_extra_args"] = config.get("podman_extra_args", [])
 
                         local_config = None
                         if env_type == "local":
@@ -1571,6 +1605,15 @@ def check_terminal_requirements() -> bool:
                 logger.error("Docker executable not found in PATH or common install locations")
                 return False
             result = subprocess.run([docker, "version"], capture_output=True, timeout=5)
+            return result.returncode == 0
+
+        elif env_type == "podman":
+            from tools.environments.podman import find_podman
+            podman = find_podman()
+            if not podman:
+                logger.error("Podman executable not found in PATH or common install locations")
+                return False
+            result = subprocess.run([podman, "version"], capture_output=True, timeout=5)
             return result.returncode == 0
 
         elif env_type == "singularity":

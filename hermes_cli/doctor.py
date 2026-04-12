@@ -558,6 +558,30 @@ def run_doctor(args):
             else:
                 check_warn("docker not found", "(optional)")
     
+    # Podman (optional)
+    if terminal_env == "podman":
+        if shutil.which("podman"):
+            try:
+                result = subprocess.run(["podman", "version"], capture_output=True, timeout=5)
+            except Exception:
+                result = None
+            if result is not None and result.returncode == 0:
+                check_ok("podman", "(available)")
+            else:
+                check_fail("podman found but not functional")
+                issues.append("Check Podman installation")
+        else:
+            check_fail("podman not found", "(required for TERMINAL_ENV=podman)")
+            issues.append("Install Podman or change TERMINAL_ENV")
+    else:
+        if shutil.which("podman"):
+            check_ok("podman", "(optional)")
+        else:
+            if _is_termux():
+                check_info("Podman backend is not available inside Termux (expected on Android)")
+            else:
+                check_warn("podman not found", "(optional)")
+
     # SSH (if using ssh backend)
     if terminal_env == "ssh":
         ssh_host = os.getenv("TERMINAL_SSH_HOST")

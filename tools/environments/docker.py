@@ -257,8 +257,8 @@ class DockerEnvironment(BaseEnvironment):
             logger.warning(f"docker_volumes config is not a list: {volumes!r}")
             volumes = []
 
-        # Fail fast if Docker is not available.
-        _ensure_docker_available()
+        # Fail fast if the container CLI is not available.
+        self._ensure_cli_available()
 
         # Build resource limit args
         resource_args = []
@@ -398,24 +398,20 @@ class DockerEnvironment(BaseEnvironment):
             env_args.extend(["-e", f"{key}={self._env[key]}"])
 
         logger.info(f"Docker volume_args: {volume_args}")
-        all_run_args = list(_SECURITY_ARGS) + writable_args + resource_args + volume_args + env_args
+        all_run_args = (
+            list(self._get_security_args())
+            + writable_args + resource_args + volume_args + env_args
+            + list(self._get_extra_run_args())
+        )
         logger.info(f"Docker run_args: {all_run_args}")
 
-        # Resolve the docker executable once so it works even when
+        # Resolve the container CLI executable once so it works even when
         # /usr/local/bin is not in PATH (common on macOS gateway/service).
-        self._docker_exe = find_docker() or "docker"
+        self._docker_exe = self._resolve_cli_binary()
 
-        # Start the container directly via `docker run -d`.
+        # Start the container directly via `<cli> run -d`.
         container_name = f"hermes-{uuid.uuid4().hex[:8]}"
-        run_cmd = [
-            self._docker_exe, "run", "-d",
-            "--init",           # tini/catatonit as PID 1 — reaps zombie children
-            "--name", container_name,
-            "-w", cwd,
-            *all_run_args,
-            image,
-            "sleep", "infinity",  # no fixed lifetime — idle reaper handles cleanup
-        ]
+        run_cmd = self._build_run_cmd(container_name, cwd, all_run_args, image)
         logger.debug(f"Starting container: {' '.join(run_cmd)}")
         result = subprocess.run(
             run_cmd,
@@ -434,6 +430,40 @@ class DockerEnvironment(BaseEnvironment):
 
         # Initialize session snapshot inside the container
         self.init_session()
+
+    # ── Hook methods for subclasses (e.g. PodmanEnvironment) ──────────
+
+    def _ensure_cli_available(self) -> None:
+        """Verify the container CLI binary is functional. Override in subclasses."""
+        _ensure_docker_available()
+
+    def _resolve_cli_binary(self) -> str:
+        """Return the path to the container CLI binary. Override in subclasses."""
+        return find_docker() or "docker"
+
+    def _get_security_args(self) -> list[str]:
+        """Return baseline security flags for ``run``. Override in subclasses."""
+        return list(_SECURITY_ARGS)
+
+    def _get_extra_run_args(self) -> list[str]:
+        """Return additional ``run`` flags. Override in subclasses."""
+        return []
+
+    def _build_run_cmd(
+        self, container_name: str, cwd: str, all_run_args: list[str], image: str,
+    ) -> list[str]:
+        """Assemble the full ``<cli> run -d ...`` command. Override in subclasses."""
+        return [
+            self._docker_exe, "run", "-d",
+            "--init",           # tini/catatonit as PID 1 — reaps zombie children
+            "--name", container_name,
+            "-w", cwd,
+            *all_run_args,
+            image,
+            "sleep", "infinity",  # no fixed lifetime — idle reaper handles cleanup
+        ]
+
+    # ── End hook methods ────────────────────────────────────────────
 
     def _build_init_env_args(self) -> list[str]:
         """Build -e KEY=VALUE args for injecting host env vars into init_session.
