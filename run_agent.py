@@ -6749,6 +6749,9 @@ class AIAgent:
                 toolsets=function_args.get("toolsets"),
                 tasks=function_args.get("tasks"),
                 max_iterations=function_args.get("max_iterations"),
+                acp_command=function_args.get("acp_command"),
+                acp_args=function_args.get("acp_args"),
+                share_sandbox=function_args.get("share_sandbox"),
                 parent_agent=self,
             )
         else:
@@ -7131,6 +7134,9 @@ class AIAgent:
                         toolsets=function_args.get("toolsets"),
                         tasks=tasks_arg,
                         max_iterations=function_args.get("max_iterations"),
+                        acp_command=function_args.get("acp_command"),
+                        acp_args=function_args.get("acp_args"),
+                        share_sandbox=function_args.get("share_sandbox"),
                         parent_agent=self,
                     )
                     _delegate_result = function_result
@@ -7559,6 +7565,8 @@ class AIAgent:
         self._persist_user_message_override = persist_user_message
         # Generate unique task_id if not provided to isolate VMs between concurrent tasks
         effective_task_id = task_id or str(uuid.uuid4())
+        # Expose on the agent so delegate_task share_sandbox can read the parent's task_id
+        self._effective_task_id = effective_task_id
         
         # Reset retry counters and iteration budget at the start of each turn
         # so subagent usage from a previous turn doesn't eat into the next one.

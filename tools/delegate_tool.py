@@ -455,7 +455,13 @@ def _run_single_child(
     _heartbeat_thread.start()
 
     try:
-        result = child.run_conversation(user_message=goal)
+        # When share_sandbox is True, reuse the parent's sandbox container
+        # by passing the parent's task_id instead of generating a new one.
+        child_task_id = None
+        if getattr(child, '_share_sandbox', False) and parent_agent is not None:
+            child_task_id = getattr(parent_agent, '_effective_task_id', None)
+
+        result = child.run_conversation(user_message=goal, task_id=child_task_id)
 
         # Flush any remaining batched progress to gateway
         if child_progress_cb and hasattr(child_progress_cb, '_flush'):
@@ -614,6 +620,7 @@ def delegate_task(
     max_iterations: Optional[int] = None,
     acp_command: Optional[str] = None,
     acp_args: Optional[List[str]] = None,
+    share_sandbox: Optional[bool] = None,
     parent_agent=None,
 ) -> str:
     """
@@ -666,7 +673,7 @@ def delegate_task(
             )
         task_list = tasks
     elif goal and isinstance(goal, str) and goal.strip():
-        task_list = [{"goal": goal, "context": context, "toolsets": toolsets}]
+        task_list = [{"goal": goal, "context": context, "toolsets": toolsets, "share_sandbox": share_sandbox}]
     else:
         return tool_error("Provide either 'goal' (single task) or 'tasks' (batch).")
 
@@ -709,6 +716,19 @@ def delegate_task(
             )
             # Override with correct parent tool names (before child construction mutated global)
             child._delegate_saved_tool_names = _parent_tool_names
+            # Store share_sandbox flag for _run_single_child to use.
+            # When True, child reuses the parent's sandbox container.
+            task_share = bool(t.get("share_sandbox") or share_sandbox)
+            child._share_sandbox = task_share
+            if task_share:
+                # Inform the child it's sharing the parent's sandbox
+                child.ephemeral_system_prompt = (
+                    getattr(child, 'ephemeral_system_prompt', '') +
+                    "\n\nSHARED SANDBOX: You are sharing the parent agent's sandbox "
+                    "container. Files you create or modify are visible to the parent "
+                    "immediately. The working directory and installed packages are "
+                    "already set up — do not reinstall or re-clone."
+                )
             children.append((i, t, child))
     finally:
         # Authoritative restore: reset global to parent's tool names after all children built
@@ -971,7 +991,8 @@ DELEGATE_TASK_SCHEMA = {
         "info (file paths, error messages, constraints) via the 'context' field.\n"
         "- Subagents CANNOT call: delegate_task, clarify, memory, send_message, "
         "execute_code.\n"
-        "- Each subagent gets its own terminal session (separate working directory and state).\n"
+        "- Each subagent gets its own terminal session (separate working directory and state) "
+        "unless share_sandbox=true, which reuses the parent's sandbox.\n"
         "- Results are always returned as an array, one entry per task."
     ),
     "parameters": {
@@ -1016,6 +1037,10 @@ DELEGATE_TASK_SCHEMA = {
                             "items": {"type": "string"},
                             "description": "Toolsets for this specific task. Use 'web' for network access, 'terminal' for shell.",
                         },
+                        "share_sandbox": {
+                            "type": "boolean",
+                            "description": "Share the parent's sandbox instead of creating an isolated one for this task.",
+                        },
                         "acp_command": {
                             "type": "string",
                             "description": "Per-task ACP command override (e.g. 'claude'). Overrides the top-level acp_command for this task only.",
@@ -1042,6 +1067,17 @@ DELEGATE_TASK_SCHEMA = {
                 "description": (
                     "Max tool-calling turns per subagent (default: 50). "
                     "Only set lower for simple tasks."
+                ),
+            },
+            "share_sandbox": {
+                "type": "boolean",
+                "description": (
+                    "When true, the subagent shares the parent's sandbox container "
+                    "instead of getting an isolated one. The subagent sees the same "
+                    "filesystem, installed packages, and working directory as the parent. "
+                    "Use this for explorer subagents that need access to the parent's "
+                    "prepared workspace (e.g. source code already cloned, dependencies "
+                    "installed). Default: false (isolated sandbox)."
                 ),
             },
             "acp_command": {
@@ -1082,6 +1118,7 @@ registry.register(
         max_iterations=args.get("max_iterations"),
         acp_command=args.get("acp_command"),
         acp_args=args.get("acp_args"),
+        share_sandbox=args.get("share_sandbox"),
         parent_agent=kw.get("parent_agent")),
     check_fn=check_delegate_requirements,
     emoji="🔀",
