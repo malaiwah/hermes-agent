@@ -331,6 +331,7 @@ def _resolve_named_custom_runtime(
     # Check if a credential pool exists for this custom endpoint
     pool_result = _try_resolve_from_custom_pool(base_url, "custom", custom_provider.get("api_mode"))
     if pool_result:
+        pool_result["extra_headers"] = custom_provider.get("extra_headers")
         return pool_result
 
     api_key_candidates = [
