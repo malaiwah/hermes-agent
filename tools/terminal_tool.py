@@ -1693,7 +1693,7 @@ def check_terminal_requirements() -> bool:
 
         else:
             logger.error(
-                "Unknown TERMINAL_ENV '%s'. Use one of: local, docker, singularity, "
+                "Unknown TERMINAL_ENV '%s'. Use one of: local, docker, podman, singularity, "
                 "modal, daytona, ssh.",
                 env_type,
             )
@@ -1734,7 +1734,7 @@ if __name__ == "__main__":
 
     print("\nEnvironment Variables:")
     default_img = "nikolaik/python-nodejs:python3.11-nodejs20"
-    print(f"  TERMINAL_ENV: {os.getenv('TERMINAL_ENV', 'local')} (local/docker/singularity/modal/daytona/ssh)")
+    print(f"  TERMINAL_ENV: {os.getenv('TERMINAL_ENV', 'local')} (local/docker/podman/singularity/modal/daytona/ssh)")
     print(f"  TERMINAL_DOCKER_IMAGE: {os.getenv('TERMINAL_DOCKER_IMAGE', default_img)}")
     print(f"  TERMINAL_SINGULARITY_IMAGE: {os.getenv('TERMINAL_SINGULARITY_IMAGE', f'docker://{default_img}')}")
     print(f"  TERMINAL_MODAL_IMAGE: {os.getenv('TERMINAL_MODAL_IMAGE', default_img)}")

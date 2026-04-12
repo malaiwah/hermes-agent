@@ -313,7 +313,7 @@ class DockerEnvironment(BaseEnvironment):
         self._home_dir: Optional[str] = None
         writable_args = []
         if self._persistent:
-            sandbox = get_sandbox_dir() / "docker" / task_id
+            sandbox = get_sandbox_dir() / self._sandbox_subdir / task_id
             self._home_dir = str(sandbox / "home")
             os.makedirs(self._home_dir, exist_ok=True)
             writable_args.extend([
@@ -463,6 +463,20 @@ class DockerEnvironment(BaseEnvironment):
             "sleep", "infinity",  # no fixed lifetime — idle reaper handles cleanup
         ]
 
+    def _cli_cmd(self, args: list[str]) -> list[str]:
+        """Prefix a CLI command list if needed (e.g. sudo). Override in subclasses."""
+        return args
+
+    @property
+    def _cli_shell_prefix(self) -> str:
+        """Shell prefix for background cleanup commands (e.g. "sudo "). Override in subclasses."""
+        return ""
+
+    @property
+    def _sandbox_subdir(self) -> str:
+        """Subdirectory name under the sandbox dir for persistent workspaces."""
+        return "docker"
+
     # ── End hook methods ────────────────────────────────────────────
 
     def _build_init_env_args(self) -> list[str]:
@@ -500,7 +514,7 @@ class DockerEnvironment(BaseEnvironment):
     def _run_bash(self, cmd_string: str, *, login: bool = False,
                   timeout: int = 120,
                   stdin_data: str | None = None) -> subprocess.Popen:
-        """Spawn a bash process inside the Docker container."""
+        """Spawn a bash process inside the container."""
         assert self._container_id, "Container not started"
         cmd = [self._docker_exe, "exec"]
         if stdin_data is not None:
@@ -518,7 +532,7 @@ class DockerEnvironment(BaseEnvironment):
         else:
             cmd.extend(["bash", "-c", cmd_string])
 
-        return _popen_bash(cmd, stdin_data)
+        return _popen_bash(self._cli_cmd(cmd), stdin_data)
 
     @staticmethod
     def _storage_opt_supported() -> bool:
@@ -563,11 +577,12 @@ class DockerEnvironment(BaseEnvironment):
     def cleanup(self):
         """Stop and remove the container. Bind-mount dirs persist if persistent=True."""
         if self._container_id:
+            pfx = self._cli_shell_prefix
             try:
                 # Stop in background so cleanup doesn't block
                 stop_cmd = (
-                    f"(timeout 60 {self._docker_exe} stop {self._container_id} || "
-                    f"{self._docker_exe} rm -f {self._container_id}) >/dev/null 2>&1 &"
+                    f"(timeout 60 {pfx}{self._docker_exe} stop {self._container_id} || "
+                    f"{pfx}{self._docker_exe} rm -f {self._container_id}) >/dev/null 2>&1 &"
                 )
                 subprocess.Popen(stop_cmd, shell=True)
             except Exception as e:
@@ -577,7 +592,7 @@ class DockerEnvironment(BaseEnvironment):
                 # Also schedule removal (stop only leaves it as stopped)
                 try:
                     subprocess.Popen(
-                        f"sleep 3 && {self._docker_exe} rm -f {self._container_id} >/dev/null 2>&1 &",
+                        f"sleep 3 && {pfx}{self._docker_exe} rm -f {self._container_id} >/dev/null 2>&1 &",
                         shell=True,
                     )
                 except Exception:

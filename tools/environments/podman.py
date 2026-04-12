@@ -116,7 +116,8 @@ class PodmanEnvironment(DockerEnvironment):
         privileged: bool = False,
         userns: str = "",
         extra_capabilities: list[str] | None = None,
-        extra_args: list[str] | None = None,
+        extra_args: list[str] | None = None,  # CAUTION: admin-only, not validated
+
     ):
         # Validate extra_args before anything starts
         if extra_args and not all(isinstance(x, str) for x in extra_args):
@@ -184,60 +185,20 @@ class PodmanEnvironment(DockerEnvironment):
             cmd = ["sudo"] + cmd
         return cmd
 
-    # ── Overrides that need rootful sudo prefix ─────────────────────
+    @staticmethod
+    def _storage_opt_supported() -> bool:
+        """Podman's storage driver does not support per-container --storage-opt size=."""
+        return False
 
-    def _run_bash(self, cmd_string: str, *, login: bool = False,
-                  timeout: int = 120,
-                  stdin_data: str | None = None) -> subprocess.Popen:
-        """Spawn a bash process inside the Podman container."""
-        from tools.environments.base import _popen_bash
+    @property
+    def _sandbox_subdir(self) -> str:
+        return "podman"
 
-        assert self._container_id, "Container not started"
-        cmd = [self._docker_exe, "exec"]
-
+    def _cli_cmd(self, args: list[str]) -> list[str]:
         if self._rootful:
-            cmd = ["sudo"] + cmd
+            return ["sudo"] + args
+        return args
 
-        if stdin_data is not None:
-            cmd.append("-i")
-
-        if login:
-            cmd.extend(self._init_env_args)
-
-        cmd.extend([self._container_id])
-
-        if login:
-            cmd.extend(["bash", "-l", "-c", cmd_string])
-        else:
-            cmd.extend(["bash", "-c", cmd_string])
-
-        return _popen_bash(cmd, stdin_data)
-
-    def cleanup(self):
-        """Stop and remove the container, with sudo prefix when rootful."""
-        if self._container_id:
-            sudo = "sudo " if self._rootful else ""
-            try:
-                stop_cmd = (
-                    f"(timeout 60 {sudo}{self._docker_exe} stop {self._container_id} || "
-                    f"{sudo}{self._docker_exe} rm -f {self._container_id}) >/dev/null 2>&1 &"
-                )
-                subprocess.Popen(stop_cmd, shell=True)
-            except Exception as e:
-                logger.warning("Failed to stop container %s: %s", self._container_id, e)
-
-            if not self._persistent:
-                try:
-                    subprocess.Popen(
-                        f"sleep 3 && {sudo}{self._docker_exe} rm -f {self._container_id} >/dev/null 2>&1 &",
-                        shell=True,
-                    )
-                except Exception:
-                    pass
-            self._container_id = None
-
-        if not self._persistent:
-            import shutil as _shutil
-            for d in (self._workspace_dir, self._home_dir):
-                if d:
-                    _shutil.rmtree(d, ignore_errors=True)
+    @property
+    def _cli_shell_prefix(self) -> str:
+        return "sudo " if self._rootful else ""
