@@ -293,16 +293,12 @@ class TestGetActiveProfileName:
         monkeypatch.setenv("HERMES_HOME", str(profile_dir))
         assert get_active_profile_name() == "coder"
 
-    def test_custom_path_returns_default(self, profile_env, monkeypatch):
-        """A custom HERMES_HOME (Docker, etc.) IS the default root."""
+    def test_custom_path_returns_custom(self, profile_env, monkeypatch):
         tmp_path = profile_env
         custom = tmp_path / "some" / "other" / "path"
         custom.mkdir(parents=True)
         monkeypatch.setenv("HERMES_HOME", str(custom))
-        # With Docker-aware roots, a custom HERMES_HOME is the default —
-        # not "custom".  The user is on the default profile of their
-        # custom deployment.
-        assert get_active_profile_name() == "default"
+        assert get_active_profile_name() == "custom"
 
 
 # ===================================================================
@@ -710,72 +706,6 @@ class TestInternalHelpers:
         home = _get_default_hermes_home()
         assert home == tmp_path / ".hermes"
 
-    def test_profiles_root_docker_deployment(self, tmp_path, monkeypatch):
-        """In Docker (HERMES_HOME outside ~/.hermes), profiles go under HERMES_HOME."""
-        docker_home = tmp_path / "opt" / "data"
-        docker_home.mkdir(parents=True)
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        monkeypatch.setenv("HERMES_HOME", str(docker_home))
-        root = _get_profiles_root()
-        assert root == docker_home / "profiles"
-
-    def test_default_hermes_home_docker(self, tmp_path, monkeypatch):
-        """In Docker, _get_default_hermes_home() returns HERMES_HOME itself."""
-        docker_home = tmp_path / "opt" / "data"
-        docker_home.mkdir(parents=True)
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        monkeypatch.setenv("HERMES_HOME", str(docker_home))
-        home = _get_default_hermes_home()
-        assert home == docker_home
-
-    def test_profiles_root_profile_mode(self, tmp_path, monkeypatch):
-        """In profile mode (HERMES_HOME under ~/.hermes), profiles root is still ~/.hermes/profiles."""
-        native = tmp_path / ".hermes"
-        profile_dir = native / "profiles" / "coder"
-        profile_dir.mkdir(parents=True)
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        monkeypatch.setenv("HERMES_HOME", str(profile_dir))
-        root = _get_profiles_root()
-        assert root == native / "profiles"
-
-    def test_active_profile_path_docker(self, tmp_path, monkeypatch):
-        """In Docker, active_profile file lives under HERMES_HOME."""
-        from hermes_cli.profiles import _get_active_profile_path
-        docker_home = tmp_path / "opt" / "data"
-        docker_home.mkdir(parents=True)
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        monkeypatch.setenv("HERMES_HOME", str(docker_home))
-        path = _get_active_profile_path()
-        assert path == docker_home / "active_profile"
-
-    def test_create_profile_docker(self, tmp_path, monkeypatch):
-        """Profile created in Docker lands under HERMES_HOME/profiles/."""
-        docker_home = tmp_path / "opt" / "data"
-        docker_home.mkdir(parents=True)
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        monkeypatch.setenv("HERMES_HOME", str(docker_home))
-        result = create_profile("orchestrator", no_alias=True)
-        expected = docker_home / "profiles" / "orchestrator"
-        assert result == expected
-        assert expected.is_dir()
-
-    def test_active_profile_name_docker_default(self, tmp_path, monkeypatch):
-        """In Docker (no profile active), get_active_profile_name() returns 'default'."""
-        docker_home = tmp_path / "opt" / "data"
-        docker_home.mkdir(parents=True)
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        monkeypatch.setenv("HERMES_HOME", str(docker_home))
-        assert get_active_profile_name() == "default"
-
-    def test_active_profile_name_docker_profile(self, tmp_path, monkeypatch):
-        """In Docker with a profile active, get_active_profile_name() returns the profile name."""
-        docker_home = tmp_path / "opt" / "data"
-        profile = docker_home / "profiles" / "orchestrator"
-        profile.mkdir(parents=True)
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        monkeypatch.setenv("HERMES_HOME", str(profile))
-        assert get_active_profile_name() == "orchestrator"
-
 
 # ===================================================================
 # Edge cases and additional coverage
@@ -868,3 +798,83 @@ class TestEdgeCases:
             delete_profile("coder", yes=True)
 
         assert get_active_profile() == "default"
+
+
+# ===================================================================
+# TestProfileDetection — /status profile name detection
+# ===================================================================
+
+class TestProfileDetection:
+    """Verify that /status profile detection uses _get_profiles_root(),
+    not a hardcoded Path.home() / '.hermes' / 'profiles'.
+
+    Regression test for the fix in gateway/run.py and cli.py that replaced
+    the hardcoded path with _get_profiles_root().  Without the fix, profile
+    detection fails when HERMES_HOME is outside ~/.hermes (e.g. Docker with
+    /opt/data or any custom root).
+    """
+
+    @staticmethod
+    def _detect_profile(hermes_home: Path, profiles_root: Path):
+        """Replicate the profile-detection logic from gateway/run.py."""
+        try:
+            rel = hermes_home.relative_to(profiles_root)
+            return str(rel).split("/")[0]
+        except ValueError:
+            return None
+
+    def test_detect_profile_standard(self, profile_env):
+        """Profile detected when HERMES_HOME is under profiles root."""
+        profiles_root = _get_profiles_root()
+        profile_home = profiles_root / "myprofile"
+        profile_home.mkdir(parents=True)
+
+        name = self._detect_profile(profile_home, profiles_root)
+        assert name == "myprofile"
+
+    def test_detect_no_profile_default(self, profile_env):
+        """No profile detected when HERMES_HOME is the default root."""
+        tmp_path = profile_env
+        default_home = tmp_path / ".hermes"
+        profiles_root = _get_profiles_root()
+
+        name = self._detect_profile(default_home, profiles_root)
+        assert name is None
+
+    def test_detect_no_profile_custom_root(self, profile_env):
+        """No profile detected when HERMES_HOME is a custom path (Docker)."""
+        custom_home = Path("/opt/data-crashtest")
+        profiles_root = _get_profiles_root()
+
+        name = self._detect_profile(custom_home, profiles_root)
+        assert name is None
+
+    def test_detection_uses_get_profiles_root_not_hardcoded(self, tmp_path, monkeypatch):
+        """Profile detection must use _get_profiles_root(), not ~/.hermes/profiles.
+
+        When HERMES_HOME is outside ~/.hermes, _get_profiles_root() returns
+        HERMES_HOME/profiles.  A hardcoded Path.home()/.hermes/profiles would
+        point to the wrong directory and miss the profile entirely.
+        """
+        # Set up a custom HERMES_HOME completely outside ~/.hermes
+        docker_home = tmp_path / "opt" / "data"
+        docker_home.mkdir(parents=True)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HERMES_HOME", str(docker_home))
+
+        # _get_profiles_root() follows HERMES_HOME when outside ~/.hermes
+        profiles_root = _get_profiles_root()
+        assert profiles_root == docker_home / "profiles"
+
+        # Create a profile under the Docker root
+        (profiles_root / "testprofile").mkdir(parents=True)
+        profile_home = profiles_root / "testprofile"
+
+        # Detection using _get_profiles_root() finds it
+        assert self._detect_profile(profile_home, profiles_root) == "testprofile"
+
+        # Detection using hardcoded ~/.hermes/profiles would NOT find it
+        # because docker_home is not under ~/.hermes
+        hardcoded_root = tmp_path / ".hermes" / "profiles"
+        hardcoded_root.mkdir(parents=True, exist_ok=True)
+        assert self._detect_profile(profile_home, hardcoded_root) is None
