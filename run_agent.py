@@ -6410,9 +6410,14 @@ class AIAgent:
                 goal=function_args.get("goal"),
                 context=function_args.get("context"),
                 toolsets=function_args.get("toolsets"),
+                workspace_visibility=function_args.get("workspace_visibility"),
+                workspace_mappings=function_args.get("workspace_mappings"),
                 tasks=function_args.get("tasks"),
                 max_iterations=function_args.get("max_iterations"),
                 model=function_args.get("model"),
+                acp_command=function_args.get("acp_command"),
+                acp_args=function_args.get("acp_args"),
+                share_sandbox=function_args.get("share_sandbox"),
                 parent_agent=self,
             )
         elif function_name == "list_models":
@@ -6826,9 +6831,14 @@ class AIAgent:
                         goal=function_args.get("goal"),
                         context=function_args.get("context"),
                         toolsets=function_args.get("toolsets"),
+                        workspace_visibility=function_args.get("workspace_visibility"),
+                        workspace_mappings=function_args.get("workspace_mappings"),
                         tasks=tasks_arg,
                         max_iterations=function_args.get("max_iterations"),
                         model=function_args.get("model"),
+                        acp_command=function_args.get("acp_command"),
+                        acp_args=function_args.get("acp_args"),
+                        share_sandbox=function_args.get("share_sandbox"),
                         parent_agent=self,
                     )
                     _delegate_result = function_result
@@ -7273,7 +7283,9 @@ class AIAgent:
         self._self_nudge_armed_this_turn = False
         # Generate unique task_id if not provided to isolate VMs between concurrent tasks
         effective_task_id = task_id or str(uuid.uuid4())
-        
+        # Expose on the agent so delegate_task share_sandbox can read the parent's task_id
+        self._effective_task_id = effective_task_id
+
         # Reset retry counters and iteration budget at the start of each turn
         # so subagent usage from a previous turn doesn't eat into the next one.
         self._invalid_tool_retries = 0

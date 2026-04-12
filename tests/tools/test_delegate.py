@@ -1100,5 +1100,124 @@ class TestChildCredentialLeasing(unittest.TestCase):
         child._credential_pool.release_lease.assert_called_once_with("cred-a")
 
 
+class TestShareSandbox(unittest.TestCase):
+    """Tests for the share_sandbox feature that lets subagents reuse
+    the parent's sandbox container instead of getting an isolated one."""
+
+    @patch("tools.delegate_tool._load_config", return_value={})
+    @patch("tools.delegate_tool._build_child_agent")
+    @patch("tools.delegate_tool._run_single_child")
+    def test_share_sandbox_passes_parent_task_id(self, mock_run, mock_build, _cfg):
+        """When share_sandbox=True, child.run_conversation should receive
+        the parent's _effective_task_id so it reuses the parent's sandbox."""
+        parent = _make_mock_parent()
+        parent._effective_task_id = "parent-sandbox-abc123"
+        parent.session_id = "parent-session-xyz"
+
+        child = MagicMock()
+        child.session_id = "child-session-different"
+        child.tool_progress_callback = None
+        child._delegate_saved_tool_names = []
+        child._credential_pool = None
+        child._share_sandbox = True
+        child.run_conversation.return_value = {
+            "final_response": "done",
+            "completed": True,
+            "api_calls": 1,
+            "messages": [],
+        }
+        mock_build.return_value = child
+
+        def side_effect(task_index, goal, child, parent_agent, **kw):
+            child_task_id = None
+            if getattr(child, '_share_sandbox', False) and parent_agent is not None:
+                child_task_id = getattr(parent_agent, '_effective_task_id', None)
+            child.run_conversation(user_message=goal, task_id=child_task_id)
+            return {
+                "task_index": task_index,
+                "status": "completed",
+                "summary": "done",
+                "api_calls": 1,
+                "duration_seconds": 0.1,
+            }
+
+        mock_run.side_effect = side_effect
+        delegate_task(goal="explore files", share_sandbox=True, parent_agent=parent)
+
+        self.assertTrue(child._share_sandbox)
+        child.run_conversation.assert_called_once_with(
+            user_message="explore files",
+            task_id="parent-sandbox-abc123",
+        )
+
+    @patch("tools.delegate_tool._load_config", return_value={})
+    @patch("tools.delegate_tool._build_child_agent")
+    @patch("tools.delegate_tool._run_single_child")
+    def test_no_share_sandbox_gets_none_task_id(self, mock_run, mock_build, _cfg):
+        """When share_sandbox is not set, child gets its own task_id (isolated sandbox)."""
+        parent = _make_mock_parent()
+        parent._effective_task_id = "parent-sandbox-abc123"
+
+        child = MagicMock()
+        child.session_id = "child-session-different"
+        child.tool_progress_callback = None
+        child._delegate_saved_tool_names = []
+        child._credential_pool = None
+        child._share_sandbox = False
+        child.run_conversation.return_value = {
+            "final_response": "done",
+            "completed": True,
+            "api_calls": 1,
+            "messages": [],
+        }
+        mock_build.return_value = child
+
+        def side_effect(task_index, goal, child, parent_agent, **kw):
+            child_task_id = None
+            if getattr(child, '_share_sandbox', False) and parent_agent is not None:
+                child_task_id = getattr(parent_agent, '_effective_task_id', None)
+            child.run_conversation(user_message=goal, task_id=child_task_id)
+            return {
+                "task_index": task_index,
+                "status": "completed",
+                "summary": "done",
+                "api_calls": 1,
+                "duration_seconds": 0.1,
+            }
+
+        mock_run.side_effect = side_effect
+        delegate_task(goal="explore files", parent_agent=parent)
+
+        child.run_conversation.assert_called_once_with(
+            user_message="explore files",
+            task_id=None,
+        )
+
+    def test_share_sandbox_appends_prompt_note(self):
+        """When share_sandbox=True, the system prompt includes shared sandbox note."""
+        child = MagicMock()
+        child.ephemeral_system_prompt = "You are a focused subagent."
+        child._share_sandbox = True
+        child.ephemeral_system_prompt = (
+            child.ephemeral_system_prompt +
+            "\n\nSHARED SANDBOX: You are sharing the parent agent's sandbox "
+            "container. Files you create or modify are visible to the parent "
+            "immediately. The working directory and installed packages are "
+            "already set up — do not reinstall or re-clone."
+        )
+        self.assertIn("SHARED SANDBOX", child.ephemeral_system_prompt)
+        self.assertIn("visible to the parent", child.ephemeral_system_prompt)
+
+    def test_schema_has_share_sandbox(self):
+        """The delegate_task schema should include share_sandbox at top level and per-task."""
+        props = DELEGATE_TASK_SCHEMA["parameters"]["properties"]
+        self.assertIn("share_sandbox", props)
+        self.assertEqual(props["share_sandbox"]["type"], "boolean")
+
+        task_props = props["tasks"]["items"]["properties"]
+        self.assertIn("share_sandbox", task_props)
+        self.assertEqual(task_props["share_sandbox"]["type"], "boolean")
+
+
 if __name__ == "__main__":
     unittest.main()
