@@ -204,6 +204,8 @@ def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
 
             if env_type == "docker":
                 image = overrides.get("docker_image") or config["docker_image"]
+            elif env_type == "podman":
+                image = overrides.get("podman_image") or config["podman_image"]
             elif env_type == "singularity":
                 image = overrides.get("singularity_image") or config["singularity_image"]
             elif env_type == "modal":
@@ -217,7 +219,7 @@ def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
             logger.info("Creating new %s environment for task %s...", env_type, task_id[:8])
 
             container_config = None
-            if env_type in ("docker", "singularity", "modal", "daytona"):
+            if env_type in ("docker", "podman", "singularity", "modal", "daytona"):
                 container_config = {
                     "container_cpu": config.get("container_cpu", 1),
                     "container_memory": config.get("container_memory", 5120),
@@ -233,6 +235,12 @@ def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
                     "docker_env_files": config.get("docker_env_files", []),
                     "docker_user": config.get("docker_user"),
                 }
+                if env_type == "podman":
+                    container_config["podman_rootful"] = config.get("podman_rootful", False)
+                    container_config["podman_privileged"] = config.get("podman_privileged", False)
+                    container_config["podman_userns"] = config.get("podman_userns", "")
+                    container_config["podman_extra_capabilities"] = config.get("podman_extra_capabilities", [])
+                    container_config["podman_extra_args"] = config.get("podman_extra_args", [])
 
             ssh_config = None
             if env_type == "ssh":

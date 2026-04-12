@@ -289,9 +289,43 @@ def _process_single_prompt(
                 if config.get("verbose"):
                     print(f"   Prompt {prompt_index}: Docker image check failed: {img_err}", flush=True)
 
+        elif env_type == "podman":
+            import subprocess as _sp
+            from tools.environments.podman import find_podman
+            podman = find_podman()
+            if podman:
+                try:
+                    probe = _sp.run(
+                        [podman, "image", "inspect", container_image],
+                        capture_output=True, timeout=10,
+                    )
+                    if probe.returncode != 0:
+                        if config.get("verbose"):
+                            print(f"   Prompt {prompt_index}: Pulling podman image {container_image}...", flush=True)
+                        pull = _sp.run(
+                            [podman, "pull", container_image],
+                            capture_output=True, text=True, timeout=600,
+                        )
+                        if pull.returncode != 0:
+                            return {
+                                "success": False,
+                                "prompt_index": prompt_index,
+                                "error": f"Podman image not available: {container_image}\n{pull.stderr[:500]}",
+                                "trajectory": None,
+                                "tool_stats": {},
+                                "toolsets_used": [],
+                                "metadata": {"batch_num": batch_num, "timestamp": datetime.now().isoformat()},
+                            }
+                except FileNotFoundError:
+                    pass  # Podman CLI not found — skip check
+                except Exception as img_err:
+                    if config.get("verbose"):
+                        print(f"   Prompt {prompt_index}: Podman image check failed: {img_err}", flush=True)
+
         from tools.terminal_tool import register_task_env_overrides
         overrides = {
             "docker_image": container_image,
+            "podman_image": container_image,
             "modal_image": container_image,
             "singularity_image": f"docker://{container_image}",
             "daytona_image": container_image,

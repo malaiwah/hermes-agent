@@ -225,6 +225,12 @@ def load_cli_config() -> Dict[str, Any]:
             "daytona_image": "nikolaik/python-nodejs:python3.11-nodejs20",
             "docker_volumes": [],  # host:container volume mounts for Docker backend
             "docker_mount_cwd_to_workspace": False,  # explicit opt-in only; default off for sandbox isolation
+            "podman_image": "docker.io/nikolaik/python-nodejs:python3.11-nodejs20",
+            "podman_rootful": False,
+            "podman_privileged": False,
+            "podman_userns": "",
+            "podman_extra_capabilities": [],
+            "podman_extra_args": [],
             "enable_gateway_local": False,
         },
         "browser": {
@@ -431,6 +437,12 @@ def load_cli_config() -> Dict[str, Any]:
         "container_persistent": "TERMINAL_CONTAINER_PERSISTENT",
         "docker_volumes": "TERMINAL_DOCKER_VOLUMES",
         "docker_network": "TERMINAL_DOCKER_NETWORK",
+        "podman_image": "TERMINAL_PODMAN_IMAGE",
+        "podman_rootful": "TERMINAL_PODMAN_ROOTFUL",
+        "podman_privileged": "TERMINAL_PODMAN_PRIVILEGED",
+        "podman_userns": "TERMINAL_PODMAN_USERNS",
+        "podman_extra_capabilities": "TERMINAL_PODMAN_EXTRA_CAPABILITIES",
+        "podman_extra_args": "TERMINAL_PODMAN_EXTRA_ARGS",
         "docker_mount_cwd_to_workspace": "TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE",
         "enable_gateway_local": "TERMINAL_ENABLE_GATEWAY_LOCAL",
         "sandbox_dir": "TERMINAL_SANDBOX_DIR",

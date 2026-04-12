@@ -556,7 +556,31 @@ def run_doctor(args):
                 check_info("Docker backend is not available inside Termux (expected on Android)")
             else:
                 check_warn("docker not found", "(optional)")
-    
+
+    # Podman (if using podman backend)
+    if terminal_env == "podman":
+        from tools.environments.podman import find_podman
+        podman = find_podman()
+        if podman:
+            check_ok("podman", f"({podman})")
+            try:
+                result = subprocess.run([podman, "info"], capture_output=True, timeout=10)
+            except subprocess.TimeoutExpired:
+                result = None
+            if result is not None and result.returncode == 0:
+                check_ok("podman", "(daemon/service running)")
+            else:
+                check_fail("podman service not running or not accessible")
+                issues.append("Start podman service or check permissions")
+        else:
+            check_fail("podman not found", "(required for TERMINAL_ENV=podman)")
+            issues.append("Install Podman or change TERMINAL_ENV")
+    else:
+        if shutil.which("podman"):
+            check_ok("podman", "(optional)")
+        else:
+            check_info("podman not found (optional)")
+
     # SSH (if using ssh backend)
     if terminal_env == "ssh":
         ssh_host = os.getenv("TERMINAL_SSH_HOST")
