@@ -30,11 +30,33 @@ mcp_servers:
   remote-filesystem:
     command: python3
     args: ["-m", "tools.mcp_servers.remote_filesystem"]
+    sandbox: true              # run inside sandbox container (recommended)
+    sandbox_task_id: "default" # optional, see below
     env:
-      SSH_AUTH_SOCK: /run/hermes-creds/S.ssh-agent
+      SSH_AUTH_SOCK: /run/ssh-agent.sock
+      PYTHONPATH: /opt/hermes-mcp       # path to server code in sandbox
+      PYTHONUNBUFFERED: "1"
     timeout: 120
-    connect_timeout: 15
+    connect_timeout: 60
 ```
+
+### Sandbox isolation (`sandbox: true`)
+
+When `sandbox: true`, the MCP server runs inside a Docker/Podman container
+via `docker exec -i`, not as a gateway subprocess. This provides security
+isolation — the server only has access to volumes mounted into the sandbox.
+
+The `sandbox_task_id` controls which container the server runs in:
+
+| Value | Behavior |
+|-------|----------|
+| `"default"` (default) | Shares the agent's main terminal/file sandbox |
+| `"mcp-remote"` | Gets its own dedicated sandbox container |
+| Same value on multiple servers | Those servers share one container |
+
+Using `"default"` means the MCP server shares resources with terminal
+commands and file operations. A dedicated task_id isolates the server
+but costs an extra container.
 
 ## Tools
 

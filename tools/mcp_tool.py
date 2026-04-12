@@ -975,6 +975,10 @@ class MCPServerTask:
         )
         from tools.file_tools import _get_file_ops  # noqa: F401 — ensures env exists
 
+        # sandbox_task_id controls which container the server runs in:
+        #   "default"  → shares the agent's terminal/file sandbox
+        #   custom     → gets a dedicated container (isolated from agent work)
+        #   same value across servers → those servers share one container
         sandbox_task_id = config.get("sandbox_task_id", "default")
 
         # Ensure a sandbox container exists for this task_id
