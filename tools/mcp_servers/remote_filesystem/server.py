@@ -47,7 +47,7 @@ def _format_error(response: dict) -> str:
 def _build_server() -> FastMCP:
     mcp = FastMCP(
         "remote-filesystem",
-        description=(
+        instructions=(
             "Connect to remote hosts over SSH and perform file/terminal operations. "
             "All operations go through a lightweight JSON-RPC handler that runs on "
             "the remote host with zero installation required (just Python 3)."
