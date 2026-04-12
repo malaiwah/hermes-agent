@@ -64,6 +64,14 @@ from agent.usage_pricing import (
     format_token_count_compact,
 )
 from hermes_cli.banner import _format_context_length, format_banner_version_label
+from hermes_cli.status_format import (
+    format_status_relative_time,
+    format_status_cost,
+    format_reasoning_effort_label,
+    format_api_mode_label,
+    safe_status_int,
+    safe_status_float,
+)
 
 _COMMAND_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
@@ -1812,79 +1820,6 @@ class HermesCLI:
 
         return snapshot
 
-    @staticmethod
-    def _format_status_relative_time(ts: Optional[datetime]) -> str:
-        """Return a compact relative timestamp for status displays."""
-        if not ts:
-            return "unknown"
-        delta = datetime.now() - ts
-        seconds = max(int(delta.total_seconds()), 0)
-        if seconds < 60:
-            return "just now"
-        if seconds < 3600:
-            return f"{seconds // 60}m ago"
-        if seconds < 86400:
-            return f"{seconds // 3600}h ago"
-        return f"{seconds // 86400}d ago"
-
-    @staticmethod
-    def _format_status_cost(amount: Optional[float], status: str) -> Optional[str]:
-        """Return a human-readable cost label for status output."""
-        normalized = (status or "").strip().lower()
-        if normalized == "included":
-            return "included"
-        if amount is None and normalized in ("", "unknown", "none"):
-            return None
-        if amount is None:
-            return normalized
-        label = f"${amount:,.4f}"
-        if normalized in ("", "actual"):
-            return label
-        if normalized == "estimated":
-            return f"{label} est."
-        return f"{label} {normalized}"
-
-    @staticmethod
-    def _format_reasoning_effort_label(config: Optional[dict]) -> str:
-        """Return the effective reasoning effort label."""
-        if config is None:
-            return "medium"
-        if config.get("enabled") is False:
-            return "none"
-        return str(config.get("effort") or "medium")
-
-    @staticmethod
-    def _format_api_mode_label(api_mode: Optional[str]) -> Optional[str]:
-        """Convert internal API mode names into compact user-facing labels."""
-        if not api_mode:
-            return None
-        labels = {
-            "chat_completions": "Chat Completions",
-            "codex_responses": "Responses",
-            "anthropic_messages": "Anthropic Messages",
-        }
-        return labels.get(api_mode, str(api_mode).replace("_", " ").title())
-
-    @staticmethod
-    def _safe_status_int(value: Any, default: int = 0) -> int:
-        """Best-effort integer coercion for status values."""
-        try:
-            if value is None:
-                return default
-            return int(value)
-        except (TypeError, ValueError):
-            return default
-
-    @staticmethod
-    def _safe_status_float(value: Any) -> Optional[float]:
-        """Best-effort float coercion for status values."""
-        try:
-            if value is None:
-                return None
-            return float(value)
-        except (TypeError, ValueError):
-            return None
-
     def _get_cli_status_queue_depth(self) -> int:
         """Return the number of queued follow-up prompts for the CLI session."""
         pending = getattr(self, "_pending_input", None)
@@ -1950,18 +1885,18 @@ class HermesCLI:
             or (session_row or {}).get("billing_mode")
             or getattr(self, "api_mode", None)
         )
-        reasoning_effort = self._format_reasoning_effort_label(
+        reasoning_effort = format_reasoning_effort_label(
             getattr(self, "reasoning_config", None)
         )
 
         if agent is not None:
-            input_tokens = self._safe_status_int(getattr(agent, "session_input_tokens", 0))
-            output_tokens = self._safe_status_int(getattr(agent, "session_output_tokens", 0))
-            cache_read_tokens = self._safe_status_int(getattr(agent, "session_cache_read_tokens", 0))
-            cache_write_tokens = self._safe_status_int(getattr(agent, "session_cache_write_tokens", 0))
-            reasoning_tokens = self._safe_status_int(getattr(agent, "session_reasoning_tokens", 0))
-            total_tokens = self._safe_status_int(getattr(agent, "session_total_tokens", 0))
-            cost_amount = self._safe_status_float(getattr(agent, "session_estimated_cost_usd", None))
+            input_tokens = safe_status_int(getattr(agent, "session_input_tokens", 0))
+            output_tokens = safe_status_int(getattr(agent, "session_output_tokens", 0))
+            cache_read_tokens = safe_status_int(getattr(agent, "session_cache_read_tokens", 0))
+            cache_write_tokens = safe_status_int(getattr(agent, "session_cache_write_tokens", 0))
+            reasoning_tokens = safe_status_int(getattr(agent, "session_reasoning_tokens", 0))
+            total_tokens = safe_status_int(getattr(agent, "session_total_tokens", 0))
+            cost_amount = safe_status_float(getattr(agent, "session_estimated_cost_usd", None))
             cost_status = str(getattr(agent, "session_cost_status", "") or "")
             if cost_amount is None:
                 cost_result = estimate_usage_cost(
@@ -1975,20 +1910,20 @@ class HermesCLI:
                     provider=getattr(agent, "provider", None),
                     base_url=getattr(agent, "base_url", None),
                 )
-                cost_amount = self._safe_status_float(cost_result.amount_usd)
+                cost_amount = safe_status_float(cost_result.amount_usd)
                 if not cost_status:
                     cost_status = str(cost_result.status or "")
         else:
             totals = token_totals or {}
-            input_tokens = self._safe_status_int(totals.get("input_tokens", 0))
-            output_tokens = self._safe_status_int(totals.get("output_tokens", 0))
-            cache_read_tokens = self._safe_status_int(totals.get("cache_read_tokens", 0))
-            cache_write_tokens = self._safe_status_int(totals.get("cache_write_tokens", 0))
-            reasoning_tokens = self._safe_status_int(totals.get("reasoning_tokens", 0))
-            total_tokens = self._safe_status_int(totals.get("total_tokens", 0))
+            input_tokens = safe_status_int(totals.get("input_tokens", 0))
+            output_tokens = safe_status_int(totals.get("output_tokens", 0))
+            cache_read_tokens = safe_status_int(totals.get("cache_read_tokens", 0))
+            cache_write_tokens = safe_status_int(totals.get("cache_write_tokens", 0))
+            reasoning_tokens = safe_status_int(totals.get("reasoning_tokens", 0))
+            total_tokens = safe_status_int(totals.get("total_tokens", 0))
             actual_cost = (session_row or {}).get("actual_cost_usd")
             estimated_cost = (session_row or {}).get("estimated_cost_usd")
-            cost_amount = self._safe_status_float(
+            cost_amount = safe_status_float(
                 actual_cost if actual_cost is not None else estimated_cost
             )
             cost_status = str((session_row or {}).get("cost_status") or "")
@@ -2004,13 +1939,13 @@ class HermesCLI:
         compactions = None
         compressor = getattr(agent, "context_compressor", None) if agent is not None else None
         if compressor is not None:
-            context_tokens = self._safe_status_int(
+            context_tokens = safe_status_int(
                 getattr(compressor, "last_prompt_tokens", 0), default=0
             )
-            context_limit = self._safe_status_int(
+            context_limit = safe_status_int(
                 getattr(compressor, "context_length", 0), default=0
             )
-            compactions = self._safe_status_int(
+            compactions = safe_status_int(
                 getattr(compressor, "compression_count", 0), default=0
             )
             if context_tokens and context_limit:
@@ -2023,11 +1958,11 @@ class HermesCLI:
             "version": hermes_version,
             "title": title,
             "session_id": session_id or "unknown",
-            "updated_label": self._format_status_relative_time(updated_at),
+            "updated_label": format_status_relative_time(updated_at),
             "running": bool(getattr(self, "_agent_running", False)),
             "model": str(model or "unknown"),
             "provider": str(provider or "unknown"),
-            "api_mode_label": self._format_api_mode_label(api_mode),
+            "api_mode_label": format_api_mode_label(api_mode),
             "reasoning_effort": reasoning_effort,
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
@@ -2036,7 +1971,7 @@ class HermesCLI:
             "cache_write_tokens": cache_write_tokens,
             "cache_pct": cache_pct,
             "reasoning_tokens": reasoning_tokens,
-            "cost_label": self._format_status_cost(cost_amount, cost_status),
+            "cost_label": format_status_cost(cost_amount, cost_status),
             "context_tokens": context_tokens,
             "context_limit": context_limit,
             "context_pct": context_pct,

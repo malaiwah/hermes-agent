@@ -84,6 +84,14 @@ _hermes_home = get_hermes_home()
 # User-managed env files should override stale shell exports on restart.
 from dotenv import load_dotenv  # backward-compat for tests that monkeypatch this symbol
 from hermes_cli.env_loader import load_hermes_dotenv
+from hermes_cli.status_format import (
+    format_status_relative_time,
+    format_status_cost,
+    format_reasoning_effort_label,
+    format_api_mode_label,
+    safe_status_int,
+    safe_status_float,
+)
 _env_path = _hermes_home / '.env'
 load_hermes_dotenv(hermes_home=_hermes_home, project_env=Path(__file__).resolve().parents[1] / '.env')
 
@@ -3875,79 +3883,6 @@ class GatewayRunner:
 
         return "\n".join(lines)
 
-    @staticmethod
-    def _format_status_relative_time(ts: Optional[datetime]) -> str:
-        """Return a compact relative timestamp for status displays."""
-        if not ts:
-            return "unknown"
-        delta = datetime.now() - ts
-        seconds = max(int(delta.total_seconds()), 0)
-        if seconds < 60:
-            return "just now"
-        if seconds < 3600:
-            return f"{seconds // 60}m ago"
-        if seconds < 86400:
-            return f"{seconds // 3600}h ago"
-        return f"{seconds // 86400}d ago"
-
-    @staticmethod
-    def _format_status_cost(amount: Optional[float], status: str) -> Optional[str]:
-        """Return a human-readable cost label for status output."""
-        normalized = (status or "").strip().lower()
-        if normalized == "included":
-            return "included"
-        if amount is None and normalized in ("", "unknown", "none"):
-            return None
-        if amount is None:
-            return normalized
-        label = f"${amount:,.4f}"
-        if normalized in ("", "actual"):
-            return label
-        if normalized == "estimated":
-            return f"{label} est."
-        return f"{label} {normalized}"
-
-    @staticmethod
-    def _format_reasoning_effort_label(config: Optional[dict]) -> str:
-        """Return the effective reasoning effort label."""
-        if config is None:
-            return "medium"
-        if config.get("enabled") is False:
-            return "none"
-        return str(config.get("effort") or "medium")
-
-    @staticmethod
-    def _format_api_mode_label(api_mode: Optional[str]) -> Optional[str]:
-        """Convert internal API mode names into compact user-facing labels."""
-        if not api_mode:
-            return None
-        labels = {
-            "chat_completions": "Chat Completions",
-            "codex_responses": "Responses",
-            "anthropic_messages": "Anthropic Messages",
-        }
-        return labels.get(api_mode, str(api_mode).replace("_", " ").title())
-
-    @staticmethod
-    def _safe_status_int(value: Any, default: int = 0) -> int:
-        """Best-effort integer coercion for status values."""
-        try:
-            if value is None:
-                return default
-            return int(value)
-        except (TypeError, ValueError):
-            return default
-
-    @staticmethod
-    def _safe_status_float(value: Any) -> Optional[float]:
-        """Best-effort float coercion for status values."""
-        try:
-            if value is None:
-                return None
-            return float(value)
-        except (TypeError, ValueError):
-            return None
-
     def _get_status_platform_sections(self) -> tuple[list[str], list[str]]:
         """Split connected adapters into chat-facing platforms and services."""
         internal_platforms = {Platform.API_SERVER, Platform.WEBHOOK}
@@ -3989,8 +3924,8 @@ class GatewayRunner:
             if cache is not None and cache_lock is not None:
                 with cache_lock:
                     cached_entry = cache.get(session_key)
-                if cached_entry and cached_entry[0] is not None:
-                    cached_agent = cached_entry[0]
+                    if cached_entry and cached_entry[0] is not None:
+                        cached_agent = cached_entry[0]
         except Exception:
             cached_agent = None
 
@@ -4056,40 +3991,40 @@ class GatewayRunner:
             except Exception:
                 pass
 
-        reasoning_effort = self._format_reasoning_effort_label(
+        reasoning_effort = format_reasoning_effort_label(
             getattr(self, "_reasoning_config", None)
         )
 
         if live_agent is not None:
-            input_tokens = self._safe_status_int(getattr(live_agent, "session_input_tokens", 0))
-            output_tokens = self._safe_status_int(getattr(live_agent, "session_output_tokens", 0))
-            cache_read_tokens = self._safe_status_int(getattr(live_agent, "session_cache_read_tokens", 0))
-            cache_write_tokens = self._safe_status_int(getattr(live_agent, "session_cache_write_tokens", 0))
-            reasoning_tokens = self._safe_status_int(getattr(live_agent, "session_reasoning_tokens", 0))
-            total_tokens = self._safe_status_int(getattr(live_agent, "session_total_tokens", 0))
-            cost_amount = self._safe_status_float(getattr(live_agent, "session_estimated_cost_usd", None))
+            input_tokens = safe_status_int(getattr(live_agent, "session_input_tokens", 0))
+            output_tokens = safe_status_int(getattr(live_agent, "session_output_tokens", 0))
+            cache_read_tokens = safe_status_int(getattr(live_agent, "session_cache_read_tokens", 0))
+            cache_write_tokens = safe_status_int(getattr(live_agent, "session_cache_write_tokens", 0))
+            reasoning_tokens = safe_status_int(getattr(live_agent, "session_reasoning_tokens", 0))
+            total_tokens = safe_status_int(getattr(live_agent, "session_total_tokens", 0))
+            cost_amount = safe_status_float(getattr(live_agent, "session_estimated_cost_usd", None))
             cost_status = str(getattr(live_agent, "session_cost_status", "") or "")
         else:
             totals = token_totals or {}
-            input_tokens = self._safe_status_int(
+            input_tokens = safe_status_int(
                 totals.get("input_tokens", getattr(session_entry, "input_tokens", 0))
             )
-            output_tokens = self._safe_status_int(
+            output_tokens = safe_status_int(
                 totals.get("output_tokens", getattr(session_entry, "output_tokens", 0))
             )
-            cache_read_tokens = self._safe_status_int(
+            cache_read_tokens = safe_status_int(
                 totals.get("cache_read_tokens", getattr(session_entry, "cache_read_tokens", 0))
             )
-            cache_write_tokens = self._safe_status_int(
+            cache_write_tokens = safe_status_int(
                 totals.get("cache_write_tokens", getattr(session_entry, "cache_write_tokens", 0))
             )
-            reasoning_tokens = self._safe_status_int(totals.get("reasoning_tokens", 0))
-            total_tokens = self._safe_status_int(
+            reasoning_tokens = safe_status_int(totals.get("reasoning_tokens", 0))
+            total_tokens = safe_status_int(
                 totals.get("total_tokens", getattr(session_entry, "total_tokens", 0))
             )
             actual_cost = (session_row or {}).get("actual_cost_usd")
             estimated_cost = (session_row or {}).get("estimated_cost_usd")
-            cost_amount = self._safe_status_float(
+            cost_amount = safe_status_float(
                 actual_cost if actual_cost is not None else estimated_cost
             )
             cost_status = str((session_row or {}).get("cost_status") or getattr(session_entry, "cost_status", "") or "")
@@ -4105,13 +4040,13 @@ class GatewayRunner:
         compactions = None
         if live_agent is not None and hasattr(live_agent, "context_compressor"):
             compressor = live_agent.context_compressor
-            context_tokens = self._safe_status_int(
+            context_tokens = safe_status_int(
                 getattr(compressor, "last_prompt_tokens", 0), default=0
             )
-            context_limit = self._safe_status_int(
+            context_limit = safe_status_int(
                 getattr(compressor, "context_length", 0), default=0
             )
-            compactions = self._safe_status_int(
+            compactions = safe_status_int(
                 getattr(compressor, "compression_count", 0), default=0
             )
             if context_tokens and context_limit:
@@ -4130,13 +4065,13 @@ class GatewayRunner:
             "title": title,
             "session_id": session_entry.session_id,
             "session_key": session_key,
-            "updated_label": self._format_status_relative_time(
+            "updated_label": format_status_relative_time(
                 getattr(session_entry, "updated_at", None)
             ),
             "running": session_key in self._running_agents,
             "model": str(model or "unknown"),
             "provider": str(provider or "unknown"),
-            "api_mode_label": self._format_api_mode_label(api_mode),
+            "api_mode_label": format_api_mode_label(api_mode),
             "reasoning_effort": reasoning_effort,
             "transport": transport,
             "input_tokens": input_tokens,
@@ -4146,7 +4081,7 @@ class GatewayRunner:
             "cache_write_tokens": cache_write_tokens,
             "cache_pct": cache_pct,
             "reasoning_tokens": reasoning_tokens,
-            "cost_label": self._format_status_cost(cost_amount, cost_status),
+            "cost_label": format_status_cost(cost_amount, cost_status),
             "context_tokens": context_tokens,
             "context_limit": context_limit,
             "context_pct": context_pct,
