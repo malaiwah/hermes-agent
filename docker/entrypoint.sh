@@ -9,7 +9,7 @@ if [ -f /etc/hermes-release ]; then
     echo "======================"
 fi
 
-HERMES_HOME="/opt/data"
+HERMES_HOME="${HERMES_HOME:-/opt/data}"
 INSTALL_DIR="/opt/hermes"
 
 # Create essential directory structure.  Cache and platform directories
