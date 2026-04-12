@@ -120,6 +120,10 @@ class RemoteConnection:
                 + (f"\nSSH stderr: {stderr}" if stderr else "")
             ) from e
 
+        # Start draining stderr in background to prevent pipe buffer fill-up
+        # (SSH keepalives, Python warnings, etc. would block the process)
+        self._start_stderr_drain()
+
         if not ready or ready.get("method") != "ready":
             self._kill()
             raise RuntimeError(
@@ -142,6 +146,9 @@ class RemoteConnection:
 
         Raises RuntimeError on transport errors, or returns the error dict
         for JSON-RPC level errors.
+
+        The entire id-assign → send → recv cycle is serialized under one lock
+        to prevent response interleaving when multiple threads call concurrently.
         """
         if not self.connected:
             raise RuntimeError(f"Not connected to {self.identifier}")
@@ -150,16 +157,25 @@ class RemoteConnection:
             req_id = self._next_id
             self._next_id += 1
 
-        msg = {
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "method": method,
-            "params": params or {},
-        }
+            msg = {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "method": method,
+                "params": params or {},
+            }
 
-        with self._lock:
             self._send(msg)
-            response = self._recv(timeout=timeout)
+            try:
+                response = self._recv(timeout=timeout)
+            except TimeoutError:
+                # After a timeout, the background reader thread may still be
+                # blocked on stdout.read(). Kill the connection to prevent
+                # pipe corruption from two threads reading the same pipe.
+                self._kill()
+                raise RuntimeError(
+                    f"Timeout waiting for response from {self.identifier} "
+                    f"(method={method}). Connection killed to prevent corruption."
+                )
 
         if response is None:
             self._kill()
@@ -239,6 +255,23 @@ class RemoteConnection:
         except queue.Empty:
             raise TimeoutError(f"Timeout reading from {self.identifier}")
 
+    def _start_stderr_drain(self) -> None:
+        """Drain stderr in background to prevent pipe buffer blocking SSH."""
+        if self._proc is None or self._proc.stderr is None:
+            return
+
+        def _drain():
+            try:
+                while True:
+                    line = self._proc.stderr.readline()
+                    if not line:
+                        break
+                    logger.debug("remote-fs [%s] stderr: %s", self.identifier, line.decode(errors="replace").rstrip())
+            except (ValueError, OSError):
+                pass
+
+        threading.Thread(target=_drain, daemon=True).start()
+
     def _kill(self) -> None:
         if self._proc is not None:
             try:
@@ -287,7 +320,13 @@ class ConnectionManager:
             conn = RemoteConnection(host, user, port, key_path, ident)
             self._connections[ident] = conn
 
-        info = conn.connect()
+        try:
+            info = conn.connect()
+        except Exception:
+            # Remove dead connection on failure
+            with self._lock:
+                self._connections.pop(ident, None)
+            raise
         return {
             "identifier": ident,
             "status": "connected",

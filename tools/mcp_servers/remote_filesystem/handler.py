@@ -19,8 +19,8 @@ Security:
     - No network listeners -- stdin/stdout only
 """
 
-# ── This entire file is also stored as HANDLER_SOURCE in __init__.py so it
-#    can be piped over SSH.  Keep it self-contained: stdlib imports only.
+# ── This file is loaded at runtime by connection.py and piped over SSH
+#    to the remote host.  Keep it self-contained: stdlib imports only.
 
 import difflib
 import fnmatch
@@ -82,11 +82,10 @@ def _is_write_denied(path: str) -> bool:
 
 def _resolve_path(path: str) -> str:
     """Expand ~ and resolve to absolute, rejecting traversal."""
-    expanded = os.path.expanduser(path)
-    resolved = os.path.realpath(expanded)
-    # Reject null bytes (path injection)
     if "\x00" in path:
         raise ValueError("Null byte in path")
+    expanded = os.path.expanduser(path)
+    resolved = os.path.realpath(expanded)
     return resolved
 
 
@@ -106,7 +105,10 @@ def _read_message() -> dict | None:
         if not line_str:
             break  # empty line = end of headers
         if line_str.lower().startswith("content-length:"):
-            content_length = int(line_str.split(":", 1)[1].strip())
+            try:
+                content_length = int(line_str.split(":", 1)[1].strip())
+            except ValueError:
+                return None  # malformed header
 
     if content_length is None:
         return None
