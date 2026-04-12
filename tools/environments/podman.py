@@ -22,6 +22,8 @@ logger = logging.getLogger(__name__)
 _PODMAN_SEARCH_PATHS = [
     "/usr/bin/podman",
     "/usr/local/bin/podman",
+    "/usr/bin/podman-remote",
+    "/usr/local/bin/podman-remote",
     "/opt/homebrew/bin/podman",
     "/opt/podman/bin/podman",
     "/home/linuxbrew/.linuxbrew/bin/podman",
@@ -34,16 +36,20 @@ def find_podman() -> Optional[str]:
     """Locate the podman CLI binary.
 
     Checks ``shutil.which`` first (respects PATH), then probes well-known
-    install locations where Podman may not be in PATH.
+    install locations where Podman may not be in PATH.  Also checks for
+    ``podman-remote`` which is the correct binary for gateway deployments
+    where the hermes container talks to a host Podman socket.
     """
     global _podman_executable
     if _podman_executable is not None:
         return _podman_executable
 
-    found = shutil.which("podman")
-    if found:
-        _podman_executable = found
-        return found
+    # Check both podman and podman-remote in PATH
+    for name in ("podman", "podman-remote"):
+        found = shutil.which(name)
+        if found:
+            _podman_executable = found
+            return found
 
     for path in _PODMAN_SEARCH_PATHS:
         if os.path.isfile(path) and os.access(path, os.X_OK):
@@ -167,6 +173,7 @@ class PodmanEnvironment(DockerEnvironment):
     ) -> list[str]:
         cmd = [
             self._docker_exe, "run", "-d",
+            "--init",           # reap zombie children (same as Docker backend)
             "--name", container_name,
             "-w", cwd,
             *all_run_args,

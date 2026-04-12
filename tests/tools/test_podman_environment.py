@@ -29,6 +29,17 @@ class TestFindPodman:
         assert result == "/opt/homebrew/bin/podman"
         mod._podman_executable = None
 
+    def test_found_podman_remote_in_path(self):
+        """podman-remote should be found when podman is not available."""
+        from tools.environments import podman as mod
+        mod._podman_executable = None
+        def _which(name):
+            return "/usr/bin/podman-remote" if name == "podman-remote" else None
+        with patch("shutil.which", side_effect=_which):
+            result = mod.find_podman()
+        assert result == "/usr/bin/podman-remote"
+        mod._podman_executable = None
+
     def test_not_found_returns_none(self):
         from tools.environments import podman as mod
         mod._podman_executable = None
@@ -45,7 +56,7 @@ class TestFindPodman:
         from tools.environments.podman import _PODMAN_SEARCH_PATHS
         for path in _PODMAN_SEARCH_PATHS:
             # Each path should end with the binary name, not be two paths joined
-            assert path.endswith("/podman"), f"Bad path: {path}"
+            assert path.endswith("/podman") or path.endswith("/podman-remote"), f"Bad path: {path}"
             # No path should be longer than a reasonable filesystem path
             assert len(path) < 60, f"Suspiciously long path (missing comma?): {path}"
 
