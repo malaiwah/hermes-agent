@@ -224,6 +224,12 @@ def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
                     "container_disk": config.get("container_disk", 51200),
                     "container_persistent": config.get("container_persistent", True),
                     "docker_volumes": config.get("docker_volumes", []),
+                    "docker_forward_env": config.get("docker_forward_env", []),
+                    "docker_env": config.get("docker_env", {}),
+                    "docker_network": config.get("docker_network"),
+                    "docker_extra_hosts": config.get("docker_extra_hosts", []),
+                    "docker_env_files": config.get("docker_env_files", []),
+                    "docker_user": config.get("docker_user"),
                 }
 
             ssh_config = None
