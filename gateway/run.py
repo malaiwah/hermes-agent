@@ -4051,6 +4051,22 @@ class GatewayRunner:
             )
             if context_tokens and context_limit:
                 context_pct = round((context_tokens / context_limit) * 100)
+        else:
+            # Idle fallback: estimate context from last known prompt tokens
+            # and model's context window (inspired by PR #4678).
+            idle_prompt = safe_status_int(
+                getattr(session_entry, "last_prompt_tokens", 0), default=0
+            )
+            if idle_prompt or model:
+                try:
+                    from agent.model_metadata import get_model_context_length
+                    context_limit = get_model_context_length(str(model or "unknown"))
+                except Exception:
+                    context_limit = None
+                if idle_prompt:
+                    context_tokens = idle_prompt
+                if context_tokens and context_limit:
+                    context_pct = round((context_tokens / context_limit) * 100)
 
         transport = None
         if source.platform == Platform.TELEGRAM:

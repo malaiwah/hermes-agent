@@ -226,7 +226,37 @@ async def test_status_command_shows_live_context_metrics():
 
 
 @pytest.mark.asyncio
-async def test_status_command_omits_context_without_live_agent():
+async def test_status_command_shows_idle_context_from_last_prompt_tokens(monkeypatch):
+    """When no live agent exists but session has last_prompt_tokens, show
+    estimated context from model metadata (idle fallback, inspired by PR #4678)."""
+    session_entry = SessionEntry(
+        session_key=build_session_key(_make_source()),
+        session_id="sess-1",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        platform=Platform.TELEGRAM,
+        chat_type="dm",
+        last_prompt_tokens=45000,
+    )
+    runner = _make_runner(session_entry)
+    runner._session_db.get_session.return_value = {
+        "model": "openai/gpt-4o",
+        "billing_provider": "openai",
+        "estimated_cost_usd": 0.0,
+        "cost_status": "estimated",
+    }
+    import agent.model_metadata as _mm
+    monkeypatch.setattr(_mm, "get_model_context_length", lambda model, **kw: 200_000)
+
+    result = await runner._handle_message(_make_event("/status"))
+
+    assert "**Context:** 45,000 / 200,000 (22%)" in result
+    assert "**Compactions:**" not in result
+
+
+@pytest.mark.asyncio
+async def test_status_command_omits_context_when_lookup_fails(monkeypatch):
+    """When model metadata lookup fails, context section is omitted."""
     session_entry = SessionEntry(
         session_key=build_session_key(_make_source()),
         session_id="sess-1",
@@ -242,6 +272,12 @@ async def test_status_command_omits_context_without_live_agent():
         "estimated_cost_usd": 0.0,
         "cost_status": "estimated",
     }
+
+    def _raise(*args, **kwargs):
+        raise Exception("not found")
+
+    import agent.model_metadata as _mm
+    monkeypatch.setattr(_mm, "get_model_context_length", _raise)
 
     result = await runner._handle_message(_make_event("/status"))
 

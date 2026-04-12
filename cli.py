@@ -1950,6 +1950,14 @@ class HermesCLI:
             )
             if context_tokens and context_limit:
                 context_pct = round((context_tokens / context_limit) * 100)
+        else:
+            # Idle fallback: estimate context window from model metadata.
+            if model:
+                try:
+                    from agent.model_metadata import get_model_context_length
+                    context_limit = get_model_context_length(str(model or "unknown"))
+                except Exception:
+                    context_limit = None
 
         if updated_at is None:
             updated_at = datetime.now() if agent is not None else getattr(self, "session_start", None)

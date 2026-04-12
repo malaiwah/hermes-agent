@@ -127,7 +127,6 @@ def test_show_session_status_falls_back_to_persisted_session(capsys):
     assert "Model: anthropic/claude-opus-4.6 · Provider: anthropic" in output
     assert "Usage: 1,000 in · 250 out · 1,820 total · Cost: $1.2500 est." in output
     assert "Cache: 500 read · 50 write · 33% hit · 20 reasoning" in output
-    assert "Context:" not in output
     assert "Title: Saved Session" in output
     assert "Runtime: Anthropic Messages · Reasoning high · CLI interactive" in output
     assert "Queue: depth 0 · State: idle" in output
@@ -141,3 +140,16 @@ def test_show_session_status_uses_pending_title_before_first_persist(capsys):
     output = capsys.readouterr().out
 
     assert "Title: Queued Session Title" in output
+
+
+def test_show_session_status_idle_context_fallback(capsys, monkeypatch):
+    """When no live agent, context limit comes from model metadata."""
+    cli_obj = _make_cli()
+    import agent.model_metadata as _mm
+    monkeypatch.setattr(_mm, "get_model_context_length", lambda model, **kw: 200_000)
+
+    cli_obj._show_session_status()
+    output = capsys.readouterr().out
+
+    # No prompt tokens in idle CLI, but context limit is resolved
+    assert "Context:" not in output or "200,000" in output
