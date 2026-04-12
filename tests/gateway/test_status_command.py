@@ -1,5 +1,6 @@
 """Tests for gateway /status behavior and token persistence."""
 
+import threading
 from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -11,9 +12,9 @@ from gateway.platforms.base import MessageEvent
 from gateway.session import SessionEntry, SessionSource, build_session_key
 
 
-def _make_source() -> SessionSource:
+def _make_source(platform: Platform = Platform.TELEGRAM) -> SessionSource:
     return SessionSource(
-        platform=Platform.TELEGRAM,
+        platform=platform,
         user_id="u1",
         chat_id="c1",
         user_name="tester",
@@ -21,10 +22,10 @@ def _make_source() -> SessionSource:
     )
 
 
-def _make_event(text: str) -> MessageEvent:
+def _make_event(text: str, platform: Platform = Platform.TELEGRAM) -> MessageEvent:
     return MessageEvent(
         text=text,
-        source=_make_source(),
+        source=_make_source(platform),
         message_id="m1",
     )
 
@@ -54,10 +55,15 @@ def _make_runner(session_entry: SessionEntry):
     runner._session_db = MagicMock()
     runner._session_db.get_session_title.return_value = None
     runner._session_db.get_session_token_totals.return_value = None
+    runner._session_db.get_session.return_value = None
     runner._reasoning_config = None
     runner._provider_routing = {}
     runner._fallback_model = None
     runner._show_reasoning = False
+    runner._agent_cache = {}
+    runner._agent_cache_lock = threading.Lock()
+    runner._session_model_overrides = {}
+    runner._pending_hidden_turns = {}
     runner._is_user_authorized = lambda _source: True
     runner._set_session_env = lambda _context: None
     runner._should_send_voice_reply = lambda *_args, **_kwargs: False
@@ -80,13 +86,28 @@ async def test_status_command_reports_running_agent_without_interrupt(monkeypatc
     )
     runner = _make_runner(session_entry)
     running_agent = MagicMock()
+    running_agent.model = "openai/test-model"
+    running_agent.provider = "openai"
+    running_agent.api_mode = "chat_completions"
+    running_agent.session_input_tokens = 111
+    running_agent.session_output_tokens = 210
+    running_agent.session_total_tokens = 321
+    running_agent.session_cache_read_tokens = 0
+    running_agent.session_cache_write_tokens = 0
+    running_agent.session_reasoning_tokens = 0
+    running_agent.session_estimated_cost_usd = 0.0
+    running_agent.session_cost_status = "estimated"
     runner._running_agents[build_session_key(_make_source())] = running_agent
 
     result = await runner._handle_message(_make_event("/status"))
 
-    assert "**Session ID:** `sess-1`" in result
-    assert "**Tokens:** 321" in result
-    assert "**Agent Running:** Yes ⚡" in result
+    assert "Hermes Agent v" in result
+    assert "**Model:** `openai/test-model`" in result
+    assert "**Usage:** 111 in · 210 out · 321 total" in result
+    assert "**Session:** `agent:main:telegram:dm:c1`" in result
+    assert "**ID:** `sess-1`" in result
+    assert "**Queue:** depth 0 · **State:** running" in result
+    assert "**Chats:** telegram" in result
     assert "**Title:**" not in result
     running_agent.interrupt.assert_not_called()
     assert runner._pending_messages == {}
@@ -108,7 +129,6 @@ async def test_status_command_includes_session_title_when_present():
 
     result = await runner._handle_message(_make_event("/status"))
 
-    assert "**Session ID:** `sess-1`" in result
     assert "**Title:** My titled session" in result
 
 
@@ -134,11 +154,17 @@ async def test_status_command_prefers_sessiondb_token_totals():
         "reasoning_tokens": 6,
         "total_tokens": 3210,
     }
+    runner._session_db.get_session.return_value = {
+        "model": "openai/test-model",
+        "billing_provider": "openai",
+        "estimated_cost_usd": 1.2345,
+        "cost_status": "estimated",
+    }
 
     result = await runner._handle_message(_make_event("/status"))
 
-    assert "**Tokens:** 3,210" in result
-    assert "**Tokens:** 321" not in result
+    assert "**Usage:** 100 in · 200 out · 3,210 total · **Cost:** $1.2345 est." in result
+    assert "**Cache:** 10 read · 5 write · 9% hit · 6 reasoning" in result
 
 
 @pytest.mark.asyncio
@@ -160,7 +186,197 @@ async def test_status_command_falls_back_when_sessiondb_row_missing():
 
     result = await runner._handle_message(_make_event("/status"))
 
-    assert "**Tokens:** 321" in result
+    assert "**Usage:** 0 in · 0 out · 321 total" in result
+
+
+@pytest.mark.asyncio
+async def test_status_command_shows_live_context_metrics():
+    session_entry = SessionEntry(
+        session_key=build_session_key(_make_source()),
+        session_id="sess-1",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        platform=Platform.TELEGRAM,
+        chat_type="dm",
+    )
+    runner = _make_runner(session_entry)
+    running_agent = MagicMock()
+    running_agent.model = "openai/test-model"
+    running_agent.provider = "openai"
+    running_agent.api_mode = "chat_completions"
+    running_agent.session_input_tokens = 120
+    running_agent.session_output_tokens = 45
+    running_agent.session_total_tokens = 165
+    running_agent.session_cache_read_tokens = 25
+    running_agent.session_cache_write_tokens = 5
+    running_agent.session_reasoning_tokens = 9
+    running_agent.session_estimated_cost_usd = 0.4321
+    running_agent.session_cost_status = "estimated"
+    running_agent.context_compressor = SimpleNamespace(
+        last_prompt_tokens=28000,
+        context_length=500000,
+        compression_count=2,
+    )
+    runner._running_agents[session_entry.session_key] = running_agent
+
+    result = await runner._handle_message(_make_event("/status"))
+
+    assert "**Cache:** 25 read · 5 write · 17% hit · 9 reasoning" in result
+    assert "**Context:** 28,000 / 500,000 (6%) · **Compactions:** 2" in result
+
+
+@pytest.mark.asyncio
+async def test_status_command_omits_context_without_live_agent():
+    session_entry = SessionEntry(
+        session_key=build_session_key(_make_source()),
+        session_id="sess-1",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        platform=Platform.TELEGRAM,
+        chat_type="dm",
+    )
+    runner = _make_runner(session_entry)
+    runner._session_db.get_session.return_value = {
+        "model": "openai/test-model",
+        "billing_provider": "openai",
+        "estimated_cost_usd": 0.0,
+        "cost_status": "estimated",
+    }
+
+    result = await runner._handle_message(_make_event("/status"))
+
+    assert "**Context:**" not in result
+
+
+@pytest.mark.asyncio
+async def test_status_command_shows_model_override_and_reasoning():
+    session_entry = SessionEntry(
+        session_key=build_session_key(_make_source()),
+        session_id="sess-1",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        platform=Platform.TELEGRAM,
+        chat_type="dm",
+    )
+    runner = _make_runner(session_entry)
+    runner._session_model_overrides[session_entry.session_key] = {
+        "model": "anthropic/claude-test",
+        "provider": "anthropic",
+        "api_mode": "anthropic_messages",
+    }
+    runner._reasoning_config = {"enabled": True, "effort": "high"}
+
+    result = await runner._handle_message(_make_event("/status"))
+
+    assert "**Model:** `anthropic/claude-test` · **Provider:** anthropic" in result
+    assert "**Runtime:** Anthropic Messages · Reasoning high" in result
+
+
+@pytest.mark.asyncio
+async def test_status_command_splits_chat_platforms_and_services():
+    session_entry = SessionEntry(
+        session_key=build_session_key(_make_source()),
+        session_id="sess-1",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        platform=Platform.TELEGRAM,
+        chat_type="dm",
+    )
+    runner = _make_runner(session_entry)
+    runner.adapters[Platform.API_SERVER] = MagicMock()
+    runner.adapters[Platform.WEBHOOK] = MagicMock()
+
+    result = await runner._handle_message(_make_event("/status"))
+
+    assert "**Chats:** telegram" in result
+    assert "**Services:** api_server, webhook" in result
+
+
+@pytest.mark.asyncio
+async def test_status_command_reports_non_zero_queue_depth():
+    session_entry = SessionEntry(
+        session_key=build_session_key(_make_source()),
+        session_id="sess-1",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        platform=Platform.TELEGRAM,
+        chat_type="dm",
+    )
+    runner = _make_runner(session_entry)
+    runner._pending_messages[session_entry.session_key] = "follow-up"
+
+    result = await runner._handle_message(_make_event("/status"))
+
+    assert "**Queue:** depth 1 · **State:** idle" in result
+
+
+@pytest.mark.asyncio
+async def test_status_command_counts_pending_hidden_turns_in_queue_depth():
+    session_entry = SessionEntry(
+        session_key=build_session_key(_make_source()),
+        session_id="sess-1",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        platform=Platform.TELEGRAM,
+        chat_type="dm",
+    )
+    runner = _make_runner(session_entry)
+    runner._pending_hidden_turns[session_entry.session_key] = {
+        "session_key": session_entry.session_key,
+        "note": "nudge",
+    }
+
+    result = await runner._handle_message(_make_event("/status"))
+
+    assert "**Queue:** depth 1 · **State:** idle" in result
+
+
+@pytest.mark.asyncio
+async def test_status_command_supports_discord_channel():
+    session_entry = SessionEntry(
+        session_key=build_session_key(_make_source(Platform.DISCORD)),
+        session_id="sess-1",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        platform=Platform.DISCORD,
+        chat_type="dm",
+    )
+    runner = _make_runner(session_entry)
+    runner.adapters = {Platform.DISCORD: MagicMock()}
+    runner._session_db.get_session.return_value = {
+        "model": "openai/test-model",
+        "billing_provider": "openai",
+        "estimated_cost_usd": 0.25,
+        "cost_status": "estimated",
+    }
+
+    result = await runner._handle_message(_make_event("/status", Platform.DISCORD))
+
+    assert "**Chats:** discord" in result
+    assert "Transport" not in result
+
+
+@pytest.mark.asyncio
+async def test_status_command_supports_api_server_channel():
+    session_entry = SessionEntry(
+        session_key=build_session_key(_make_source(Platform.API_SERVER)),
+        session_id="sess-1",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        platform=Platform.API_SERVER,
+        chat_type="dm",
+    )
+    runner = _make_runner(session_entry)
+    runner.adapters = {Platform.API_SERVER: MagicMock()}
+    runner._session_db.get_session.return_value = {
+        "model": "openai/test-model",
+        "billing_provider": "openai",
+    }
+
+    result = await runner._handle_message(_make_event("/status", Platform.API_SERVER))
+
+    assert "**Services:** api_server" in result
+    assert "**Chats:**" not in result
 
 
 @pytest.mark.asyncio

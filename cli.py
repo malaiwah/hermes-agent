@@ -1813,6 +1813,300 @@ class HermesCLI:
         return snapshot
 
     @staticmethod
+    def _format_status_relative_time(ts: Optional[datetime]) -> str:
+        """Return a compact relative timestamp for status displays."""
+        if not ts:
+            return "unknown"
+        delta = datetime.now() - ts
+        seconds = max(int(delta.total_seconds()), 0)
+        if seconds < 60:
+            return "just now"
+        if seconds < 3600:
+            return f"{seconds // 60}m ago"
+        if seconds < 86400:
+            return f"{seconds // 3600}h ago"
+        return f"{seconds // 86400}d ago"
+
+    @staticmethod
+    def _format_status_cost(amount: Optional[float], status: str) -> Optional[str]:
+        """Return a human-readable cost label for status output."""
+        normalized = (status or "").strip().lower()
+        if normalized == "included":
+            return "included"
+        if amount is None and normalized in ("", "unknown", "none"):
+            return None
+        if amount is None:
+            return normalized
+        label = f"${amount:,.4f}"
+        if normalized in ("", "actual"):
+            return label
+        if normalized == "estimated":
+            return f"{label} est."
+        return f"{label} {normalized}"
+
+    @staticmethod
+    def _format_reasoning_effort_label(config: Optional[dict]) -> str:
+        """Return the effective reasoning effort label."""
+        if config is None:
+            return "medium"
+        if config.get("enabled") is False:
+            return "none"
+        return str(config.get("effort") or "medium")
+
+    @staticmethod
+    def _format_api_mode_label(api_mode: Optional[str]) -> Optional[str]:
+        """Convert internal API mode names into compact user-facing labels."""
+        if not api_mode:
+            return None
+        labels = {
+            "chat_completions": "Chat Completions",
+            "codex_responses": "Responses",
+            "anthropic_messages": "Anthropic Messages",
+        }
+        return labels.get(api_mode, str(api_mode).replace("_", " ").title())
+
+    @staticmethod
+    def _safe_status_int(value: Any, default: int = 0) -> int:
+        """Best-effort integer coercion for status values."""
+        try:
+            if value is None:
+                return default
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _safe_status_float(value: Any) -> Optional[float]:
+        """Best-effort float coercion for status values."""
+        try:
+            if value is None:
+                return None
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _get_cli_status_queue_depth(self) -> int:
+        """Return the number of queued follow-up prompts for the CLI session."""
+        pending = getattr(self, "_pending_input", None)
+        if pending is None:
+            return 0
+        try:
+            return max(int(pending.qsize()), 0)
+        except Exception:
+            return 0
+
+    def _build_cli_status_snapshot(self) -> Dict[str, Any]:
+        """Assemble a rich status snapshot for the current CLI session."""
+        from hermes_cli import __version__ as hermes_version
+
+        agent = getattr(self, "agent", None)
+        session_db = getattr(self, "_session_db", None)
+        session_id = getattr(self, "session_id", None)
+        session_row = None
+        token_totals = None
+        title = getattr(self, "_pending_title", None)
+        updated_at = None
+
+        if session_db and session_id:
+            try:
+                persisted_title = session_db.get_session_title(session_id)
+                if persisted_title:
+                    title = persisted_title
+            except Exception:
+                pass
+            try:
+                raw_totals = session_db.get_session_token_totals(session_id)
+                if isinstance(raw_totals, dict):
+                    token_totals = raw_totals
+            except Exception:
+                token_totals = None
+            try:
+                raw_row = session_db.get_session(session_id)
+                if isinstance(raw_row, dict):
+                    session_row = raw_row
+            except Exception:
+                session_row = None
+            try:
+                last_active = session_db.get_session_last_active(session_id)
+                if last_active is not None:
+                    updated_at = datetime.fromtimestamp(float(last_active))
+            except Exception:
+                updated_at = None
+
+        model = (
+            getattr(agent, "model", None)
+            or (session_row or {}).get("model")
+            or getattr(self, "model", None)
+            or "unknown"
+        )
+        provider = (
+            getattr(agent, "provider", None)
+            or (session_row or {}).get("billing_provider")
+            or getattr(self, "provider", None)
+            or "unknown"
+        )
+        api_mode = (
+            getattr(agent, "api_mode", None)
+            or (session_row or {}).get("billing_mode")
+            or getattr(self, "api_mode", None)
+        )
+        reasoning_effort = self._format_reasoning_effort_label(
+            getattr(self, "reasoning_config", None)
+        )
+
+        if agent is not None:
+            input_tokens = self._safe_status_int(getattr(agent, "session_input_tokens", 0))
+            output_tokens = self._safe_status_int(getattr(agent, "session_output_tokens", 0))
+            cache_read_tokens = self._safe_status_int(getattr(agent, "session_cache_read_tokens", 0))
+            cache_write_tokens = self._safe_status_int(getattr(agent, "session_cache_write_tokens", 0))
+            reasoning_tokens = self._safe_status_int(getattr(agent, "session_reasoning_tokens", 0))
+            total_tokens = self._safe_status_int(getattr(agent, "session_total_tokens", 0))
+            cost_amount = self._safe_status_float(getattr(agent, "session_estimated_cost_usd", None))
+            cost_status = str(getattr(agent, "session_cost_status", "") or "")
+            if cost_amount is None:
+                cost_result = estimate_usage_cost(
+                    str(model or "unknown"),
+                    CanonicalUsage(
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        cache_read_tokens=cache_read_tokens,
+                        cache_write_tokens=cache_write_tokens,
+                    ),
+                    provider=getattr(agent, "provider", None),
+                    base_url=getattr(agent, "base_url", None),
+                )
+                cost_amount = self._safe_status_float(cost_result.amount_usd)
+                if not cost_status:
+                    cost_status = str(cost_result.status or "")
+        else:
+            totals = token_totals or {}
+            input_tokens = self._safe_status_int(totals.get("input_tokens", 0))
+            output_tokens = self._safe_status_int(totals.get("output_tokens", 0))
+            cache_read_tokens = self._safe_status_int(totals.get("cache_read_tokens", 0))
+            cache_write_tokens = self._safe_status_int(totals.get("cache_write_tokens", 0))
+            reasoning_tokens = self._safe_status_int(totals.get("reasoning_tokens", 0))
+            total_tokens = self._safe_status_int(totals.get("total_tokens", 0))
+            actual_cost = (session_row or {}).get("actual_cost_usd")
+            estimated_cost = (session_row or {}).get("estimated_cost_usd")
+            cost_amount = self._safe_status_float(
+                actual_cost if actual_cost is not None else estimated_cost
+            )
+            cost_status = str((session_row or {}).get("cost_status") or "")
+
+        cache_pct = None
+        cache_denominator = input_tokens + cache_read_tokens
+        if cache_denominator > 0 and cache_read_tokens > 0:
+            cache_pct = round((cache_read_tokens / cache_denominator) * 100)
+
+        context_tokens = None
+        context_limit = None
+        context_pct = None
+        compactions = None
+        compressor = getattr(agent, "context_compressor", None) if agent is not None else None
+        if compressor is not None:
+            context_tokens = self._safe_status_int(
+                getattr(compressor, "last_prompt_tokens", 0), default=0
+            )
+            context_limit = self._safe_status_int(
+                getattr(compressor, "context_length", 0), default=0
+            )
+            compactions = self._safe_status_int(
+                getattr(compressor, "compression_count", 0), default=0
+            )
+            if context_tokens and context_limit:
+                context_pct = round((context_tokens / context_limit) * 100)
+
+        if updated_at is None:
+            updated_at = datetime.now() if agent is not None else getattr(self, "session_start", None)
+
+        return {
+            "version": hermes_version,
+            "title": title,
+            "session_id": session_id or "unknown",
+            "updated_label": self._format_status_relative_time(updated_at),
+            "running": bool(getattr(self, "_agent_running", False)),
+            "model": str(model or "unknown"),
+            "provider": str(provider or "unknown"),
+            "api_mode_label": self._format_api_mode_label(api_mode),
+            "reasoning_effort": reasoning_effort,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens,
+            "cache_read_tokens": cache_read_tokens,
+            "cache_write_tokens": cache_write_tokens,
+            "cache_pct": cache_pct,
+            "reasoning_tokens": reasoning_tokens,
+            "cost_label": self._format_status_cost(cost_amount, cost_status),
+            "context_tokens": context_tokens,
+            "context_limit": context_limit,
+            "context_pct": context_pct,
+            "compactions": compactions,
+            "queue_depth": self._get_cli_status_queue_depth(),
+        }
+
+    def _show_session_status(self) -> None:
+        """Show a Hermes-first rich snapshot for the current CLI session."""
+        snapshot = self._build_cli_status_snapshot()
+
+        lines = [f"⚕ Hermes Agent v{snapshot['version']}"]
+        lines.append(
+            f"Model: {snapshot['model']} · Provider: {snapshot['provider']}"
+        )
+
+        usage_line = (
+            f"Usage: {snapshot['input_tokens']:,} in · "
+            f"{snapshot['output_tokens']:,} out · {snapshot['total_tokens']:,} total"
+        )
+        if snapshot["cost_label"]:
+            usage_line += f" · Cost: {snapshot['cost_label']}"
+        lines.append(usage_line)
+
+        if (
+            snapshot["cache_read_tokens"]
+            or snapshot["cache_write_tokens"]
+            or snapshot["reasoning_tokens"]
+        ):
+            cache_parts = [
+                f"{snapshot['cache_read_tokens']:,} read",
+                f"{snapshot['cache_write_tokens']:,} write",
+            ]
+            if snapshot["cache_pct"] is not None:
+                cache_parts.append(f"{snapshot['cache_pct']}% hit")
+            if snapshot["reasoning_tokens"]:
+                cache_parts.append(f"{snapshot['reasoning_tokens']:,} reasoning")
+            lines.append(f"Cache: {' · '.join(cache_parts)}")
+
+        if snapshot["context_tokens"] and snapshot["context_limit"]:
+            context_line = (
+                f"Context: {snapshot['context_tokens']:,} / "
+                f"{snapshot['context_limit']:,}"
+            )
+            if snapshot["context_pct"] is not None:
+                context_line += f" ({snapshot['context_pct']}%)"
+            if snapshot["compactions"] is not None:
+                context_line += f" · Compactions: {snapshot['compactions']}"
+            lines.append(context_line)
+
+        lines.append(
+            f"Session: {snapshot['session_id']} · updated {snapshot['updated_label']}"
+        )
+        if snapshot["title"]:
+            lines.append(f"Title: {snapshot['title']}")
+
+        runtime_parts = []
+        if snapshot["api_mode_label"]:
+            runtime_parts.append(snapshot["api_mode_label"])
+        runtime_parts.append(f"Reasoning {snapshot['reasoning_effort']}")
+        runtime_parts.append("CLI interactive")
+        lines.append(f"Runtime: {' · '.join(runtime_parts)}")
+        lines.append(
+            f"Queue: depth {snapshot['queue_depth']} · "
+            f"State: {'running' if snapshot['running'] else 'idle'}"
+        )
+
+        print("\n".join(lines))
+
+    @staticmethod
     def _status_bar_display_width(text: str) -> int:
         """Return terminal cell width for status-bar text.
 
@@ -4862,6 +5156,8 @@ class HermesCLI:
             self._handle_reasoning_command(cmd_original)
         elif canonical == "compress":
             self._manual_compress()
+        elif canonical == "status":
+            self._show_session_status()
         elif canonical == "usage":
             self._show_usage()
         elif canonical == "insights":

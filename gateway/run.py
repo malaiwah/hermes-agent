@@ -3875,50 +3875,354 @@ class GatewayRunner:
 
         return "\n".join(lines)
 
+    @staticmethod
+    def _format_status_relative_time(ts: Optional[datetime]) -> str:
+        """Return a compact relative timestamp for status displays."""
+        if not ts:
+            return "unknown"
+        delta = datetime.now() - ts
+        seconds = max(int(delta.total_seconds()), 0)
+        if seconds < 60:
+            return "just now"
+        if seconds < 3600:
+            return f"{seconds // 60}m ago"
+        if seconds < 86400:
+            return f"{seconds // 3600}h ago"
+        return f"{seconds // 86400}d ago"
+
+    @staticmethod
+    def _format_status_cost(amount: Optional[float], status: str) -> Optional[str]:
+        """Return a human-readable cost label for status output."""
+        normalized = (status or "").strip().lower()
+        if normalized == "included":
+            return "included"
+        if amount is None and normalized in ("", "unknown", "none"):
+            return None
+        if amount is None:
+            return normalized
+        label = f"${amount:,.4f}"
+        if normalized in ("", "actual"):
+            return label
+        if normalized == "estimated":
+            return f"{label} est."
+        return f"{label} {normalized}"
+
+    @staticmethod
+    def _format_reasoning_effort_label(config: Optional[dict]) -> str:
+        """Return the effective reasoning effort label."""
+        if config is None:
+            return "medium"
+        if config.get("enabled") is False:
+            return "none"
+        return str(config.get("effort") or "medium")
+
+    @staticmethod
+    def _format_api_mode_label(api_mode: Optional[str]) -> Optional[str]:
+        """Convert internal API mode names into compact user-facing labels."""
+        if not api_mode:
+            return None
+        labels = {
+            "chat_completions": "Chat Completions",
+            "codex_responses": "Responses",
+            "anthropic_messages": "Anthropic Messages",
+        }
+        return labels.get(api_mode, str(api_mode).replace("_", " ").title())
+
+    @staticmethod
+    def _safe_status_int(value: Any, default: int = 0) -> int:
+        """Best-effort integer coercion for status values."""
+        try:
+            if value is None:
+                return default
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _safe_status_float(value: Any) -> Optional[float]:
+        """Best-effort float coercion for status values."""
+        try:
+            if value is None:
+                return None
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _get_status_platform_sections(self) -> tuple[list[str], list[str]]:
+        """Split connected adapters into chat-facing platforms and services."""
+        internal_platforms = {Platform.API_SERVER, Platform.WEBHOOK}
+        chats = [p.value for p in self.adapters.keys() if p not in internal_platforms]
+        services = [p.value for p in self.adapters.keys() if p in internal_platforms]
+        return chats, services
+
+    def _get_status_queue_depth(self, session_key: str, source: SessionSource) -> int:
+        """Return the number of queued follow-up items for a session."""
+        depth = 0
+        if getattr(self, "_pending_messages", {}).get(session_key):
+            depth += 1
+        if session_key in getattr(self, "_pending_hidden_turns", {}):
+            depth += 1
+        adapter = self.adapters.get(source.platform)
+        adapter_pending = getattr(adapter, "_pending_messages", {}) if adapter else {}
+        if session_key in adapter_pending:
+            depth += 1
+        return depth
+
+    def _build_status_snapshot(self, source: SessionSource, session_entry) -> dict[str, Any]:
+        """Assemble a rich status snapshot for the current gateway session."""
+        from hermes_cli import __version__ as hermes_version
+
+        session_key = session_entry.session_key
+        running_ref = self._running_agents.get(session_key)
+        live_agent = (
+            running_ref
+            if running_ref is not None
+            and running_ref is not _AGENT_PENDING_SENTINEL
+            and hasattr(running_ref, "model")
+            else None
+        )
+
+        cached_agent = None
+        cache = getattr(self, "_agent_cache", None)
+        cache_lock = getattr(self, "_agent_cache_lock", None)
+        try:
+            if cache is not None and cache_lock is not None:
+                with cache_lock:
+                    cached_entry = cache.get(session_key)
+                if cached_entry and cached_entry[0] is not None:
+                    cached_agent = cached_entry[0]
+        except Exception:
+            cached_agent = None
+
+        session_override = getattr(self, "_session_model_overrides", {}).get(session_key, {}) or {}
+
+        session_row = None
+        token_totals = None
+        title = None
+        if self._session_db:
+            try:
+                title = self._session_db.get_session_title(session_entry.session_id)
+            except Exception:
+                title = None
+            try:
+                raw_totals = self._session_db.get_session_token_totals(session_entry.session_id)
+                if isinstance(raw_totals, dict):
+                    token_totals = raw_totals
+            except Exception:
+                token_totals = None
+            try:
+                raw_row = self._session_db.get_session(session_entry.session_id)
+                if isinstance(raw_row, dict):
+                    session_row = raw_row
+            except Exception:
+                session_row = None
+
+        config = _load_gateway_config()
+        model_cfg = config.get("model", {}) if isinstance(config, dict) else {}
+        if isinstance(model_cfg, str):
+            config_model = model_cfg
+            config_provider = ""
+        elif isinstance(model_cfg, dict):
+            config_model = model_cfg.get("default") or model_cfg.get("model") or ""
+            config_provider = model_cfg.get("provider") or ""
+        else:
+            config_model = ""
+            config_provider = ""
+
+        model = None
+        provider = None
+        api_mode = None
+        if live_agent is not None:
+            model = getattr(live_agent, "model", None)
+            provider = getattr(live_agent, "provider", None)
+            api_mode = getattr(live_agent, "api_mode", None)
+        if not model and cached_agent is not None:
+            model = getattr(cached_agent, "model", None)
+        if not provider and cached_agent is not None:
+            provider = getattr(cached_agent, "provider", None)
+        if not api_mode and cached_agent is not None:
+            api_mode = getattr(cached_agent, "api_mode", None)
+
+        model = model or session_override.get("model") or (session_row or {}).get("model") or config_model or "unknown"
+        provider = provider or session_override.get("provider") or (session_row or {}).get("billing_provider") or config_provider or "unknown"
+        api_mode = api_mode or session_override.get("api_mode")
+
+        if not api_mode:
+            try:
+                runtime = _resolve_runtime_agent_kwargs()
+                api_mode = runtime.get("api_mode")
+                if provider == "unknown":
+                    provider = runtime.get("provider", provider)
+            except Exception:
+                pass
+
+        reasoning_effort = self._format_reasoning_effort_label(
+            getattr(self, "_reasoning_config", None)
+        )
+
+        if live_agent is not None:
+            input_tokens = self._safe_status_int(getattr(live_agent, "session_input_tokens", 0))
+            output_tokens = self._safe_status_int(getattr(live_agent, "session_output_tokens", 0))
+            cache_read_tokens = self._safe_status_int(getattr(live_agent, "session_cache_read_tokens", 0))
+            cache_write_tokens = self._safe_status_int(getattr(live_agent, "session_cache_write_tokens", 0))
+            reasoning_tokens = self._safe_status_int(getattr(live_agent, "session_reasoning_tokens", 0))
+            total_tokens = self._safe_status_int(getattr(live_agent, "session_total_tokens", 0))
+            cost_amount = self._safe_status_float(getattr(live_agent, "session_estimated_cost_usd", None))
+            cost_status = str(getattr(live_agent, "session_cost_status", "") or "")
+        else:
+            totals = token_totals or {}
+            input_tokens = self._safe_status_int(
+                totals.get("input_tokens", getattr(session_entry, "input_tokens", 0))
+            )
+            output_tokens = self._safe_status_int(
+                totals.get("output_tokens", getattr(session_entry, "output_tokens", 0))
+            )
+            cache_read_tokens = self._safe_status_int(
+                totals.get("cache_read_tokens", getattr(session_entry, "cache_read_tokens", 0))
+            )
+            cache_write_tokens = self._safe_status_int(
+                totals.get("cache_write_tokens", getattr(session_entry, "cache_write_tokens", 0))
+            )
+            reasoning_tokens = self._safe_status_int(totals.get("reasoning_tokens", 0))
+            total_tokens = self._safe_status_int(
+                totals.get("total_tokens", getattr(session_entry, "total_tokens", 0))
+            )
+            actual_cost = (session_row or {}).get("actual_cost_usd")
+            estimated_cost = (session_row or {}).get("estimated_cost_usd")
+            cost_amount = self._safe_status_float(
+                actual_cost if actual_cost is not None else estimated_cost
+            )
+            cost_status = str((session_row or {}).get("cost_status") or getattr(session_entry, "cost_status", "") or "")
+
+        cache_pct = None
+        cache_denominator = input_tokens + cache_read_tokens
+        if cache_denominator > 0 and cache_read_tokens > 0:
+            cache_pct = round((cache_read_tokens / cache_denominator) * 100)
+
+        context_tokens = None
+        context_limit = None
+        context_pct = None
+        compactions = None
+        if live_agent is not None and hasattr(live_agent, "context_compressor"):
+            compressor = live_agent.context_compressor
+            context_tokens = self._safe_status_int(
+                getattr(compressor, "last_prompt_tokens", 0), default=0
+            )
+            context_limit = self._safe_status_int(
+                getattr(compressor, "context_length", 0), default=0
+            )
+            compactions = self._safe_status_int(
+                getattr(compressor, "compression_count", 0), default=0
+            )
+            if context_tokens and context_limit:
+                context_pct = round((context_tokens / context_limit) * 100)
+
+        transport = None
+        if source.platform == Platform.TELEGRAM:
+            telegram_adapter = self.adapters.get(Platform.TELEGRAM)
+            if telegram_adapter is not None:
+                transport = "webhook" if getattr(telegram_adapter, "_webhook_mode", False) else "polling"
+
+        chats, services = self._get_status_platform_sections()
+
+        return {
+            "version": hermes_version,
+            "title": title,
+            "session_id": session_entry.session_id,
+            "session_key": session_key,
+            "updated_label": self._format_status_relative_time(
+                getattr(session_entry, "updated_at", None)
+            ),
+            "running": session_key in self._running_agents,
+            "model": str(model or "unknown"),
+            "provider": str(provider or "unknown"),
+            "api_mode_label": self._format_api_mode_label(api_mode),
+            "reasoning_effort": reasoning_effort,
+            "transport": transport,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens,
+            "cache_read_tokens": cache_read_tokens,
+            "cache_write_tokens": cache_write_tokens,
+            "cache_pct": cache_pct,
+            "reasoning_tokens": reasoning_tokens,
+            "cost_label": self._format_status_cost(cost_amount, cost_status),
+            "context_tokens": context_tokens,
+            "context_limit": context_limit,
+            "context_pct": context_pct,
+            "compactions": compactions,
+            "queue_depth": self._get_status_queue_depth(session_key, source),
+            "chat_platforms": chats,
+            "service_platforms": services,
+        }
+
     async def _handle_status_command(self, event: MessageEvent) -> str:
         """Handle /status command."""
         source = event.source
         session_entry = self.session_store.get_or_create_session(source)
+        snapshot = self._build_status_snapshot(source, session_entry)
 
-        connected_platforms = [p.value for p in self.adapters.keys()]
+        lines = [f"⚕ **Hermes Agent v{snapshot['version']}**"]
+        lines.append(
+            f"**Model:** `{snapshot['model']}` · **Provider:** {snapshot['provider']}"
+        )
 
-        # Check if there's an active agent
-        session_key = session_entry.session_key
-        is_running = session_key in self._running_agents
+        usage_line = (
+            f"**Usage:** {snapshot['input_tokens']:,} in · "
+            f"{snapshot['output_tokens']:,} out · {snapshot['total_tokens']:,} total"
+        )
+        if snapshot["cost_label"]:
+            usage_line += f" · **Cost:** {snapshot['cost_label']}"
+        lines.append(usage_line)
 
-        title = None
-        token_totals = None
-        if self._session_db:
-            try:
-                title = self._session_db.get_session_title(session_entry.session_id)
-                token_totals = self._session_db.get_session_token_totals(session_entry.session_id)
-            except Exception:
-                title = None
-                token_totals = None
+        if (
+            snapshot["cache_read_tokens"]
+            or snapshot["cache_write_tokens"]
+            or snapshot["reasoning_tokens"]
+        ):
+            cache_parts = [
+                f"{snapshot['cache_read_tokens']:,} read",
+                f"{snapshot['cache_write_tokens']:,} write",
+            ]
+            if snapshot["cache_pct"] is not None:
+                cache_parts.append(f"{snapshot['cache_pct']}% hit")
+            if snapshot["reasoning_tokens"]:
+                cache_parts.append(f"{snapshot['reasoning_tokens']:,} reasoning")
+            lines.append(f"**Cache:** {' · '.join(cache_parts)}")
 
-        # Use SessionDB token totals for authoritative count; fall back to
-        # session_store. SessionDB is the source of truth — tokens are
-        # persisted there directly by the agent (commit 20441cf2). The
-        # session_store fallback is only hit when the DB row is missing
-        # (fresh install, DB unavailable, or a session that predates the
-        # SessionDB persistence).
-        total_tokens = token_totals["total_tokens"] if token_totals else session_entry.total_tokens
+        if snapshot["context_tokens"] and snapshot["context_limit"]:
+            context_line = (
+                f"**Context:** {snapshot['context_tokens']:,} / "
+                f"{snapshot['context_limit']:,}"
+            )
+            if snapshot["context_pct"] is not None:
+                context_line += f" ({snapshot['context_pct']}%)"
+            if snapshot["compactions"] is not None:
+                context_line += f" · **Compactions:** {snapshot['compactions']}"
+            lines.append(context_line)
 
-        lines = [
-            "📊 **Hermes Gateway Status**",
-            "",
-            f"**Session ID:** `{session_entry.session_id}`",
-        ]
-        if title:
-            lines.append(f"**Title:** {title}")
-        lines.extend([
-            f"**Created:** {session_entry.created_at.strftime('%Y-%m-%d %H:%M')}",
-            f"**Last Activity:** {session_entry.updated_at.strftime('%Y-%m-%d %H:%M')}",
-            f"**Tokens:** {total_tokens:,}",
-            f"**Agent Running:** {'Yes ⚡' if is_running else 'No'}",
-            "",
-            f"**Connected Platforms:** {', '.join(connected_platforms)}",
-        ])
+        lines.append(
+            f"**Session:** `{snapshot['session_key']}` · updated {snapshot['updated_label']}"
+        )
+        lines.append(f"**ID:** `{snapshot['session_id']}`")
+        if snapshot["title"]:
+            lines.append(f"**Title:** {snapshot['title']}")
+
+        runtime_parts = []
+        if snapshot["api_mode_label"]:
+            runtime_parts.append(snapshot["api_mode_label"])
+        runtime_parts.append(f"Reasoning {snapshot['reasoning_effort']}")
+        if snapshot["transport"]:
+            runtime_parts.append(f"Transport {snapshot['transport']}")
+        lines.append(f"**Runtime:** {' · '.join(runtime_parts)}")
+        lines.append(
+            f"**Queue:** depth {snapshot['queue_depth']} · "
+            f"**State:** {'running' if snapshot['running'] else 'idle'}"
+        )
+        if snapshot["chat_platforms"]:
+            lines.append(f"**Chats:** {', '.join(snapshot['chat_platforms'])}")
+        if snapshot["service_platforms"]:
+            lines.append(f"**Services:** {', '.join(snapshot['service_platforms'])}")
 
         return "\n".join(lines)
     

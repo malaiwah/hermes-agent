@@ -628,6 +628,30 @@ class SessionDB:
             return totals
         return None
 
+    def get_session_last_active(self, session_id: str) -> Optional[float]:
+        """Return the latest activity timestamp for a session.
+
+        Uses the most recent message timestamp when available, otherwise falls
+        back to the session's ``started_at`` value. Returns ``None`` when the
+        session does not exist.
+        """
+        with self._lock:
+            cursor = self._conn.execute(
+                """
+                SELECT COALESCE(
+                    (SELECT MAX(m.timestamp) FROM messages m WHERE m.session_id = s.id),
+                    s.started_at
+                ) AS last_active
+                FROM sessions s
+                WHERE s.id = ?
+                """,
+                (session_id,),
+            )
+            row = cursor.fetchone()
+        if not row or row["last_active"] is None:
+            return None
+        return float(row["last_active"])
+
     def resolve_session_id(self, session_id_or_prefix: str) -> Optional[str]:
         """Resolve an exact or uniquely prefixed session ID to the full ID.
 
