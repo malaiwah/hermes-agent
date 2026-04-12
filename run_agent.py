@@ -514,6 +514,7 @@ class AIAgent:
         checkpoints_enabled: bool = False,
         checkpoint_max_snapshots: int = 50,
         pass_session_id: bool = False,
+        extra_headers: dict = None,
         persist_session: bool = True,
         _shared_memory_store=None,  # Share parent's memory store (for subagents)
         _is_subagent=False,  # Mark as subagent for memory access control
@@ -582,6 +583,7 @@ class AIAgent:
         self.background_review_callback = None  # Optional sync callback for gateway delivery
         self.skip_context_files = skip_context_files
         self.pass_session_id = pass_session_id
+        self.extra_headers = extra_headers
         self.persist_session = persist_session
         self._credential_pool = credential_pool
         self.log_prefix_chars = log_prefix_chars
@@ -803,6 +805,9 @@ class AIAgent:
                     }
                 elif "portal.qwen.ai" in effective_base.lower():
                     client_kwargs["default_headers"] = _qwen_portal_headers()
+                # Apply custom headers for named custom providers (from config.yaml)
+                if self.provider == "custom" and self.extra_headers:
+                    client_kwargs.setdefault("default_headers", {}).update(self.extra_headers)
             else:
                 # No explicit creds — use the centralized provider router
                 from agent.auxiliary_client import resolve_provider_client
