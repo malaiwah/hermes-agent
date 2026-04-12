@@ -20,8 +20,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
 
 from tools.mcp_servers.remote_filesystem.connection import ConnectionManager
 
-REMOTE_HOST = os.environ.get("REMOTE_HOST", "localhost")
-REMOTE_USER = os.environ.get("REMOTE_USER", os.environ.get("USER", "root"))
+REMOTE_HOST = os.environ.get("REMOTE_HOST", "10.15.0.151")
+REMOTE_USER = os.environ.get("REMOTE_USER", "mbelleau")
 REMOTE_PORT = int(os.environ.get("REMOTE_PORT", "22"))
 REMOTE_KEY = os.environ.get("REMOTE_KEY", "")
 
