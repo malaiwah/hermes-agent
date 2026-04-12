@@ -955,8 +955,7 @@ class MCPServerTask:
         """Run the MCP server inside the sandbox container via docker exec.
 
         Uses the same container that terminal/file tools use, communicating
-        over a persistent ``docker exec -i`` pipe.  Enabled by setting
-        ``sandbox: true`` in the server's config.yaml entry.
+        over a persistent ``docker exec -i`` pipe.
         """
         command = config.get("command")
         args = config.get("args", [])
@@ -972,8 +971,14 @@ class MCPServerTask:
         from tools.terminal_tool import (
             _active_environments, _env_lock, _get_env_config,
             _create_environment, _start_cleanup_thread, _last_activity,
+            _creation_locks, _creation_locks_lock,
         )
+        from tools.file_tools import _get_file_ops  # noqa: F401 — ensures env exists
 
+        # sandbox_task_id controls which container the server runs in:
+        #   "default"  → shares the agent's terminal/file sandbox
+        #   custom     → gets a dedicated container (isolated from agent work)
+        #   same value across servers → those servers share one container
         sandbox_task_id = config.get("sandbox_task_id", "default")
 
         # Ensure a sandbox container exists for this task_id
@@ -1000,7 +1005,17 @@ class MCPServerTask:
                 "docker_mount_cwd_to_workspace": env_config.get("docker_mount_cwd_to_workspace", False),
                 "docker_forward_env": env_config.get("docker_forward_env", []),
                 "docker_env": env_config.get("docker_env", {}),
+                "docker_network": env_config.get("docker_network"),
+                "docker_extra_hosts": env_config.get("docker_extra_hosts", []),
+                "docker_env_files": env_config.get("docker_env_files", []),
+                "docker_user": env_config.get("docker_user"),
             }
+            if env_type == "podman":
+                container_config["podman_rootful"] = env_config.get("podman_rootful", False)
+                container_config["podman_privileged"] = env_config.get("podman_privileged", False)
+                container_config["podman_userns"] = env_config.get("podman_userns", "")
+                container_config["podman_extra_capabilities"] = env_config.get("podman_extra_capabilities", [])
+                container_config["podman_extra_args"] = env_config.get("podman_extra_args", [])
 
             env = _create_environment(
                 env_type=env_type, image=image, cwd=cwd,
@@ -1358,17 +1373,9 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
                     parts.append(block.text)
             text_result = "\n".join(parts) if parts else ""
 
-            # Combine content + structuredContent when both are present.
-            # MCP spec: content is model-oriented (text), structuredContent
-            # is machine-oriented (JSON metadata).  For an AI agent, content
-            # is the primary payload; structuredContent supplements it.
+            # Prefer structuredContent (machine-readable JSON) over plain text
             structured = getattr(result, "structuredContent", None)
             if structured is not None:
-                if text_result:
-                    return json.dumps({
-                        "result": text_result,
-                        "structuredContent": structured,
-                    })
                 return json.dumps({"result": structured})
             return json.dumps({"result": text_result})
 
@@ -2124,7 +2131,7 @@ def get_mcp_status() -> List[dict]:
         active_servers = dict(_servers)
 
     for name, cfg in configured.items():
-        transport = "http" if "url" in cfg else "stdio"
+        transport = "http" if "url" in cfg else ("sandbox" if cfg.get("sandbox") else "stdio")
         server = active_servers.get(name)
         if server and server.session is not None:
             entry = {
@@ -2263,7 +2270,6 @@ def _kill_orphaned_mcp_children() -> None:
     Only kills PIDs tracked in ``_stdio_pids`` — never arbitrary children.
     """
     import signal as _signal
-    kill_signal = getattr(_signal, "SIGKILL", _signal.SIGTERM)
 
     with _lock:
         pids = list(_stdio_pids)
@@ -2271,7 +2277,7 @@ def _kill_orphaned_mcp_children() -> None:
 
     for pid in pids:
         try:
-            os.kill(pid, kill_signal)
+            os.kill(pid, _signal.SIGKILL)
             logger.debug("Force-killed orphaned MCP stdio process %d", pid)
         except (ProcessLookupError, PermissionError, OSError):
             pass  # Already exited or inaccessible
