@@ -752,6 +752,10 @@ class MCPServerTask:
         """Check if this server uses HTTP transport."""
         return "url" in self._config
 
+    def _is_sandbox(self) -> bool:
+        """Check if this server should run inside the sandbox container."""
+        return bool(self._config.get("sandbox"))
+
     # ----- Dynamic tool discovery (notifications/tools/list_changed) -----
 
     def _make_message_handler(self):
@@ -947,6 +951,114 @@ class MCPServerTask:
                     self._ready.set()
                     await self._shutdown_event.wait()
 
+    async def _run_sandbox(self, config: dict):
+        """Run the MCP server inside the sandbox container via docker exec.
+
+        Uses the same container that terminal/file tools use, communicating
+        over a persistent ``docker exec -i`` pipe.
+        """
+        command = config.get("command")
+        args = config.get("args", [])
+        user_env = config.get("env") or {}
+
+        if not command:
+            raise ValueError(
+                f"MCP server '{self.name}' has no 'command' in config"
+            )
+
+        # Get or create the sandbox container
+        import time
+        from tools.terminal_tool import (
+            _active_environments, _env_lock, _get_env_config,
+            _create_environment, _start_cleanup_thread, _last_activity,
+            _creation_locks, _creation_locks_lock,
+        )
+        from tools.file_tools import _get_file_ops  # noqa: F401 — ensures env exists
+
+        sandbox_task_id = config.get("sandbox_task_id", "default")
+
+        # Ensure a sandbox container exists for this task_id
+        with _env_lock:
+            env = _active_environments.get(sandbox_task_id)
+
+        if env is None:
+            env_config = _get_env_config()
+            env_type = env_config["env_type"]
+            if env_type not in ("docker", "podman"):
+                raise RuntimeError(
+                    f"MCP server '{self.name}': sandbox: true requires "
+                    f"TERMINAL_ENV=docker or podman, got '{env_type}'"
+                )
+            image = env_config.get(f"{env_type}_image", "")
+            cwd = env_config.get("cwd", "/root")
+
+            container_config = {
+                "container_cpu": env_config.get("container_cpu", 1),
+                "container_memory": env_config.get("container_memory", 5120),
+                "container_disk": env_config.get("container_disk", 51200),
+                "container_persistent": env_config.get("container_persistent", True),
+                "docker_volumes": env_config.get("docker_volumes", []),
+                "docker_mount_cwd_to_workspace": env_config.get("docker_mount_cwd_to_workspace", False),
+                "docker_forward_env": env_config.get("docker_forward_env", []),
+                "docker_env": env_config.get("docker_env", {}),
+                "docker_network": env_config.get("docker_network"),
+                "docker_extra_hosts": env_config.get("docker_extra_hosts", []),
+                "docker_env_files": env_config.get("docker_env_files", []),
+                "docker_user": env_config.get("docker_user"),
+            }
+            if env_type == "podman":
+                container_config["podman_rootful"] = env_config.get("podman_rootful", False)
+                container_config["podman_privileged"] = env_config.get("podman_privileged", False)
+                container_config["podman_userns"] = env_config.get("podman_userns", "")
+                container_config["podman_extra_capabilities"] = env_config.get("podman_extra_capabilities", [])
+                container_config["podman_extra_args"] = env_config.get("podman_extra_args", [])
+
+            env = _create_environment(
+                env_type=env_type, image=image, cwd=cwd,
+                timeout=env_config.get("timeout", 120),
+                container_config=container_config,
+                task_id=sandbox_task_id,
+                host_cwd=env_config.get("host_cwd"),
+            )
+            with _env_lock:
+                _active_environments[sandbox_task_id] = env
+                _last_activity[sandbox_task_id] = time.time()
+            _start_cleanup_thread()
+
+        container_id = getattr(env, "_container_id", None)
+        docker_exe = getattr(env, "_docker_exe", None)
+
+        if not container_id or not docker_exe:
+            raise RuntimeError(
+                f"MCP server '{self.name}': sandbox container has no "
+                f"container_id or docker_exe (env_type may not be docker/podman)"
+            )
+
+        logger.info(
+            "MCP server '%s': using sandbox transport (container=%s, task=%s)",
+            self.name, container_id[:12], sandbox_task_id,
+        )
+
+        from tools.mcp_sandbox_transport import sandbox_client
+
+        sampling_kwargs = self._sampling.session_kwargs() if self._sampling else {}
+        if _MCP_NOTIFICATION_TYPES and _MCP_MESSAGE_HANDLER_SUPPORTED:
+            sampling_kwargs["message_handler"] = self._make_message_handler()
+
+        async with sandbox_client(
+            container_id=container_id,
+            docker_exe=docker_exe,
+            command=command,
+            args=args,
+            env=user_env,
+        ) as (read_stream, write_stream):
+            async with ClientSession(read_stream, write_stream, **sampling_kwargs) as session:
+                await session.initialize()
+                self.session = session
+                await self._discover_tools()
+                self._ready.set()
+                await self._shutdown_event.wait()
+
     async def _discover_tools(self):
         """Discover tools from the connected session."""
         if self.session is None:
@@ -990,6 +1102,8 @@ class MCPServerTask:
             try:
                 if self._is_http():
                     await self._run_http(config)
+                elif self._is_sandbox():
+                    await self._run_sandbox(config)
                 else:
                     await self._run_stdio(config)
                 # Normal exit (shutdown requested) -- break out
@@ -1854,7 +1968,7 @@ async def _discover_and_register_server(name: str, config: dict) -> List[str]:
     registered_names = _register_server_tools(name, server, config)
     server._registered_tool_names = list(registered_names)
 
-    transport_type = "HTTP" if "url" in config else "stdio"
+    transport_type = "HTTP" if "url" in config else ("sandbox" if config.get("sandbox") else "stdio")
     logger.info(
         "MCP server '%s' (%s): registered %d tool(s): %s",
         name, transport_type, len(registered_names),
@@ -2013,7 +2127,7 @@ def get_mcp_status() -> List[dict]:
         active_servers = dict(_servers)
 
     for name, cfg in configured.items():
-        transport = "http" if "url" in cfg else "stdio"
+        transport = "http" if "url" in cfg else ("sandbox" if cfg.get("sandbox") else "stdio")
         server = active_servers.get(name)
         if server and server.session is not None:
             entry = {
