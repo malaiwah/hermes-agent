@@ -38,7 +38,10 @@ _manager = ConnectionManager()
 def _format_error(response: dict) -> str:
     """Format a JSON-RPC error response as a readable string."""
     err = response.get("error", {})
-    return f"Error {err.get('code', '?')}: {err.get('message', 'unknown')}"
+    msg = f"Error {err.get('code', '?')}: {err.get('message', 'unknown')}"
+    if err.get("data"):
+        msg += f"\n{err['data']}"
+    return msg
 
 
 def _build_server() -> FastMCP:

@@ -49,24 +49,47 @@ class HandlerClient:
         """Read a notification (no id) from the handler."""
         return self._recv()
 
-    def _recv(self) -> dict:
-        content_length = None
-        while True:
-            line = self.proc.stdout.readline().decode("utf-8").strip()
-            if not line:
-                break
-            if line.lower().startswith("content-length:"):
-                content_length = int(line.split(":", 1)[1].strip())
-        assert content_length is not None, "No Content-Length header received"
-        body = self.proc.stdout.read(content_length)
-        return json.loads(body.decode("utf-8"))
+    def _recv(self, timeout: float = 10) -> dict:
+        import queue, threading
+
+        result_q: queue.Queue = queue.Queue()
+
+        def _reader():
+            try:
+                content_length = None
+                while True:
+                    line = self.proc.stdout.readline().decode("utf-8").strip()
+                    if not line:
+                        break
+                    if line.lower().startswith("content-length:"):
+                        content_length = int(line.split(":", 1)[1].strip())
+                if content_length is None:
+                    result_q.put(None)
+                    return
+                body = self.proc.stdout.read(content_length)
+                result_q.put(json.loads(body.decode("utf-8")))
+            except Exception:
+                result_q.put(None)
+
+        t = threading.Thread(target=_reader, daemon=True)
+        t.start()
+        try:
+            result = result_q.get(timeout=timeout)
+        except queue.Empty:
+            raise TimeoutError("Timed out waiting for handler response")
+        assert result is not None, "No response received from handler"
+        return result
 
     def close(self):
         try:
             self.proc.stdin.close()
         except Exception:
             pass
-        self.proc.wait(timeout=5)
+        try:
+            self.proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+            self.proc.wait(timeout=2)
 
 
 @pytest.fixture

@@ -219,13 +219,14 @@ def _method_patch(params: dict) -> dict:
     with open(path, "r", encoding="utf-8", errors="replace") as f:
         original = f.read()
 
-    if old_string not in original:
-        return {"success": False, "diff": "", "error": "old_string not found in file"}
-
     if replace_all:
+        if old_string not in original:
+            return {"success": False, "diff": "", "error": "old_string not found in file"}
         patched = original.replace(old_string, new_string)
     else:
-        idx = original.index(old_string)
+        idx = original.find(old_string)
+        if idx == -1:
+            return {"success": False, "diff": "", "error": "old_string not found in file"}
         patched = original[:idx] + new_string + original[idx + len(old_string) :]
 
     with open(path, "w", encoding="utf-8") as f:
@@ -324,9 +325,11 @@ def _method_execute(params: dict) -> dict:
         output = result.stdout
         if result.stderr:
             output = output + ("\n" if output else "") + result.stderr
+        truncated = len(output) > 50000
         return {
-            "output": output[-50000:],  # cap at 50KB
+            "output": output[-50000:] if truncated else output,
             "returncode": result.returncode,
+            **({"truncated": True} if truncated else {}),
         }
     except subprocess.TimeoutExpired:
         return {"output": f"Command timed out after {timeout}s", "returncode": 124}

@@ -200,6 +200,8 @@ class RemoteConnection:
             try:
                 stdout = self._proc.stdout
                 # Read headers byte-by-byte until \r\n\r\n
+                # Cap at 8KB to prevent DoS from malicious/broken handler
+                MAX_HEADER_SIZE = 8192
                 content_length = None
                 header_buf = b""
                 while True:
@@ -208,6 +210,9 @@ class RemoteConnection:
                         result_q.put(None)
                         return
                     header_buf += byte
+                    if len(header_buf) > MAX_HEADER_SIZE:
+                        result_q.put(None)
+                        return
                     if header_buf.endswith(b"\r\n\r\n"):
                         for line in header_buf.decode("utf-8", errors="replace").split("\r\n"):
                             if line.lower().startswith("content-length:"):
