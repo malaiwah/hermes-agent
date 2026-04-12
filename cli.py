@@ -3770,7 +3770,11 @@ class HermesCLI:
         home = get_hermes_home()
         display = display_hermes_home()
 
-        profiles_parent = Path.home() / ".hermes" / "profiles"
+        try:
+            from hermes_cli.profiles import _get_profiles_root
+            profiles_parent = _get_profiles_root()
+        except ImportError:
+            profiles_parent = Path.home() / ".hermes" / "profiles"
         try:
             rel = home.relative_to(profiles_parent)
             profile_name = str(rel).split("/")[0]
