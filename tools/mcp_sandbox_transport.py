@@ -29,9 +29,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
-import sys
 from contextlib import asynccontextmanager
-from typing import TextIO
 
 import anyio
 from anyio.streams.text import TextReceiveStream
@@ -49,7 +47,6 @@ async def sandbox_client(
     command: str,
     args: list[str] | None = None,
     env: dict[str, str] | None = None,
-    errlog: TextIO = sys.stderr,
     *,
     _raw_cmd: list[str] | None = None,
 ):
@@ -78,10 +75,16 @@ async def sandbox_client(
     if _raw_cmd is not None:
         exec_cmd = list(_raw_cmd)
     else:
+        import re
+        _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
         exec_cmd = [docker_exe, "exec", "-i"]
         if env:
             for key, value in sorted(env.items()):
+                if not _ENV_KEY_RE.match(key):
+                    logger.warning("sandbox-mcp: skipping invalid env key: %r", key)
+                    continue
                 exec_cmd.extend(["-e", f"{key}={value}"])
+        exec_cmd.append("--")  # end of flags, prevents container_id/command flag injection
         exec_cmd.append(container_id)
         exec_cmd.append(command)
         if args:
@@ -113,6 +116,8 @@ async def sandbox_client(
                     lines = (buffer + chunk).split("\n")
                     buffer = lines.pop()
                     for line in lines:
+                        if not line.strip():
+                            continue  # skip blank lines between messages
                         try:
                             message = types.JSONRPCMessage.model_validate_json(line)
                         except Exception:
@@ -177,7 +182,11 @@ async def sandbox_client(
             except ProcessLookupError:
                 pass
 
-            await read_stream.aclose()
-            await write_stream.aclose()
-            await read_stream_writer.aclose()
-            await write_stream_reader.aclose()
+            # Close all stream endpoints. Each may already be closed by
+            # task group tasks (stdout_reader, stdin_writer) or by the
+            # ClientSession teardown, so guard each individually.
+            for stream in (read_stream, write_stream, read_stream_writer, write_stream_reader):
+                try:
+                    await stream.aclose()
+                except Exception:
+                    pass
