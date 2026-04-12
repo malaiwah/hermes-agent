@@ -33,7 +33,7 @@ RUN echo "Acquire::HTTP::Proxy \"${APT_PROXY}\";" > /etc/apt/apt.conf.d/01proxy 
     apt-get upgrade -y --target-release=stable-security && \
     apt-get install -y --no-install-recommends \
         build-essential nodejs npm python3 python3-pip ripgrep ffmpeg gcc \
-        python3-dev libffi-dev podman-remote curl && \
+        python3-dev libffi-dev podman-remote curl openssh-client && \
     rm -rf /var/lib/apt/lists/* && \
     rm -f /etc/apt/apt.conf.d/01proxy
 
