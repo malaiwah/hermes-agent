@@ -112,7 +112,8 @@ def _install_fake_tools_package():
         SingularityEnvironment=_DummyEnvironment,
     )
     sys.modules["tools.environments.ssh"] = types.SimpleNamespace(SSHEnvironment=_DummyEnvironment)
-    sys.modules["tools.environments.docker"] = types.SimpleNamespace(DockerEnvironment=_DummyEnvironment)
+    sys.modules["tools.environments.docker"] = types.SimpleNamespace(DockerEnvironment=_DummyEnvironment, _SECURITY_ARGS=[])
+    sys.modules["tools.environments.podman"] = types.SimpleNamespace(PodmanEnvironment=_DummyEnvironment)
     sys.modules["tools.environments.modal"] = types.SimpleNamespace(ModalEnvironment=_DummyEnvironment)
     sys.modules["tools.environments.managed_modal"] = types.SimpleNamespace(ManagedModalEnvironment=_DummyEnvironment)
 

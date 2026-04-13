@@ -1214,3 +1214,63 @@ def test_openrouter_provider_not_affected_by_custom_fix(monkeypatch):
 
     resolved = rp.resolve_runtime_provider(requested="openrouter")
     assert resolved["provider"] == "openrouter"
+
+
+# ============================================================================
+# extra_headers — custom provider config passes headers to agent
+# ============================================================================
+
+def test_named_custom_provider_includes_extra_headers(monkeypatch):
+    """extra_headers from custom_providers config should be included in resolution result."""
+    config = {
+        "model": {"default": "local-model", "provider": "custom:myserver"},
+        "custom_providers": [{
+            "name": "myserver",
+            "base_url": "http://10.15.0.1:8000/v1",
+            "api_key": "no-key",
+            "extra_headers": {"X-Custom-Auth": "mytoken", "X-Org": "oikos"},
+        }],
+    }
+    monkeypatch.setattr(rp, "load_config", lambda: config)
+
+    result = rp._get_named_custom_provider("custom:myserver")
+
+    assert result is not None
+    assert result["extra_headers"] == {"X-Custom-Auth": "mytoken", "X-Org": "oikos"}
+
+
+def test_named_custom_provider_no_extra_headers_when_not_configured(monkeypatch):
+    """When extra_headers is absent from config, result should not include it."""
+    config = {
+        "model": {"default": "local-model"},
+        "custom_providers": [{
+            "name": "myserver",
+            "base_url": "http://10.15.0.1:8000/v1",
+        }],
+    }
+    monkeypatch.setattr(rp, "load_config", lambda: config)
+
+    result = rp._get_named_custom_provider("custom:myserver")
+
+    assert result is not None
+    assert "extra_headers" not in result
+
+
+def test_resolve_named_custom_runtime_propagates_extra_headers(monkeypatch):
+    """_resolve_named_custom_runtime should put extra_headers in the returned dict."""
+    custom = {
+        "name": "myserver",
+        "base_url": "http://10.15.0.1:8000/v1",
+        "api_key": "sk-test",
+        "extra_headers": {"Authorization": "Bearer secret"},
+    }
+    monkeypatch.setattr(rp, "_get_named_custom_provider", lambda p: custom)
+    monkeypatch.setattr(rp, "_try_resolve_from_custom_pool", lambda *a, **k: None)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    result = rp._resolve_named_custom_runtime(requested_provider="custom:myserver")
+
+    assert result is not None
+    assert result["extra_headers"] == {"Authorization": "Bearer secret"}
+    assert result["provider"] == "custom"

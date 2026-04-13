@@ -1039,3 +1039,89 @@ class TestTranscribeAudioMistralDispatch:
             transcribe_audio(sample_ogg, model="voxtral-mini-2602")
 
         assert mock_mistral.call_args[0][1] == "voxtral-mini-2602"
+
+
+# ============================================================================
+# _extract_transcript_text — Qwen3-ASR prefix stripping
+# ============================================================================
+
+class TestExtractTranscriptText:
+    """Tests for the transcript normalization helper, including Qwen3-ASR prefix."""
+
+    def test_plain_string_passthrough(self):
+        from tools.transcription_tools import _extract_transcript_text
+        assert _extract_transcript_text("hello world") == "hello world"
+
+    def test_strips_qwen3_asr_prefix(self):
+        """Qwen3-ASR outputs 'language English<asr_text>actual text' — only keep what's after the marker."""
+        from tools.transcription_tools import _extract_transcript_text
+        raw = "language English<asr_text>Hello, how are you?"
+        assert _extract_transcript_text(raw) == "Hello, how are you?"
+
+    def test_strips_qwen3_asr_prefix_with_leading_whitespace(self):
+        from tools.transcription_tools import _extract_transcript_text
+        raw = "language Chinese<asr_text>  你好世界  "
+        assert _extract_transcript_text(raw) == "你好世界"
+
+    def test_no_asr_marker_returns_text_unchanged(self):
+        from tools.transcription_tools import _extract_transcript_text
+        raw = "No marker here, just regular text."
+        assert _extract_transcript_text(raw) == raw
+
+    def test_object_with_text_attr(self):
+        from types import SimpleNamespace
+        from tools.transcription_tools import _extract_transcript_text
+        obj = SimpleNamespace(text="  trimmed  ")
+        assert _extract_transcript_text(obj) == "trimmed"
+
+    def test_dict_with_text_key(self):
+        from tools.transcription_tools import _extract_transcript_text
+        assert _extract_transcript_text({"text": "  dict text  "}) == "dict text"
+
+    def test_asr_marker_in_object_text_is_stripped(self):
+        from types import SimpleNamespace
+        from tools.transcription_tools import _extract_transcript_text
+        obj = SimpleNamespace(text="language French<asr_text>Bonjour le monde")
+        assert _extract_transcript_text(obj) == "Bonjour le monde"
+
+
+# ============================================================================
+# _transcribe_openai — language hint from config
+# ============================================================================
+
+class TestTranscribeOpenAILanguageHint:
+    """Tests for the OpenAI STT language hint feature."""
+
+    def test_language_hint_passed_to_api(self, monkeypatch, sample_wav):
+        """When stt.openai.language is set in config, it should be sent to the API."""
+        monkeypatch.setenv("VOICE_TOOLS_OPENAI_KEY", "sk-test")
+
+        mock_client = MagicMock()
+        mock_client.audio.transcriptions.create.return_value = "hello"
+
+        stt_config = {"openai": {"language": "en"}}
+        with patch("tools.transcription_tools._HAS_OPENAI", True), \
+             patch("openai.OpenAI", return_value=mock_client), \
+             patch("tools.transcription_tools._load_stt_config", return_value=stt_config):
+            from tools.transcription_tools import _transcribe_openai
+            result = _transcribe_openai(sample_wav, "whisper-1")
+
+        assert result["success"] is True
+        call_kwargs = mock_client.audio.transcriptions.create.call_args[1]
+        assert call_kwargs.get("language") == "en"
+
+    def test_no_language_hint_when_not_configured(self, monkeypatch, sample_wav):
+        """When stt.openai.language is not in config, language should not be sent."""
+        monkeypatch.setenv("VOICE_TOOLS_OPENAI_KEY", "sk-test")
+
+        mock_client = MagicMock()
+        mock_client.audio.transcriptions.create.return_value = "hello"
+
+        with patch("tools.transcription_tools._HAS_OPENAI", True), \
+             patch("openai.OpenAI", return_value=mock_client), \
+             patch("tools.transcription_tools._load_stt_config", return_value={}):
+            from tools.transcription_tools import _transcribe_openai
+            _transcribe_openai(sample_wav, "whisper-1")
+
+        call_kwargs = mock_client.audio.transcriptions.create.call_args[1]
+        assert "language" not in call_kwargs

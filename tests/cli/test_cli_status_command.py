@@ -153,3 +153,34 @@ def test_show_session_status_idle_context_fallback(capsys, monkeypatch):
 
     # No prompt tokens in idle CLI, but context limit is resolved
     assert "Context:" not in output or "200,000" in output
+
+
+def test_show_session_status_shows_compression_count(capsys):
+    """Compactions > 0 should show a non-zero count in the Context line."""
+    cli_obj = _make_cli()
+    cli_obj._agent_running = True
+    cli_obj._pending_input.qsize.return_value = 0
+    cli_obj.agent = SimpleNamespace(
+        model="anthropic/claude-sonnet-4-20250514",
+        provider="anthropic",
+        api_mode="anthropic_messages",
+        base_url="https://api.anthropic.com",
+        session_input_tokens=40_000,
+        session_output_tokens=1_000,
+        session_cache_read_tokens=30_000,
+        session_cache_write_tokens=0,
+        session_reasoning_tokens=0,
+        session_total_tokens=71_000,
+        session_estimated_cost_usd=0.0,
+        session_cost_status="estimated",
+        context_compressor=SimpleNamespace(
+            last_prompt_tokens=35_000,
+            context_length=200_000,
+            compression_count=3,
+        ),
+    )
+
+    cli_obj._show_session_status()
+    output = capsys.readouterr().out
+
+    assert "Compactions: 3" in output
