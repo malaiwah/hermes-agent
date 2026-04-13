@@ -1470,15 +1470,22 @@ class BasePlatformAdapter(ABC):
                                 # generator thread and async playback loop.
                                 from tools.tts_tool import _generate_qwen3_tts_stream
                                 import tempfile as _tf
+                                import threading as _threading
                                 _tts_dir = _tf.mkdtemp(prefix="tts_stream_")
                                 _q: asyncio.Queue = asyncio.Queue()
                                 _loop = asyncio.get_running_loop()
+                                _cancel = _threading.Event()
 
                                 def _producer():
+                                    _gen = _generate_qwen3_tts_stream(speech_text, _tts_dir, _tts_cfg)
                                     try:
-                                        for p in _generate_qwen3_tts_stream(speech_text, _tts_dir, _tts_cfg):
+                                        for p in _gen:
                                             _loop.call_soon_threadsafe(_q.put_nowait, p)
+                                            if _cancel.is_set():
+                                                logger.info("TTS stream producer: cancelled by barge-in")
+                                                break
                                     finally:
+                                        _gen.close()  # closes the HTTP response
                                         _loop.call_soon_threadsafe(_q.put_nowait, None)  # sentinel
 
                                 _prod_task = _loop.run_in_executor(None, _producer)
@@ -1507,6 +1514,7 @@ class BasePlatformAdapter(ABC):
                                                 # play_tts returns success=False on barge-in
                                                 logger.info("[%s] Barge-in — stopping TTS stream", self.name)
                                                 _barged_in = True
+                                                _cancel.set()  # stop the producer thread
                                             else:
                                                 _tts_played = True
                                         finally:
