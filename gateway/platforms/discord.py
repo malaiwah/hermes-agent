@@ -94,6 +94,15 @@ class VoiceReceiver:
     SAMPLE_RATE = 48000        # Discord native rate
     CHANNELS = 2               # Discord sends stereo
 
+    # RMS energy gate — packets below this threshold are treated as silence
+    # and not buffered.  Matches the CLI's SILENCE_RMS_THRESHOLD (int16
+    # range 0–32767).  A value of 200 filters ambient mic noise while
+    # preserving normal speech (~1000–10000 RMS).
+    RMS_THRESHOLD = 200
+    # Minimum average RMS for an entire utterance to be processed.
+    # Catches bursts of noise that pass per-packet gating but aren't speech.
+    MIN_UTTERANCE_RMS = 300
+
     def __init__(self, voice_client, allowed_user_ids: set = None):
         self._vc = voice_client
         self._allowed_user_ids = allowed_user_ids or set()
@@ -111,6 +120,9 @@ class VoiceReceiver:
         # Per-user audio buffers
         self._buffers: Dict[int, bytearray] = defaultdict(bytearray)
         self._last_packet_time: Dict[int, float] = {}
+        # Per-user RMS accumulators for utterance-level energy check
+        self._rms_sum: Dict[int, float] = defaultdict(float)
+        self._rms_count: Dict[int, int] = defaultdict(int)
 
         # Opus decoder per SSRC (each user needs own decoder state)
         self._decoders: Dict[int, object] = {}
@@ -303,9 +315,30 @@ class VoiceReceiver:
             if ssrc not in self._decoders:
                 self._decoders[ssrc] = discord.opus.Decoder()
             pcm = self._decoders[ssrc].decode(decrypted)
+
+            # --- RMS energy gate (matches CLI SILENCE_RMS_THRESHOLD) ---
+            # Compute RMS of this PCM frame; drop if below threshold.
+            # PCM is 16-bit signed LE samples (int16).
+            n_samples = len(pcm) // 2
+            if n_samples > 0:
+                samples = struct.unpack_from(f"<{n_samples}h", pcm)
+                rms = int((sum(s * s for s in samples) / n_samples) ** 0.5)
+            else:
+                rms = 0
+
+            if rms < self.RMS_THRESHOLD:
+                # Below energy threshold — treat as silence, don't buffer.
+                # Still update last_packet_time so silence detection works.
+                with self._lock:
+                    if ssrc in self._buffers and len(self._buffers[ssrc]) > 0:
+                        self._last_packet_time[ssrc] = time.monotonic()
+                return
+
             with self._lock:
                 self._buffers[ssrc].extend(pcm)
                 self._last_packet_time[ssrc] = time.monotonic()
+                self._rms_sum[ssrc] += rms
+                self._rms_count[ssrc] += 1
         except Exception as e:
             logger.debug("Opus decode error for SSRC %s: %s", ssrc, e)
             return
@@ -357,6 +390,24 @@ class VoiceReceiver:
                 buf_duration = len(buf) / (self.SAMPLE_RATE * self.CHANNELS * 2)
 
                 if silence_duration >= self.SILENCE_THRESHOLD and buf_duration >= self.MIN_SPEECH_DURATION:
+                    # Check utterance-level average RMS to reject noise bursts
+                    avg_rms = 0
+                    if self._rms_count.get(ssrc, 0) > 0:
+                        avg_rms = self._rms_sum[ssrc] / self._rms_count[ssrc]
+
+                    if avg_rms < self.MIN_UTTERANCE_RMS:
+                        # Too quiet overall — likely background noise, discard
+                        logger.debug(
+                            "Discarding low-energy utterance: ssrc=%d, "
+                            "avg_rms=%.0f (threshold=%d), duration=%.1fs",
+                            ssrc, avg_rms, self.MIN_UTTERANCE_RMS, buf_duration,
+                        )
+                        self._buffers[ssrc] = bytearray()
+                        self._last_packet_time.pop(ssrc, None)
+                        self._rms_sum.pop(ssrc, None)
+                        self._rms_count.pop(ssrc, None)
+                        continue
+
                     user_id = ssrc_user_map.get(ssrc, 0)
                     if not user_id:
                         # SSRC not mapped (SPEAKING event missing after bot rejoin).
@@ -366,10 +417,14 @@ class VoiceReceiver:
                         completed.append((user_id, bytes(buf)))
                     self._buffers[ssrc] = bytearray()
                     self._last_packet_time.pop(ssrc, None)
+                    self._rms_sum.pop(ssrc, None)
+                    self._rms_count.pop(ssrc, None)
                 elif silence_duration >= self.SILENCE_THRESHOLD * 2:
                     # Stale buffer with no valid user — discard
                     self._buffers.pop(ssrc, None)
                     self._last_packet_time.pop(ssrc, None)
+                    self._rms_sum.pop(ssrc, None)
+                    self._rms_count.pop(ssrc, None)
 
         return completed
 
