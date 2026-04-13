@@ -677,16 +677,19 @@ def _resolve_openai_audio_client_config() -> tuple[str, str]:
 def _extract_transcript_text(transcription: Any) -> str:
     """Normalize text and JSON transcription responses to a plain string."""
     if isinstance(transcription, str):
-        return transcription.strip()
-
-    if hasattr(transcription, "text"):
+        text = transcription.strip()
+    elif hasattr(transcription, "text"):
         value = getattr(transcription, "text")
-        if isinstance(value, str):
-            return value.strip()
-
-    if isinstance(transcription, dict):
+        text = value.strip() if isinstance(value, str) else str(transcription).strip()
+    elif isinstance(transcription, dict):
         value = transcription.get("text")
-        if isinstance(value, str):
-            return value.strip()
+        text = value.strip() if isinstance(value, str) else str(transcription).strip()
+    else:
+        text = str(transcription).strip()
 
-    return str(transcription).strip()
+    # Strip Qwen3-ASR output prefix: "language English<asr_text>actual text"
+    asr_marker = "<asr_text>"
+    if asr_marker in text:
+        text = text.split(asr_marker, 1)[1].strip()
+
+    return text
