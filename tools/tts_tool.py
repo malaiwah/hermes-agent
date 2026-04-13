@@ -257,11 +257,15 @@ def _generate_qwen3_tts(text: str, output_path: str, tts_config: Dict[str, Any])
     else:
         response_format = "mp3"
 
-    params = urlencode({
+    params_dict = {
         "text": text,
         "voice": voice,
         "response_format": response_format,
-    })
+    }
+    instruct = qwen_config.get("instruct", "")
+    if instruct:
+        params_dict["instruct"] = instruct
+    params = urlencode(params_dict)
     url = f"{base_url.rstrip('/')}/v1/audio/speech?{params}"
 
     req = Request(url, method="POST", headers={"Content-Length": "0"})

@@ -140,6 +140,33 @@ class TestGenerateQwen3TTS:
         _, kwargs = mock_open.call_args
         assert kwargs.get("timeout") == 60
 
+    def test_instruct_included_in_url_when_configured(self, tmp_path):
+        """tts.qwen3.instruct should be passed as a query parameter."""
+        from tools.tts_tool import _generate_qwen3_tts
+
+        output = str(tmp_path / "out.mp3")
+        tts_config = {"qwen3": {"instruct": "Speak warmly."}}
+        with patch("urllib.request.urlopen") as mock_open, \
+             patch("urllib.request.Request") as mock_req:
+            mock_open.return_value = self._make_mock_response(b"audio")
+            _generate_qwen3_tts("test", output, tts_config)
+
+        url = mock_req.call_args[0][0]
+        assert "instruct=Speak+warmly." in url
+
+    def test_instruct_omitted_when_not_configured(self, tmp_path):
+        """instruct should not appear in the URL when not set."""
+        from tools.tts_tool import _generate_qwen3_tts
+
+        output = str(tmp_path / "out.mp3")
+        with patch("urllib.request.urlopen") as mock_open, \
+             patch("urllib.request.Request") as mock_req:
+            mock_open.return_value = self._make_mock_response(b"audio")
+            _generate_qwen3_tts("test", output, {})
+
+        url = mock_req.call_args[0][0]
+        assert "instruct" not in url
+
     def test_get_provider_returns_qwen3(self):
         """_get_provider should return 'qwen3' when tts.provider is set to 'qwen3'."""
         from tools.tts_tool import _get_provider
