@@ -1250,6 +1250,10 @@ class DiscordAdapter(BasePlatformAdapter):
 
             logger.info("Voice input from user %d: %s", user_id, transcript[:100])
 
+            # Reset inactivity timer on valid voice input (not just TTS
+            # playback), so pure listening sessions don't time out.
+            self._reset_voice_timeout(guild_id)
+
             if self._voice_input_callback:
                 await self._voice_input_callback(
                     guild_id=guild_id,

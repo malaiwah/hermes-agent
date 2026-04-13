@@ -114,6 +114,8 @@ DEFAULT_CONTEXT_LENGTHS = {
     # Meta
     "llama": 131072,
     # Qwen
+    "qwen3.5": 262144,
+    "qwen35": 262144,
     "qwen": 131072,
     # MiniMax (lowercase — lookup lowercases model names at line 973)
     "minimax-m1-256k": 1000000,
@@ -131,8 +133,8 @@ DEFAULT_CONTEXT_LENGTHS = {
     # Arcee
     "trinity": 262144,
     # Hugging Face Inference Providers — model IDs use org/name format
-    "Qwen/Qwen3.5-397B-A17B": 131072,
-    "Qwen/Qwen3.5-35B-A3B": 131072,
+    "Qwen/Qwen3.5-397B-A17B": 262144,
+    "Qwen/Qwen3.5-35B-A3B": 262144,
     "deepseek-ai/DeepSeek-V3.2": 65536,
     "moonshotai/Kimi-K2.5": 262144,
     "moonshotai/Kimi-K2-Thinking": 262144,

@@ -631,6 +631,14 @@ class BasePlatformAdapter(ABC):
         self._background_tasks: set[asyncio.Task] = set()
         # Chats where auto-TTS on voice input is disabled (set by /voice off)
         self._auto_tts_disabled_chats: set = set()
+        # Max characters to send to TTS. Configurable via tts.max_chars in
+        # config.yaml; defaults to 500 (~60s of speech).  Prevents TTS
+        # timeouts on long agent responses and keeps voice replies concise.
+        try:
+            from tools.tts_tool import _load_tts_config
+            self._tts_max_chars: int = int(_load_tts_config().get("max_chars", 500))
+        except Exception:
+            self._tts_max_chars: int = 500
         # Chats where typing indicator is paused (e.g. during approval waits).
         # _keep_typing skips send_typing when the chat_id is in this set.
         self._typing_paused: set = set()
@@ -1443,7 +1451,8 @@ class BasePlatformAdapter(ABC):
                         from tools.tts_tool import text_to_speech_tool, check_tts_requirements, _preprocess_tts_text
                         if check_tts_requirements():
                             import json as _json
-                            speech_text = _preprocess_tts_text(text_content[:4000])
+                            _tts_max = self._tts_max_chars
+                            speech_text = _preprocess_tts_text(text_content[:_tts_max])
                             if not speech_text:
                                 raise ValueError("Empty text after markdown cleanup")
                             tts_result_str = await asyncio.to_thread(

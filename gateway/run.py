@@ -3410,12 +3410,17 @@ class GatewayRunner:
             # Voice-mode guidance: when the user is speaking via voice,
             # instruct the model to be concise and avoid emojis/special chars
             # because the response will be converted to live speech.
+            # NOTE: Injected into the user message (not context_prompt) to
+            # avoid mutating the system prompt, which would change the agent
+            # config signature and invalidate the prompt/KV cache on every
+            # voice↔text alternation.
             if event.message_type == MessageType.VOICE:
-                context_prompt += (
-                    "\n\n[Voice mode: The user is speaking via voice and your response "
+                message_text = (
+                    "[Voice mode: The user is speaking via voice and your response "
                     "will be converted to live speech. Keep your response concise "
                     "(1-3 sentences). Do not use emojis or special characters. "
-                    "Avoid markdown formatting, code blocks, and tables.]"
+                    "Avoid markdown formatting, code blocks, and tables.]\n\n"
+                    + message_text
                 )
 
             # Run the agent
