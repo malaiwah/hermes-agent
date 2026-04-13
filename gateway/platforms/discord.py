@@ -102,6 +102,14 @@ class VoiceReceiver:
     # Minimum average RMS for an entire utterance to be processed.
     # Catches bursts of noise that pass per-packet gating but aren't speech.
     MIN_UTTERANCE_RMS = 300
+    # Barge-in: RMS threshold during playback — must be higher than
+    # RMS_THRESHOLD to avoid echo residual triggering false barge-ins.
+    # Discord clients apply AEC, but some echo leaks through.
+    BARGE_IN_RMS = 600
+    # Guard period (seconds) after playback starts before barge-in is
+    # accepted.  Lets the initial acoustic echo settle.  Configurable
+    # via voice.barge_in_guard in config.yaml.
+    BARGE_IN_GUARD = 0.5
 
     def __init__(self, voice_client, allowed_user_ids: set = None):
         self._vc = voice_client
@@ -127,8 +135,14 @@ class VoiceReceiver:
         # Opus decoder per SSRC (each user needs own decoder state)
         self._decoders: Dict[int, object] = {}
 
-        # Pause flag: don't capture while bot is playing TTS
+        # Playback state for barge-in support.
+        # _paused=True: fully paused (legacy callers or guard period)
+        # _playback_active=True: bot is playing audio (barge-in eligible after guard)
         self._paused = False
+        self._playback_active = False
+        self._playback_start: float = 0.0
+        # Callback invoked when barge-in is detected (set by adapter)
+        self.on_barge_in: Optional[Callable] = None
 
         # Debug logging counter (instance-level to avoid cross-instance races)
         self._packet_debug_count = 0
@@ -164,10 +178,25 @@ class VoiceReceiver:
         logger.info("VoiceReceiver stopped")
 
     def pause(self):
+        """Fully pause — no packets processed at all."""
         self._paused = True
+        self._playback_active = False
 
     def resume(self):
+        """Resume normal listening."""
         self._paused = False
+        self._playback_active = False
+
+    def start_playback(self):
+        """Signal that bot is playing audio — enables barge-in detection
+        after the guard period instead of fully pausing."""
+        self._playback_active = True
+        self._playback_start = time.monotonic()
+        self._paused = False  # don't drop packets — monitor for barge-in
+
+    def stop_playback(self):
+        """Signal that bot stopped playing audio."""
+        self._playback_active = False
 
     # ------------------------------------------------------------------
     # SSRC -> user_id mapping via SPEAKING opcode hook
@@ -217,6 +246,10 @@ class VoiceReceiver:
     def _on_packet(self, data: bytes):
         if not self._running or self._paused:
             return
+
+        # During playback: only process packets for barge-in detection
+        # after the guard period has elapsed.
+        _in_playback = self._playback_active
 
         # Log first few raw packets for debugging
         self._packet_debug_count += 1
@@ -325,6 +358,20 @@ class VoiceReceiver:
                 rms = int((sum(s * s for s in samples) / n_samples) ** 0.5)
             else:
                 rms = 0
+
+            # During playback: use higher RMS threshold and respect guard period
+            if _in_playback:
+                elapsed = time.monotonic() - self._playback_start
+                if elapsed < self.BARGE_IN_GUARD:
+                    return  # still in guard period — drop everything
+                if rms < self.BARGE_IN_RMS:
+                    return  # below barge-in threshold — likely echo residual
+                # Barge-in detected! Signal the adapter to stop playback.
+                logger.info("Barge-in detected: rms=%d (threshold=%d)", rms, self.BARGE_IN_RMS)
+                if self.on_barge_in:
+                    self.on_barge_in()
+                self._playback_active = False
+                # Fall through to buffer this packet normally
 
             if rms < self.RMS_THRESHOLD:
                 # Below energy threshold — treat as silence, don't buffer.
@@ -1074,6 +1121,18 @@ class DiscordAdapter(BasePlatformAdapter):
         # Start voice receiver (Phase 2: listen to users)
         try:
             receiver = VoiceReceiver(vc, allowed_user_ids=self._allowed_user_ids)
+            # Load barge-in config from config.yaml (voice.barge_in_*)
+            try:
+                from hermes_cli.config import load_config as _load_cfg
+                _voice_cfg = _load_cfg().get("voice", {})
+                _guard = _voice_cfg.get("barge_in_guard")
+                _rms = _voice_cfg.get("barge_in_rms")
+                if _guard is not None:
+                    receiver.BARGE_IN_GUARD = float(_guard)
+                if _rms is not None:
+                    receiver.BARGE_IN_RMS = int(_rms)
+            except Exception:
+                pass
             receiver.start()
             self._voice_receivers[guild_id] = receiver
             self._voice_listen_tasks[guild_id] = asyncio.ensure_future(
@@ -1110,22 +1169,39 @@ class DiscordAdapter(BasePlatformAdapter):
     async def play_in_voice_channel(self, guild_id: int, audio_path: str) -> bool:
         """Play an audio file in the connected voice channel.
 
-        Pauses the voice receiver during playback to prevent echo.
-        Uses a per-guild counter to support sequential chunk playback:
-        the receiver is only resumed when the outermost play call returns
-        (i.e. all chunks in a streaming TTS sequence have finished).
+        Uses barge-in aware playback: the voice receiver switches to
+        barge-in detection mode (higher RMS threshold + guard period)
+        instead of fully pausing.  If the user speaks loudly enough
+        during playback, the current audio stops and their speech is
+        captured.
+
+        A depth counter ensures the receiver only returns to normal
+        listening mode when the outermost play call completes.
         """
         vc = self._voice_clients.get(guild_id)
         if not vc or not vc.is_connected():
             return False
 
-        # Pause voice receiver while playing (echo prevention).
-        # Use a depth counter so sequential calls don't resume prematurely.
         receiver = self._voice_receivers.get(guild_id)
         _depth_key = f"_play_depth_{guild_id}"
         depth = getattr(self, _depth_key, 0)
         if receiver and depth == 0:
-            receiver.pause()
+            # Switch to barge-in mode instead of full pause
+            receiver.start_playback()
+
+            # Wire up barge-in callback to stop current playback
+            _barge_in_event = asyncio.Event()
+            _loop = asyncio.get_running_loop()
+
+            def _on_barge_in():
+                _loop.call_soon_threadsafe(_barge_in_event.set)
+                if vc.is_playing():
+                    vc.stop()
+
+            receiver.on_barge_in = _on_barge_in
+        else:
+            _barge_in_event = None
+
         setattr(self, _depth_key, depth + 1)
 
         try:
@@ -1138,22 +1214,30 @@ class DiscordAdapter(BasePlatformAdapter):
                     break
                 await asyncio.sleep(0.1)
 
+            # Check if barge-in already happened (e.g. during previous chunk)
+            if _barge_in_event and _barge_in_event.is_set():
+                logger.info("Skipping playback — barge-in detected")
+                return False
+
             done = asyncio.Event()
             loop = asyncio.get_running_loop()
 
             def _after(error):
-                if error:
+                if error and not (_barge_in_event and _barge_in_event.is_set()):
                     logger.error("Voice playback error: %s", error)
                 loop.call_soon_threadsafe(done.set)
 
             # Use Opus passthrough when the file is already Opus-encoded
-            # (.ogg) to avoid decode→re-encode overhead.  FFmpegOpusAudio
-            # pipes the Opus stream directly to Discord's voice connection.
             if audio_path.endswith(".ogg") and hasattr(discord, "FFmpegOpusAudio"):
                 source = discord.FFmpegOpusAudio(audio_path)
             else:
                 source = discord.FFmpegPCMAudio(audio_path)
                 source = discord.PCMVolumeTransformer(source, volume=1.0)
+
+            # Refresh playback start time for barge-in guard period
+            if receiver:
+                receiver.start_playback()
+
             vc.play(source, after=_after)
             try:
                 await asyncio.wait_for(done.wait(), timeout=self.PLAYBACK_TIMEOUT)
@@ -1161,12 +1245,13 @@ class DiscordAdapter(BasePlatformAdapter):
                 logger.warning("Voice playback timed out after %ds", self.PLAYBACK_TIMEOUT)
                 vc.stop()
             self._reset_voice_timeout(guild_id)
-            return True
+            return not (_barge_in_event and _barge_in_event.is_set())
         finally:
             new_depth = getattr(self, _depth_key, 1) - 1
             setattr(self, _depth_key, max(0, new_depth))
             if receiver and new_depth <= 0:
-                receiver.resume()
+                receiver.stop_playback()
+                receiver.on_barge_in = None
 
     async def get_user_voice_channel(self, guild_id: int, user_id: str):
         """Return the voice channel the user is currently in, or None."""

@@ -1483,19 +1483,32 @@ class BasePlatformAdapter(ABC):
 
                                 _prod_task = _loop.run_in_executor(None, _producer)
 
-                                # Play chunks as they arrive
+                                # Play chunks as they arrive; stop on barge-in
+                                _barged_in = False
                                 while True:
                                     chunk_path = await _q.get()
                                     if chunk_path is None:
                                         break
+                                    if _barged_in:
+                                        # Barge-in already detected — discard remaining chunks
+                                        try:
+                                            os.remove(chunk_path)
+                                        except OSError:
+                                            pass
+                                        continue
                                     if Path(chunk_path).exists():
                                         try:
-                                            await self.play_tts(
+                                            _result = await self.play_tts(
                                                 chat_id=event.source.chat_id,
                                                 audio_path=chunk_path,
                                                 metadata=_thread_metadata,
                                             )
-                                            _tts_played = True
+                                            if hasattr(_result, "success") and not _result.success:
+                                                # play_tts returns success=False on barge-in
+                                                logger.info("[%s] Barge-in — stopping TTS stream", self.name)
+                                                _barged_in = True
+                                            else:
+                                                _tts_played = True
                                         finally:
                                             try:
                                                 os.remove(chunk_path)
