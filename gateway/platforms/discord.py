@@ -147,12 +147,20 @@ class VoiceReceiver:
         # Debug logging counter (instance-level to avoid cross-instance races)
         self._packet_debug_count = 0
 
+        # Startup grace period: ignore audio for this many seconds after
+        # start() to let the Discord voice connection stabilize.
+        # Connection setup produces noise artifacts that ASR can't transcribe,
+        # causing the first real utterance to include garbage audio.
+        self._startup_grace = 2.0
+        self._start_time: float = 0.0
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     def start(self):
         """Start listening for voice packets."""
+        self._start_time = time.monotonic()
         conn = self._vc._connection
         self._secret_key = bytes(conn.secret_key)
         self._dave_session = conn.dave_session
@@ -245,6 +253,12 @@ class VoiceReceiver:
 
     def _on_packet(self, data: bytes):
         if not self._running or self._paused:
+            return
+
+        # Startup grace period: drop all packets for the first N seconds
+        # after connection to let Discord voice stabilize.  Early packets
+        # contain codec warmup artifacts that produce empty STT results.
+        if self._start_time and (time.monotonic() - self._start_time) < self._startup_grace:
             return
 
         # During playback: only process packets for barge-in detection
