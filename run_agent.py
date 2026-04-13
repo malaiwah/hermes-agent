@@ -2947,7 +2947,7 @@ class AIAgent:
         _cc = getattr(getattr(self, "context_compressor", None), "compression_count", 0) or 0
         if _cc > 0:
             _now = _hermes_now()
-            timestamp_line += f"\nLast context compaction: {_now.strftime('%I:%M %p')} (#{_cc})"
+            timestamp_line += f"\nLast context compaction: {_now.strftime('%A, %B %d, %Y %I:%M %p')} (#{_cc})"
         if self.pass_session_id and self.session_id:
             timestamp_line += f"\nSession ID: {self.session_id}"
         if self.model:
