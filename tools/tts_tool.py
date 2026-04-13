@@ -232,6 +232,50 @@ def _generate_elevenlabs(text: str, output_path: str, tts_config: Dict[str, Any]
 
 
 # ===========================================================================
+# Provider: Qwen3-TTS (query-param API, not OpenAI SDK compatible)
+# ===========================================================================
+def _generate_qwen3_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
+    """Generate audio using Qwen3-TTS.
+
+    Qwen3-TTS uses a query-parameter API (``/v1/audio/speech?text=...&voice=...``)
+    rather than the OpenAI JSON body format.  We call it directly with urllib
+    to avoid the SDK mismatch.
+    """
+    from urllib.parse import urlencode
+    from urllib.request import Request, urlopen
+
+    qwen_config = tts_config.get("qwen3", tts_config.get("openai", {}))
+    base_url = qwen_config.get("base_url", "http://localhost:8001")
+    voice = qwen_config.get("voice", "ryan")
+
+    # Determine response format from extension
+    if output_path.endswith(".ogg"):
+        response_format = "opus"
+    elif output_path.endswith(".wav"):
+        response_format = "wav"
+    else:
+        response_format = "mp3"
+
+    params = urlencode({
+        "text": text,
+        "voice": voice,
+        "response_format": response_format,
+    })
+    url = f"{base_url.rstrip('/')}/v1/audio/speech?{params}"
+
+    req = Request(url, method="POST", headers={"Content-Length": "0"})
+    with urlopen(req, timeout=30) as resp:
+        with open(output_path, "wb") as f:
+            while True:
+                chunk = resp.read(8192)
+                if not chunk:
+                    break
+                f.write(chunk)
+
+    return output_path
+
+
+# ===========================================================================
 # Provider: OpenAI TTS
 # ===========================================================================
 def _generate_openai_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
@@ -513,6 +557,10 @@ def text_to_speech_tool(
                 }, ensure_ascii=False)
             logger.info("Generating speech with ElevenLabs...")
             _generate_elevenlabs(text, file_str, tts_config)
+
+        elif provider == "qwen3":
+            logger.info("Generating speech with Qwen3-TTS...")
+            _generate_qwen3_tts(text, file_str, tts_config)
 
         elif provider == "openai":
             try:
