@@ -355,7 +355,7 @@ class TestSendVoiceReply:
         tts_result = json.dumps({"success": True, "file_path": "/tmp/test.ogg"})
 
         with patch("tools.tts_tool.text_to_speech_tool", return_value=tts_result), \
-             patch("tools.tts_tool._strip_markdown_for_tts", side_effect=lambda t: t), \
+             patch("tools.tts_tool._preprocess_tts_text", side_effect=lambda t: t), \
              patch("os.path.isfile", return_value=True), \
              patch("os.unlink"), \
              patch("os.makedirs"):
@@ -370,7 +370,7 @@ class TestSendVoiceReply:
         event = _make_event()
 
         with patch("tools.tts_tool.text_to_speech_tool") as mock_tts, \
-             patch("tools.tts_tool._strip_markdown_for_tts", return_value=""):
+             patch("tools.tts_tool._preprocess_tts_text", return_value=""):
             await runner._send_voice_reply(event, "```code only```")
 
         mock_tts.assert_not_called()
@@ -383,7 +383,7 @@ class TestSendVoiceReply:
         tts_result = json.dumps({"success": False, "error": "API error"})
 
         with patch("tools.tts_tool.text_to_speech_tool", return_value=tts_result), \
-             patch("tools.tts_tool._strip_markdown_for_tts", side_effect=lambda t: t), \
+             patch("tools.tts_tool._preprocess_tts_text", side_effect=lambda t: t), \
              patch("os.path.isfile", return_value=False), \
              patch("os.makedirs"):
             await runner._send_voice_reply(event, "Hello")
@@ -394,7 +394,7 @@ class TestSendVoiceReply:
     async def test_exception_caught(self, runner):
         event = _make_event()
         with patch("tools.tts_tool.text_to_speech_tool", side_effect=RuntimeError("boom")), \
-             patch("tools.tts_tool._strip_markdown_for_tts", side_effect=lambda t: t), \
+             patch("tools.tts_tool._preprocess_tts_text", side_effect=lambda t: t), \
              patch("os.makedirs"):
             # Should not raise
             await runner._send_voice_reply(event, "Hello")
@@ -1890,7 +1890,7 @@ class TestSendVoiceReplyCleanup:
         })
 
         with patch("gateway.run.asyncio.to_thread", new_callable=AsyncMock, return_value=tts_result), \
-             patch("tools.tts_tool._strip_markdown_for_tts", return_value="hello"), \
+             patch("tools.tts_tool._preprocess_tts_text", return_value="hello"), \
              patch("os.path.isfile", return_value=True), \
              patch("os.makedirs"):
             await runner._send_voice_reply(event, "Hello world")

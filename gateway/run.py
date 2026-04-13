@@ -3407,6 +3407,17 @@ class GatewayRunner:
                 except Exception as exc:
                     logger.debug("@ context reference expansion failed: %s", exc)
 
+            # Voice-mode guidance: when the user is speaking via voice,
+            # instruct the model to be concise and avoid emojis/special chars
+            # because the response will be converted to live speech.
+            if event.message_type == MessageType.VOICE:
+                context_prompt += (
+                    "\n\n[Voice mode: The user is speaking via voice and your response "
+                    "will be converted to live speech. Keep your response concise "
+                    "(1-3 sentences). Do not use emojis or special characters. "
+                    "Avoid markdown formatting, code blocks, and tables.]"
+                )
+
             # Run the agent
             agent_result = await self._run_agent(
                 message=message_text,
@@ -5237,9 +5248,9 @@ class GatewayRunner:
         audio_path = None
         actual_path = None
         try:
-            from tools.tts_tool import text_to_speech_tool, _strip_markdown_for_tts
+            from tools.tts_tool import text_to_speech_tool, _preprocess_tts_text
 
-            tts_text = _strip_markdown_for_tts(text[:4000])
+            tts_text = _preprocess_tts_text(text[:4000])
             if not tts_text:
                 return
 

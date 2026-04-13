@@ -698,6 +698,31 @@ _MD_LIST_ITEM = re.compile(r'^\s*[-*]\s+', flags=re.MULTILINE)
 _MD_HR = re.compile(r'---+')
 _MD_EXCESS_NL = re.compile(r'\n{3,}')
 
+# Emoji stripping: covers major Unicode emoji ranges.
+# Inspired by PR #8205 (kas-cor) — localized emoji speech map.
+_EMOJI_RE = re.compile(
+    "["
+    "\U0001F600-\U0001F64F"  # emoticons
+    "\U0001F300-\U0001F5FF"  # symbols & pictographs
+    "\U0001F680-\U0001F6FF"  # transport & map
+    "\U0001F900-\U0001F9FF"  # supplemental symbols
+    "\U0001FA00-\U0001FA6F"  # chess symbols
+    "\U0001FA70-\U0001FAFF"  # symbols extended-A
+    "\U00002702-\U000027B0"  # dingbats
+    "\U000024C2-\U0001F251"  # enclosed characters
+    "\U0000FE00-\U0000FE0F"  # variation selectors
+    "\U0000200D"             # ZWJ
+    "\U000020E3"             # combining enclosing keycap
+    "]+",
+    flags=re.UNICODE,
+)
+
+# Box-drawing / table characters that sound awful when spoken
+_TABLE_CHARS_RE = re.compile(r'[|┌┐└┘├┤┬┴┼─━│┃]+')
+
+# MEDIA: tags injected by tool pipeline
+_MEDIA_TAG_RE = re.compile(r'MEDIA:[^\s]+')
+
 
 def _strip_markdown_for_tts(text: str) -> str:
     """Remove markdown formatting that shouldn't be spoken aloud."""
@@ -711,6 +736,50 @@ def _strip_markdown_for_tts(text: str) -> str:
     text = _MD_LIST_ITEM.sub('', text)
     text = _MD_HR.sub('', text)
     text = _MD_EXCESS_NL.sub('\n\n', text)
+    return text.strip()
+
+
+def _preprocess_tts_text(text: str) -> str:
+    """Normalize text for natural speech output.
+
+    Builds on ``_strip_markdown_for_tts`` and adds:
+    - Emoji stripping (Unicode ranges)
+    - Table / box-drawing character removal
+    - MEDIA: tag removal
+    - Newline → sentence-break conversion (configurable via ``tts.strip_newlines``,
+      default **true**; some TTS backends like Kokoro truncate at the first ``\\n``)
+    - Whitespace collapse
+
+    Credits: emoji-range approach inspired by kas-cor's upstream PR #8205.
+    """
+    # Start with existing markdown stripping
+    text = _strip_markdown_for_tts(text)
+
+    # Strip emojis
+    text = _EMOJI_RE.sub(' ', text)
+
+    # Strip table / box-drawing characters
+    text = _TABLE_CHARS_RE.sub(' ', text)
+
+    # Strip MEDIA: tags
+    text = _MEDIA_TAG_RE.sub('', text)
+
+    # Newline handling — configurable because some TTS backends (Kokoro)
+    # silently truncate at the first \n while others (Edge TTS) handle
+    # them fine as pauses.  Default: strip newlines.
+    tts_config = _load_tts_config()
+    if tts_config.get("strip_newlines", True):
+        # Double newlines → period-space (paragraph break = sentence break)
+        text = re.sub(r'\n\n+', '. ', text)
+        # Single newlines → space
+        text = text.replace('\n', ' ')
+
+    # Collapse runs of whitespace
+    text = re.sub(r'[ \t]{2,}', ' ', text)
+
+    # Strip leading punctuation noise (". . ." at the start)
+    text = re.sub(r'^[\s.,;:!?]+', '', text)
+
     return text.strip()
 
 
