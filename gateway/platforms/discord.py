@@ -444,7 +444,7 @@ class VoiceReceiver:
 
                     if avg_rms < self.MIN_UTTERANCE_RMS:
                         # Too quiet overall — likely background noise, discard
-                        logger.debug(
+                        logger.info(
                             "Discarding low-energy utterance: ssrc=%d, "
                             "avg_rms=%.0f (threshold=%d), duration=%.1fs",
                             ssrc, avg_rms, self.MIN_UTTERANCE_RMS, buf_duration,
@@ -471,7 +471,7 @@ class VoiceReceiver:
                         # cycle so the SPEAKING event has time to arrive.
                         # The stale-buffer cleanup below (2x threshold) will
                         # discard it if the mapping never comes.
-                        logger.debug(
+                        logger.info(
                             "Keeping unmapped utterance: ssrc=%d, duration=%.1fs "
                             "(waiting for SPEAKING event)",
                             ssrc, buf_duration,
@@ -1421,8 +1421,11 @@ class DiscordAdapter(BasePlatformAdapter):
 
                 completed = receiver.check_silence()
                 for user_id, pcm_data in completed:
+                    buf_dur = len(pcm_data) / (48000 * 2 * 2)
                     if not self._is_allowed_user(str(user_id)):
+                        logger.info("Voice: dropping utterance from unauthorized user %d (%.1fs)", user_id, buf_dur)
                         continue
+                    logger.info("Voice: processing utterance from user %d (%.1fs PCM)", user_id, buf_dur)
                     await self._process_voice_input(guild_id, user_id, pcm_data)
         except asyncio.CancelledError:
             pass
@@ -1448,9 +1451,15 @@ class DiscordAdapter(BasePlatformAdapter):
             )
 
             if not result.get("success"):
+                logger.info("Voice STT failed for user %d: %s", user_id,
+                            result.get("error", "unknown"))
                 return
             transcript = result.get("transcript", "").strip()
-            if not transcript or is_whisper_hallucination(transcript):
+            if not transcript:
+                logger.info("Voice STT returned empty transcript for user %d", user_id)
+                return
+            if is_whisper_hallucination(transcript):
+                logger.info("Voice STT filtered hallucination for user %d: %r", user_id, transcript)
                 return
 
             logger.info("Voice input from user %d: %s", user_id, transcript[:100])
