@@ -501,12 +501,20 @@ def _transcribe_openai(file_path: str, model_name: str) -> Dict[str, Any]:
         from openai import OpenAI, APIError, APIConnectionError, APITimeoutError
         client = OpenAI(api_key=api_key, base_url=base_url, timeout=30, max_retries=0)
         try:
+            # Language hint from config (e.g. "en" or "fr") improves accuracy
+            openai_cfg = _load_stt_config().get("openai", {})
+            language = openai_cfg.get("language")
+
+            create_kwargs = {
+                "model": model_name,
+                "response_format": "text" if model_name == "whisper-1" else "json",
+            }
+            if language:
+                create_kwargs["language"] = language
+
             with open(file_path, "rb") as audio_file:
-                transcription = client.audio.transcriptions.create(
-                    model=model_name,
-                    file=audio_file,
-                    response_format="text" if model_name == "whisper-1" else "json",
-                )
+                create_kwargs["file"] = audio_file
+                transcription = client.audio.transcriptions.create(**create_kwargs)
 
             transcript_text = _extract_transcript_text(transcription)
             logger.info("Transcribed %s via OpenAI API (%s, %d chars)",
