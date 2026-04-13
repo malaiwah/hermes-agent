@@ -3171,9 +3171,18 @@ class AIAgent:
             if context_files_prompt:
                 prompt_parts.append(context_files_prompt)
 
+        # Use session_start (set once at __init__) for a stable timestamp.
+        # Before this fix, _hermes_now() was called here, which meant the
+        # "Conversation started" time changed after every compression cycle —
+        # invalidating the system prompt prefix cache on local LLM backends.
         from hermes_time import now as _hermes_now
-        now = _hermes_now()
-        timestamp_line = f"Conversation started: {now.strftime('%A, %B %d, %Y %I:%M %p')}"
+        _start = getattr(self, "session_start", None) or _hermes_now()
+        timestamp_line = f"Conversation started: {_start.strftime('%A, %B %d, %Y %I:%M %p')}"
+        # Track compression history so the model knows context was compacted
+        _cc = getattr(getattr(self, "context_compressor", None), "compression_count", 0) or 0
+        if _cc > 0:
+            _now = _hermes_now()
+            timestamp_line += f"\nLast context compaction: {_now.strftime('%A, %B %d, %Y %I:%M %p')} (#{_cc})"
         if self.pass_session_id and self.session_id:
             timestamp_line += f"\nSession ID: {self.session_id}"
         if self.model:
