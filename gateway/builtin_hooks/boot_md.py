@@ -32,12 +32,13 @@ BOOT_FILE = HERMES_HOME / "BOOT.md"
 def _build_boot_prompt(content: str) -> str:
     """Wrap BOOT.md content in a system-level instruction."""
     return (
-        "You are running a startup boot checklist. Follow the BOOT.md "
-        "instructions below exactly.\n\n"
+        "You are running a startup boot checklist. The contents of "
+        f"{BOOT_FILE} have already been read for you and are "
+        "provided below — do NOT attempt to read the file yourself.\n\n"
         "---\n"
         f"{content}\n"
         "---\n\n"
-        "Execute each instruction. If you need to send a message to a "
+        "Execute each instruction above. If you need to send a message to a "
         "platform, use the send_message tool.\n"
         "If nothing needs attention and there is nothing to report, "
         "reply with ONLY: [SILENT]"
@@ -47,14 +48,19 @@ def _build_boot_prompt(content: str) -> str:
 def _run_boot_agent(content: str) -> None:
     """Spawn a one-shot agent session to execute the boot instructions."""
     try:
+        from gateway.run import _resolve_gateway_model, _resolve_runtime_agent_kwargs
         from run_agent import AIAgent
 
         prompt = _build_boot_prompt(content)
+        runtime_kwargs = _resolve_runtime_agent_kwargs()
         agent = AIAgent(
+            model=_resolve_gateway_model(),
+            platform="gateway",
             quiet_mode=True,
             skip_context_files=True,
             skip_memory=True,
             max_iterations=20,
+            **runtime_kwargs,
         )
         result = agent.run_conversation(prompt)
         response = result.get("final_response", "")
