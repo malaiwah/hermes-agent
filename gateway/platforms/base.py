@@ -1444,46 +1444,97 @@ class BasePlatformAdapter(ABC):
                 if local_files:
                     logger.info("[%s] extract_local_files found %d file(s) in response", self.name, len(local_files))
                 
-                # Auto-TTS: if voice message, generate audio FIRST (before sending text)
+                # Auto-TTS: if voice message, generate audio FIRST (before sending text).
+                # For qwen3 provider, uses streaming endpoint to play sentence-by-sentence:
+                # TTS generates sentence N+1 while Discord plays sentence N.
                 # Skipped when the chat has voice mode disabled (/voice off)
-                _tts_path = None
+                _tts_played = False
                 if (event.message_type == MessageType.VOICE
                         and text_content
                         and not media_files
                         and event.source.chat_id not in self._auto_tts_disabled_chats):
                     try:
-                        from tools.tts_tool import text_to_speech_tool, check_tts_requirements, _preprocess_tts_text
+                        from tools.tts_tool import check_tts_requirements, _preprocess_tts_text, _load_tts_config, _get_provider
                         if check_tts_requirements():
-                            import json as _json
                             _tts_max = self._tts_max_chars
                             speech_text = _preprocess_tts_text(text_content[:_tts_max])
                             if not speech_text:
                                 raise ValueError("Empty text after markdown cleanup")
-                            tts_result_str = await asyncio.to_thread(
-                                text_to_speech_tool, text=speech_text
-                            )
-                            tts_data = _json.loads(tts_result_str)
-                            _tts_path = tts_data.get("file_path")
+
+                            _tts_cfg = _load_tts_config()
+                            _tts_provider = _get_provider(_tts_cfg)
+
+                            if _tts_provider == "qwen3":
+                                # Streaming TTS: generate+play sentence-by-sentence
+                                # using an asyncio.Queue to bridge the blocking
+                                # generator thread and async playback loop.
+                                from tools.tts_tool import _generate_qwen3_tts_stream
+                                import tempfile as _tf
+                                _tts_dir = _tf.mkdtemp(prefix="tts_stream_")
+                                _q: asyncio.Queue = asyncio.Queue()
+                                _loop = asyncio.get_running_loop()
+
+                                def _producer():
+                                    try:
+                                        for p in _generate_qwen3_tts_stream(speech_text, _tts_dir, _tts_cfg):
+                                            _loop.call_soon_threadsafe(_q.put_nowait, p)
+                                    finally:
+                                        _loop.call_soon_threadsafe(_q.put_nowait, None)  # sentinel
+
+                                _prod_task = _loop.run_in_executor(None, _producer)
+
+                                # Play chunks as they arrive
+                                while True:
+                                    chunk_path = await _q.get()
+                                    if chunk_path is None:
+                                        break
+                                    if Path(chunk_path).exists():
+                                        try:
+                                            await self.play_tts(
+                                                chat_id=event.source.chat_id,
+                                                audio_path=chunk_path,
+                                                metadata=_thread_metadata,
+                                            )
+                                            _tts_played = True
+                                        finally:
+                                            try:
+                                                os.remove(chunk_path)
+                                            except OSError:
+                                                pass
+
+                                await _prod_task  # ensure producer finished cleanly
+                                try:
+                                    os.rmdir(_tts_dir)
+                                except OSError:
+                                    pass
+                            else:
+                                # Non-streaming fallback for other providers
+                                import json as _json
+                                from tools.tts_tool import text_to_speech_tool
+                                tts_result_str = await asyncio.to_thread(
+                                    text_to_speech_tool, text=speech_text
+                                )
+                                tts_data = _json.loads(tts_result_str)
+                                _tts_path = tts_data.get("file_path")
+                                if _tts_path and Path(_tts_path).exists():
+                                    try:
+                                        await self.play_tts(
+                                            chat_id=event.source.chat_id,
+                                            audio_path=_tts_path,
+                                            metadata=_thread_metadata,
+                                        )
+                                        _tts_played = True
+                                    finally:
+                                        try:
+                                            os.remove(_tts_path)
+                                        except OSError:
+                                            pass
                     except Exception as tts_err:
                         logger.warning("[%s] Auto-TTS failed: %s", self.name, tts_err)
 
                 # Record assistant response for STT context priming
                 if event.message_type == MessageType.VOICE and text_content:
                     self._on_voice_response(event, text_content)
-
-                # Play TTS audio before text (voice-first experience)
-                if _tts_path and Path(_tts_path).exists():
-                    try:
-                        await self.play_tts(
-                            chat_id=event.source.chat_id,
-                            audio_path=_tts_path,
-                            metadata=_thread_metadata,
-                        )
-                    finally:
-                        try:
-                            os.remove(_tts_path)
-                        except OSError:
-                            pass
 
                 # Send the text portion
                 if text_content:

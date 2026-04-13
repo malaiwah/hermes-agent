@@ -1108,15 +1108,25 @@ class DiscordAdapter(BasePlatformAdapter):
     PLAYBACK_TIMEOUT = 120
 
     async def play_in_voice_channel(self, guild_id: int, audio_path: str) -> bool:
-        """Play an audio file in the connected voice channel."""
+        """Play an audio file in the connected voice channel.
+
+        Pauses the voice receiver during playback to prevent echo.
+        Uses a per-guild counter to support sequential chunk playback:
+        the receiver is only resumed when the outermost play call returns
+        (i.e. all chunks in a streaming TTS sequence have finished).
+        """
         vc = self._voice_clients.get(guild_id)
         if not vc or not vc.is_connected():
             return False
 
-        # Pause voice receiver while playing (echo prevention)
+        # Pause voice receiver while playing (echo prevention).
+        # Use a depth counter so sequential calls don't resume prematurely.
         receiver = self._voice_receivers.get(guild_id)
-        if receiver:
+        _depth_key = f"_play_depth_{guild_id}"
+        depth = getattr(self, _depth_key, 0)
+        if receiver and depth == 0:
             receiver.pause()
+        setattr(self, _depth_key, depth + 1)
 
         try:
             # Wait for current playback to finish (with timeout)
@@ -1153,7 +1163,9 @@ class DiscordAdapter(BasePlatformAdapter):
             self._reset_voice_timeout(guild_id)
             return True
         finally:
-            if receiver:
+            new_depth = getattr(self, _depth_key, 1) - 1
+            setattr(self, _depth_key, max(0, new_depth))
+            if receiver and new_depth <= 0:
                 receiver.resume()
 
     async def get_user_voice_channel(self, guild_id: int, user_id: str):
