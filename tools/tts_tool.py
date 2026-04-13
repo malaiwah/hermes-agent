@@ -247,6 +247,7 @@ def _generate_qwen3_tts(text: str, output_path: str, tts_config: Dict[str, Any])
     qwen_config = tts_config.get("qwen3", tts_config.get("openai", {}))
     base_url = qwen_config.get("base_url", "http://localhost:8001")
     voice = qwen_config.get("voice", "ryan")
+    timeout = int(qwen_config.get("timeout", 120))
 
     # Determine response format from extension
     if output_path.endswith(".ogg"):
@@ -264,7 +265,7 @@ def _generate_qwen3_tts(text: str, output_path: str, tts_config: Dict[str, Any])
     url = f"{base_url.rstrip('/')}/v1/audio/speech?{params}"
 
     req = Request(url, method="POST", headers={"Content-Length": "0"})
-    with urlopen(req, timeout=30) as resp:
+    with urlopen(req, timeout=timeout) as resp:
         with open(output_path, "wb") as f:
             while True:
                 chunk = resp.read(8192)

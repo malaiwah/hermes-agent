@@ -113,6 +113,33 @@ class TestGenerateQwen3TTS:
 
         assert mock_request_cls.call_args[1]["method"] == "POST"
 
+    def test_uses_default_timeout_of_120(self, tmp_path):
+        """Default timeout must be 120s (not the old 30s) to handle long responses."""
+        from tools.tts_tool import _generate_qwen3_tts
+
+        output = str(tmp_path / "out.mp3")
+        with patch("urllib.request.urlopen") as mock_open, \
+             patch("urllib.request.Request"):
+            mock_open.return_value = self._make_mock_response(b"audio")
+            _generate_qwen3_tts("test", output, {})
+
+        _, kwargs = mock_open.call_args
+        assert kwargs.get("timeout") == 120
+
+    def test_timeout_is_configurable(self, tmp_path):
+        """tts.qwen3.timeout should override the default."""
+        from tools.tts_tool import _generate_qwen3_tts
+
+        output = str(tmp_path / "out.mp3")
+        tts_config = {"qwen3": {"base_url": "http://localhost:8001", "timeout": 60}}
+        with patch("urllib.request.urlopen") as mock_open, \
+             patch("urllib.request.Request"):
+            mock_open.return_value = self._make_mock_response(b"audio")
+            _generate_qwen3_tts("test", output, tts_config)
+
+        _, kwargs = mock_open.call_args
+        assert kwargs.get("timeout") == 60
+
     def test_get_provider_returns_qwen3(self):
         """_get_provider should return 'qwen3' when tts.provider is set to 'qwen3'."""
         from tools.tts_tool import _get_provider
