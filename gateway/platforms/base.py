@@ -912,6 +912,10 @@ class BasePlatformAdapter(ABC):
             text = f"{caption}\n{text}"
         return await self.send(chat_id=chat_id, content=text, reply_to=reply_to)
 
+    def _on_voice_response(self, event: "MessageEvent", text: str) -> None:
+        """Hook for subclasses to capture bot voice responses (e.g. for STT priming)."""
+        pass
+
     async def play_tts(
         self,
         chat_id: str,
@@ -1462,6 +1466,10 @@ class BasePlatformAdapter(ABC):
                             _tts_path = tts_data.get("file_path")
                     except Exception as tts_err:
                         logger.warning("[%s] Auto-TTS failed: %s", self.name, tts_err)
+
+                # Record assistant response for STT context priming
+                if event.message_type == MessageType.VOICE and text_content:
+                    self._on_voice_response(event, text_content)
 
                 # Play TTS audio before text (voice-first experience)
                 if _tts_path and Path(_tts_path).exists():

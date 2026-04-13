@@ -1125,3 +1125,174 @@ class TestTranscribeOpenAILanguageHint:
 
         call_kwargs = mock_client.audio.transcriptions.create.call_args[1]
         assert "language" not in call_kwargs
+
+
+# ============================================================================
+# Context-primed transcription via chat/completions
+# ============================================================================
+
+
+class TestBuildPrimingMessages:
+    """Unit tests for _build_priming_messages."""
+
+    def test_system_prompt_only(self):
+        from tools.transcription_tools import _build_priming_messages
+        msgs = _build_priming_messages(
+            audio_b64="AAAA", audio_format="wav",
+            priming_context="", system_prompt="You are helpful.",
+            max_context_tokens=2048,
+        )
+        assert len(msgs) == 2
+        assert msgs[0]["role"] == "system"
+        assert msgs[0]["content"] == "You are helpful."
+        assert msgs[1]["role"] == "user"
+        assert msgs[1]["content"][0]["type"] == "input_audio"
+
+    def test_system_prompt_with_context(self):
+        from tools.transcription_tools import _build_priming_messages
+        msgs = _build_priming_messages(
+            audio_b64="AAAA", audio_format="wav",
+            priming_context="User: hello\nAssistant: hi",
+            system_prompt="Names: Michel Belleau.",
+            max_context_tokens=2048,
+        )
+        assert len(msgs) == 2
+        assert "Names: Michel Belleau." in msgs[0]["content"]
+        assert "User: hello" in msgs[0]["content"]
+
+    def test_priming_context_truncated_when_budget_tight(self):
+        from tools.transcription_tools import _build_priming_messages
+        long_context = "x" * 10000
+        msgs = _build_priming_messages(
+            audio_b64="AAAA", audio_format="wav",
+            priming_context=long_context,
+            system_prompt="Short prompt.",
+            max_context_tokens=500,
+        )
+        # System content should be shorter than uncapped
+        system_text = msgs[0]["content"]
+        assert len(system_text) < 10000
+
+    def test_no_system_or_context(self):
+        from tools.transcription_tools import _build_priming_messages
+        msgs = _build_priming_messages(
+            audio_b64="AAAA", audio_format="wav",
+            priming_context="", system_prompt="",
+            max_context_tokens=2048,
+        )
+        assert len(msgs) == 1
+        assert msgs[0]["role"] == "user"
+
+    def test_context_only_no_system_prompt(self):
+        from tools.transcription_tools import _build_priming_messages
+        msgs = _build_priming_messages(
+            audio_b64="AAAA", audio_format="wav",
+            priming_context="User: test", system_prompt="",
+            max_context_tokens=2048,
+        )
+        assert len(msgs) == 2
+        assert msgs[0]["role"] == "system"
+        assert msgs[0]["content"] == "User: test"
+
+
+class TestTranscribeChatCompletions:
+    """Unit tests for _transcribe_chat_completions."""
+
+    def _mock_response(self, text, prompt_tokens=100):
+        import json
+        body = json.dumps({
+            "choices": [{"message": {"content": text}}],
+            "usage": {"prompt_tokens": prompt_tokens, "completion_tokens": 10,
+                      "total_tokens": prompt_tokens + 10},
+        }).encode()
+        resp = MagicMock()
+        resp.__enter__ = lambda s: s
+        resp.__exit__ = MagicMock(return_value=False)
+        resp.read.return_value = body
+        return resp
+
+    def test_primed_transcription_returns_clean_text(self, sample_wav):
+        from tools.transcription_tools import _transcribe_chat_completions
+        stt_config = {
+            "openai": {"api_key": "test", "base_url": "http://localhost:8002/v1"},
+            "priming": {"system_prompt": "Speaker: Michel"},
+        }
+        with patch("tools.transcription_tools._load_stt_config", return_value=stt_config), \
+             patch("urllib.request.urlopen", return_value=self._mock_response(
+                 "language English<asr_text>Hello Michel")):
+            result = _transcribe_chat_completions(
+                str(sample_wav), "Qwen/Qwen3-ASR-1.7B", "User: hi"
+            )
+        assert result["success"] is True
+        assert result["transcript"] == "Hello Michel"
+        assert result["provider"] == "openai_primed"
+
+    def test_falls_back_to_whisper_on_error(self, monkeypatch, sample_wav):
+        from tools.transcription_tools import _transcribe_chat_completions
+        monkeypatch.setenv("VOICE_TOOLS_OPENAI_KEY", "sk-test")
+        stt_config = {
+            "openai": {"api_key": "test", "base_url": "http://localhost:8002/v1"},
+            "priming": {},
+        }
+        mock_client = MagicMock()
+        mock_client.audio.transcriptions.create.return_value = "fallback text"
+        with patch("tools.transcription_tools._load_stt_config", return_value=stt_config), \
+             patch("urllib.request.urlopen", side_effect=Exception("connection refused")), \
+             patch("tools.transcription_tools._HAS_OPENAI", True), \
+             patch("openai.OpenAI", return_value=mock_client):
+            result = _transcribe_chat_completions(
+                str(sample_wav), "whisper-1", "context"
+            )
+        assert result["success"] is True
+        assert result["transcript"] == "fallback text"
+        assert result["provider"] == "openai"
+
+
+class TestTranscribeAudioPrimingDispatch:
+    """Tests that transcribe_audio routes to chat/completions when priming is enabled."""
+
+    def test_routes_to_primed_when_enabled(self, monkeypatch, sample_wav):
+        stt_config = {
+            "provider": "openai",
+            "openai": {"api_key": "test", "base_url": "http://localhost:8002/v1"},
+            "priming": {"enabled": True, "system_prompt": "Speaker: Michel"},
+        }
+        with patch("tools.transcription_tools._load_stt_config", return_value=stt_config), \
+             patch("tools.transcription_tools._transcribe_chat_completions") as mock_cc:
+            mock_cc.return_value = {"success": True, "transcript": "hello", "provider": "openai_primed"}
+            from tools.transcription_tools import transcribe_audio
+            result = transcribe_audio(str(sample_wav), priming_context="User: test")
+        mock_cc.assert_called_once()
+        assert result["provider"] == "openai_primed"
+
+    def test_uses_whisper_when_priming_disabled(self, monkeypatch, sample_wav):
+        monkeypatch.setenv("VOICE_TOOLS_OPENAI_KEY", "sk-test")
+        stt_config = {
+            "provider": "openai",
+            "openai": {"api_key": "test", "base_url": "http://localhost:8002/v1"},
+            "priming": {"enabled": False},
+        }
+        mock_client = MagicMock()
+        mock_client.audio.transcriptions.create.return_value = "plain result"
+        with patch("tools.transcription_tools._load_stt_config", return_value=stt_config), \
+             patch("tools.transcription_tools._HAS_OPENAI", True), \
+             patch("openai.OpenAI", return_value=mock_client):
+            from tools.transcription_tools import transcribe_audio
+            result = transcribe_audio(str(sample_wav), priming_context="User: test")
+        assert result["provider"] == "openai"
+
+    def test_uses_whisper_when_no_priming_context(self, monkeypatch, sample_wav):
+        monkeypatch.setenv("VOICE_TOOLS_OPENAI_KEY", "sk-test")
+        stt_config = {
+            "provider": "openai",
+            "openai": {"api_key": "test", "base_url": "http://localhost:8002/v1"},
+            "priming": {"enabled": True},
+        }
+        mock_client = MagicMock()
+        mock_client.audio.transcriptions.create.return_value = "no context"
+        with patch("tools.transcription_tools._load_stt_config", return_value=stt_config), \
+             patch("tools.transcription_tools._HAS_OPENAI", True), \
+             patch("openai.OpenAI", return_value=mock_client):
+            from tools.transcription_tools import transcribe_audio
+            result = transcribe_audio(str(sample_wav))
+        assert result["provider"] == "openai"

@@ -440,6 +440,10 @@ class DiscordAdapter(BasePlatformAdapter):
         self._voice_listen_tasks: Dict[int, asyncio.Task] = {}  # guild_id -> listen loop
         self._voice_input_callback: Optional[Callable] = None  # set by run.py
         self._on_voice_disconnect: Optional[Callable] = None  # set by run.py
+        # Per-guild ring buffer of recent voice turns for STT context priming.
+        # Each entry is (role, text) — capped at _VOICE_PRIMING_MAX_TURNS.
+        self._voice_priming_history: Dict[int, list] = {}
+        self._VOICE_PRIMING_MAX_TURNS = 10
         # Track threads where the bot has participated so follow-up messages
         # in those threads don't require @mention.  Persisted to disk so the
         # set survives gateway restarts.
@@ -895,6 +899,14 @@ class DiscordAdapter(BasePlatformAdapter):
                 return SendResult(success=success)
         return await self.send_voice(chat_id=chat_id, audio_path=audio_path, **kwargs)
 
+    def _on_voice_response(self, event, text: str) -> None:
+        """Record assistant response in priming history."""
+        raw = getattr(event, "raw_message", None)
+        guild_id = getattr(raw, "guild_id", None) if raw else None
+        if guild_id is not None:
+            # Keep only the first 500 chars — enough for priming, not verbose
+            self._append_voice_priming(guild_id, "assistant", text[:500])
+
     async def send_voice(
         self,
         chat_id: str,
@@ -1009,6 +1021,8 @@ class DiscordAdapter(BasePlatformAdapter):
 
     async def leave_voice_channel(self, guild_id: int) -> None:
         """Disconnect from the voice channel in a guild."""
+        # Clear priming history for this session
+        self._voice_priming_history.pop(guild_id, None)
         # Stop voice receiver first
         receiver = self._voice_receivers.pop(guild_id, None)
         if receiver:
@@ -1113,6 +1127,25 @@ class DiscordAdapter(BasePlatformAdapter):
                     await ch.send("Left voice channel (inactivity timeout).")
                 except Exception:
                     pass
+
+    def _append_voice_priming(self, guild_id: int, role: str, text: str) -> None:
+        """Append a turn to the voice priming history ring buffer."""
+        history = self._voice_priming_history.setdefault(guild_id, [])
+        history.append((role, text))
+        if len(history) > self._VOICE_PRIMING_MAX_TURNS:
+            del history[: len(history) - self._VOICE_PRIMING_MAX_TURNS]
+
+    def _build_voice_priming_context(self, guild_id: int) -> str:
+        """Format recent voice turns as priming context for STT."""
+        history = self._voice_priming_history.get(guild_id, [])
+        if not history:
+            return ""
+        lines = []
+        for role, text in history:
+            prefix = "User" if role == "user" else "Assistant"
+            # Truncate individual turns to keep context compact
+            lines.append(f"{prefix}: {text[:200]}")
+        return "Recent conversation:\n" + "\n".join(lines)
 
     def is_in_voice_channel(self, guild_id: int) -> bool:
         """Check if the bot is connected to a voice channel in this guild."""
@@ -1240,7 +1273,11 @@ class DiscordAdapter(BasePlatformAdapter):
 
             from tools.transcription_tools import transcribe_audio, get_stt_model_from_config
             stt_model = get_stt_model_from_config()
-            result = await asyncio.to_thread(transcribe_audio, wav_path, model=stt_model)
+            priming = self._build_voice_priming_context(guild_id)
+            result = await asyncio.to_thread(
+                transcribe_audio, wav_path, model=stt_model,
+                priming_context=priming,
+            )
 
             if not result.get("success"):
                 return
@@ -1249,6 +1286,9 @@ class DiscordAdapter(BasePlatformAdapter):
                 return
 
             logger.info("Voice input from user %d: %s", user_id, transcript[:100])
+
+            # Record user turn for STT context priming
+            self._append_voice_priming(guild_id, "user", transcript)
 
             # Reset inactivity timer on valid voice input (not just TTS
             # playback), so pure listening sessions don't time out.

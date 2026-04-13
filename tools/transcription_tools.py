@@ -578,11 +578,197 @@ def _transcribe_mistral(file_path: str, model_name: str) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Context-primed transcription via chat/completions
+# ---------------------------------------------------------------------------
+
+# Cached max_model_len from /v1/models probe (populated once per process)
+_priming_max_tokens: Optional[int] = None
+_priming_max_tokens_probed = False
+
+# Rough chars-per-token estimate for priming budget calculation
+_PRIMING_CHARS_PER_TOKEN = 4
+
+# Audio tokens are compact in Qwen3-ASR (~50 tokens for ~3s of speech).
+# Reserve this many tokens for audio + model overhead + output.
+_PRIMING_AUDIO_RESERVE = 200
+
+
+def _probe_stt_max_model_len(base_url: str, model_name: str) -> Optional[int]:
+    """Query /v1/models to discover the STT model's max_model_len."""
+    import json
+    import urllib.request as _ur
+
+    url = f"{base_url.rstrip('/')}/models"
+    try:
+        req = _ur.Request(url, method="GET")
+        with _ur.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read())
+        for entry in data.get("data", []):
+            if entry.get("id") == model_name:
+                return entry.get("max_model_len")
+    except Exception as exc:
+        logger.debug("Failed to probe STT max_model_len at %s: %s", url, exc)
+    return None
+
+
+def _build_priming_messages(
+    audio_b64: str,
+    audio_format: str,
+    priming_context: str,
+    system_prompt: str,
+    max_context_tokens: int,
+) -> list:
+    """Build chat/completions messages with priming, respecting token budget.
+
+    The system prompt is kept stable (same text every call) so that the
+    serving engine can cache the KV prefix across turns.  Variable parts
+    (conversation history) go into the priming_context which is appended
+    after the stable prefix.
+
+    If the total priming text would exceed *max_context_tokens*, the
+    variable priming_context is truncated (the stable system_prompt is
+    never trimmed).
+    """
+    messages = []
+
+    # Budget for text (system + priming) after reserving for audio + output
+    text_budget = max(0, max_context_tokens - _PRIMING_AUDIO_RESERVE)
+    system_tokens = len(system_prompt) // _PRIMING_CHARS_PER_TOKEN + 1
+
+    if system_prompt and priming_context:
+        remaining = text_budget - system_tokens
+        max_priming_chars = max(0, remaining * _PRIMING_CHARS_PER_TOKEN)
+        if max_priming_chars > 0:
+            trimmed = priming_context[:max_priming_chars]
+            content = system_prompt + "\n\n" + trimmed
+        else:
+            content = system_prompt
+        messages.append({"role": "system", "content": content})
+    elif system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    elif priming_context:
+        max_chars = text_budget * _PRIMING_CHARS_PER_TOKEN
+        messages.append({"role": "system", "content": priming_context[:max_chars]})
+
+    messages.append({
+        "role": "user",
+        "content": [
+            {
+                "type": "input_audio",
+                "input_audio": {
+                    "data": audio_b64,
+                    "format": audio_format,
+                },
+            },
+        ],
+    })
+
+    return messages
+
+
+def _transcribe_chat_completions(
+    file_path: str,
+    model_name: str,
+    priming_context: str = "",
+) -> Dict[str, Any]:
+    """Transcribe using /v1/chat/completions with optional context priming.
+
+    This sends base64-encoded audio as an ``input_audio`` content part,
+    allowing a system prompt with names, terms, and conversation history
+    to bias the ASR model toward correct recognition of domain-specific
+    vocabulary.
+
+    Falls back to :func:`_transcribe_openai` if the endpoint does not
+    support chat/completions or if an error occurs.
+    """
+    import base64
+    import json
+    import urllib.request as _ur
+
+    global _priming_max_tokens, _priming_max_tokens_probed
+
+    stt_config = _load_stt_config()
+    openai_cfg = stt_config.get("openai", {})
+    base_url = openai_cfg.get("base_url", OPENAI_BASE_URL).rstrip("/")
+    api_key = openai_cfg.get("api_key", "") or os.getenv("VOICE_TOOLS_OPENAI_KEY", "")
+
+    # Priming config
+    priming_cfg = stt_config.get("priming", {})
+    system_prompt = priming_cfg.get("system_prompt", "")
+
+    # Probe max_model_len once per process
+    if not _priming_max_tokens_probed:
+        _priming_max_tokens = _probe_stt_max_model_len(base_url, model_name)
+        _priming_max_tokens_probed = True
+        if _priming_max_tokens:
+            logger.info("STT priming: max_model_len=%d for %s", _priming_max_tokens, model_name)
+
+    max_tokens = _priming_max_tokens or 2048  # conservative default
+
+    # Determine audio format from extension
+    ext = Path(file_path).suffix.lower().lstrip(".")
+    audio_format = ext if ext in ("wav", "mp3", "ogg", "flac", "webm") else "wav"
+
+    try:
+        with open(file_path, "rb") as f:
+            audio_b64 = base64.b64encode(f.read()).decode()
+
+        messages = _build_priming_messages(
+            audio_b64=audio_b64,
+            audio_format=audio_format,
+            priming_context=priming_context,
+            system_prompt=system_prompt,
+            max_context_tokens=max_tokens,
+        )
+
+        payload = json.dumps({
+            "model": model_name,
+            "messages": messages,
+            "temperature": 0.0,
+        }).encode()
+
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        req = _ur.Request(
+            f"{base_url}/chat/completions",
+            data=payload,
+            headers=headers,
+            method="POST",
+        )
+        with _ur.urlopen(req, timeout=30) as resp:
+            result = json.loads(resp.read())
+
+        text = result["choices"][0]["message"]["content"]
+        text = _extract_transcript_text(text)
+        usage = result.get("usage", {})
+        logger.info(
+            "Transcribed %s via chat/completions (%s, %d chars, "
+            "prompt_tokens=%s, priming=%d chars)",
+            Path(file_path).name, model_name, len(text),
+            usage.get("prompt_tokens", "?"), len(priming_context),
+        )
+
+        return {"success": True, "transcript": text, "provider": "openai_primed"}
+
+    except Exception as exc:
+        logger.warning(
+            "Primed transcription failed, falling back to Whisper endpoint: %s", exc
+        )
+        return _transcribe_openai(file_path, model_name)
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
 
-def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, Any]:
+def transcribe_audio(
+    file_path: str,
+    model: Optional[str] = None,
+    priming_context: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     Transcribe an audio file using the configured STT provider.
 
@@ -590,9 +776,16 @@ def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, A
       1. User config (``stt.provider`` in config.yaml)
       2. Auto-detect: local faster-whisper (free) > Groq (free tier) > OpenAI (paid)
 
+    When *priming_context* is provided and the provider is ``openai`` with
+    ``stt.priming.enabled: true``, the transcription is routed through
+    ``/v1/chat/completions`` with the context as a system prompt.  This
+    lets ASR models like Qwen3-ASR bias toward domain-specific names and
+    terminology.
+
     Args:
-        file_path: Absolute path to the audio file to transcribe.
-        model:     Override the model. If None, uses config or provider default.
+        file_path:       Absolute path to the audio file to transcribe.
+        model:           Override the model. If None, uses config or provider default.
+        priming_context: Optional conversation context for ASR priming.
 
     Returns:
         dict with keys:
@@ -636,6 +829,11 @@ def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, A
     if provider == "openai":
         openai_cfg = stt_config.get("openai", {})
         model_name = model or openai_cfg.get("model", DEFAULT_STT_MODEL)
+        # Use primed chat/completions when priming is enabled and context is available
+        priming_cfg = stt_config.get("priming", {})
+        priming_enabled = str(priming_cfg.get("enabled", False)).lower() in ("true", "1", "yes")
+        if priming_enabled and priming_context:
+            return _transcribe_chat_completions(file_path, model_name, priming_context)
         return _transcribe_openai(file_path, model_name)
 
     if provider == "mistral":
