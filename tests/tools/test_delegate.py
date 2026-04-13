@@ -72,21 +72,23 @@ class TestDelegateRequirements(unittest.TestCase):
 
 
 class TestChildSystemPrompt(unittest.TestCase):
-    def test_goal_only(self):
-        prompt = _build_child_system_prompt("Fix the tests")
-        self.assertIn("Fix the tests", prompt)
-        self.assertIn("YOUR TASK", prompt)
+    def test_generic_prompt(self):
+        """System prompt is generic — no task-specific content."""
+        prompt = _build_child_system_prompt()
+        self.assertIn("focused subagent", prompt)
+        self.assertIn("first user message", prompt)
+        self.assertNotIn("YOUR TASK", prompt)
         self.assertNotIn("CONTEXT", prompt)
 
-    def test_goal_with_context(self):
-        prompt = _build_child_system_prompt("Fix the tests", "Error: assertion failed in test_foo.py line 42")
-        self.assertIn("Fix the tests", prompt)
-        self.assertIn("CONTEXT", prompt)
-        self.assertIn("assertion failed", prompt)
+    def test_workspace_note_included(self):
+        prompt = _build_child_system_prompt(workspace_note="You have access to /workspace")
+        self.assertIn("/workspace", prompt)
+        self.assertIn("focused subagent", prompt)
 
-    def test_empty_context_ignored(self):
-        prompt = _build_child_system_prompt("Do something", "  ")
-        self.assertNotIn("CONTEXT", prompt)
+    def test_workspace_note_empty_ignored(self):
+        prompt = _build_child_system_prompt(workspace_note="  ")
+        # Empty workspace_note should not add an extra section
+        self.assertNotIn("You have access to", prompt)
 
 
 class TestStripBlockedTools(unittest.TestCase):

@@ -10,7 +10,7 @@ Each child gets:
   - A fresh conversation (no parent history)
   - Its own task_id (own terminal session, file ops cache)
   - A restricted toolset (configurable, with blocked tools always stripped)
-  - A focused system prompt built from the delegated goal + context
+  - A stable system prompt (task goal + context flow via user message)
 
 The parent's context only sees the delegation call and the summary result,
 never the child's intermediate tool calls or reasoning.
@@ -172,7 +172,9 @@ def _configure_child_workspace(child, task_index: int, task_cfg: Dict[str, Any],
         child.ephemeral_system_prompt = _build_child_system_prompt(
             workspace_note=prompt_note,
         )
-    child._delegate_context = task_cfg.get("context")
+    # Only set context if not already set by _build_child_agent
+    if not getattr(child, "_delegate_context", None):
+        child._delegate_context = task_cfg.get("context")
 
 
 def _strip_blocked_tools(toolsets: List[str]) -> List[str]:
