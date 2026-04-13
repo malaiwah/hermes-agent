@@ -42,7 +42,7 @@ def _make_voice_cli(**overrides):
 # Markdown stripping — import real function from tts_tool
 # ============================================================================
 
-from tools.tts_tool import _strip_markdown_for_tts
+from tools.tts_tool import _strip_markdown_for_tts, _preprocess_tts_text
 
 
 class TestMarkdownStripping:
@@ -120,6 +120,81 @@ class TestMarkdownStripping:
         assert "---" not in result
         assert "Answer" in result
         assert "Good luck!" in result
+        assert "docs" in result
+
+
+# ============================================================================
+# TTS text preprocessing — _preprocess_tts_text
+# ============================================================================
+
+class TestPreprocessTtsText:
+    """Test _preprocess_tts_text which wraps _strip_markdown_for_tts with
+    emoji stripping, newline handling, and table char removal."""
+
+    def test_strips_emojis(self):
+        result = _preprocess_tts_text("Hello 😊 world 🎉!")
+        assert "😊" not in result
+        assert "🎉" not in result
+        assert "Hello" in result
+        assert "world" in result
+
+    def test_strips_table_chars(self):
+        result = _preprocess_tts_text("| Name | Value |")
+        assert "|" not in result
+        assert "Name" in result
+        assert "Value" in result
+
+    def test_strips_media_tags(self):
+        result = _preprocess_tts_text("Here is an image MEDIA:/tmp/foo.png done")
+        assert "MEDIA:" not in result
+        assert "Here is an image" in result
+
+    @patch("tools.tts_tool._load_tts_config", return_value={"strip_newlines": True})
+    def test_newlines_replaced_when_strip_enabled(self, _mock):
+        result = _preprocess_tts_text("Line one.\nLine two.\n\nLine three.")
+        assert "\n" not in result
+        assert "Line one." in result
+        assert "Line two." in result
+        assert "Line three." in result
+
+    @patch("tools.tts_tool._load_tts_config", return_value={"strip_newlines": False})
+    def test_newlines_preserved_when_strip_disabled(self, _mock):
+        result = _preprocess_tts_text("Line one.\nLine two.")
+        assert "\n" in result
+
+    @patch("tools.tts_tool._load_tts_config", return_value={})
+    def test_strip_newlines_defaults_to_true(self, _mock):
+        """Default behavior: newlines are stripped (Kokoro compatibility)."""
+        result = _preprocess_tts_text("First.\nSecond.")
+        assert "\n" not in result
+
+    def test_collapses_whitespace(self):
+        result = _preprocess_tts_text("Hello    world")
+        assert "  " not in result
+
+    def test_strips_leading_punctuation(self):
+        result = _preprocess_tts_text(". . . Hello")
+        assert result.startswith("Hello")
+
+    def test_full_pipeline(self):
+        """Markdown + emojis + newlines + tables all cleaned in one pass."""
+        text = (
+            "## Status Update 🎉\n\n"
+            "**Everything** is working! ✅\n"
+            "| Metric | Value |\n"
+            "| latency | 42ms |\n\n"
+            "See [docs](https://example.com) for details."
+        )
+        result = _preprocess_tts_text(text)
+        assert "##" not in result
+        assert "**" not in result
+        assert "🎉" not in result
+        assert "✅" not in result
+        assert "|" not in result
+        assert "https://" not in result
+        assert "\n" not in result
+        assert "Status Update" in result
+        assert "Everything" in result
         assert "docs" in result
 
 
