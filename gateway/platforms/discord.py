@@ -1136,8 +1136,14 @@ class DiscordAdapter(BasePlatformAdapter):
                     logger.error("Voice playback error: %s", error)
                 loop.call_soon_threadsafe(done.set)
 
-            source = discord.FFmpegPCMAudio(audio_path)
-            source = discord.PCMVolumeTransformer(source, volume=1.0)
+            # Use Opus passthrough when the file is already Opus-encoded
+            # (.ogg) to avoid decode→re-encode overhead.  FFmpegOpusAudio
+            # pipes the Opus stream directly to Discord's voice connection.
+            if audio_path.endswith(".ogg") and hasattr(discord, "FFmpegOpusAudio"):
+                source = discord.FFmpegOpusAudio(audio_path)
+            else:
+                source = discord.FFmpegPCMAudio(audio_path)
+                source = discord.PCMVolumeTransformer(source, volume=1.0)
             vc.play(source, after=_after)
             try:
                 await asyncio.wait_for(done.wait(), timeout=self.PLAYBACK_TIMEOUT)
