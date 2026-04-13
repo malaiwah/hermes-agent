@@ -415,12 +415,22 @@ class VoiceReceiver:
                         user_id = self._infer_user_for_ssrc(ssrc)
                     if user_id:
                         completed.append((user_id, bytes(buf)))
-                    self._buffers[ssrc] = bytearray()
-                    self._last_packet_time.pop(ssrc, None)
-                    self._rms_sum.pop(ssrc, None)
-                    self._rms_count.pop(ssrc, None)
-                elif silence_duration >= self.SILENCE_THRESHOLD * 2:
-                    # Stale buffer with no valid user — discard
+                        self._buffers[ssrc] = bytearray()
+                        self._last_packet_time.pop(ssrc, None)
+                        self._rms_sum.pop(ssrc, None)
+                        self._rms_count.pop(ssrc, None)
+                    else:
+                        # SSRC still unmapped — keep the buffer for one more
+                        # cycle so the SPEAKING event has time to arrive.
+                        # The stale-buffer cleanup below (2x threshold) will
+                        # discard it if the mapping never comes.
+                        logger.debug(
+                            "Keeping unmapped utterance: ssrc=%d, duration=%.1fs "
+                            "(waiting for SPEAKING event)",
+                            ssrc, buf_duration,
+                        )
+                elif silence_duration >= self.SILENCE_THRESHOLD * 3:
+                    # Stale buffer with no valid user after extended wait — discard
                     self._buffers.pop(ssrc, None)
                     self._last_packet_time.pop(ssrc, None)
                     self._rms_sum.pop(ssrc, None)
