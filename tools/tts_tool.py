@@ -709,7 +709,9 @@ _EMOJI_RE = re.compile(
     "\U0001FA00-\U0001FA6F"  # chess symbols
     "\U0001FA70-\U0001FAFF"  # symbols extended-A
     "\U00002702-\U000027B0"  # dingbats
-    "\U000024C2-\U0001F251"  # enclosed characters
+    "\U000024C2-\U000024FF"  # enclosed alphanumerics
+    "\U00002600-\U000026FF"  # miscellaneous symbols
+    "\U0001F100-\U0001F251"  # enclosed alphanumeric supplement
     "\U0000FE00-\U0000FE0F"  # variation selectors
     "\U0000200D"             # ZWJ
     "\U000020E3"             # combining enclosing keycap
@@ -773,6 +775,9 @@ def _preprocess_tts_text(text: str) -> str:
         text = re.sub(r'\n\n+', '. ', text)
         # Single newlines → space
         text = text.replace('\n', ' ')
+
+    # Collapse repeated periods from newline conversion (e.g. "sentence.\n\n" → "sentence.. ")
+    text = re.sub(r'\.{2,}', '.', text)
 
     # Collapse runs of whitespace
     text = re.sub(r'[ \t]{2,}', ' ', text)

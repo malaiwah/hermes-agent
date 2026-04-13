@@ -176,6 +176,26 @@ class TestPreprocessTtsText:
         result = _preprocess_tts_text(". . . Hello")
         assert result.startswith("Hello")
 
+    def test_empty_string(self):
+        assert _preprocess_tts_text("") == ""
+
+    def test_only_emojis(self):
+        assert _preprocess_tts_text("😊🎉✅") == ""
+
+    @patch("tools.tts_tool._load_tts_config", return_value={})
+    def test_only_newlines(self, _mock):
+        assert _preprocess_tts_text("\n\n\n") == ""
+
+    def test_preserves_cjk_text(self):
+        """Emoji stripping must not destroy CJK characters."""
+        result = _preprocess_tts_text("你好世界")
+        assert "你好世界" in result
+
+    def test_double_period_collapsed(self):
+        """Sentence ending with period + paragraph break should not produce '..'"""
+        result = _preprocess_tts_text("Done.\n\nNext topic.")
+        assert ".." not in result
+
     def test_full_pipeline(self):
         """Markdown + emojis + newlines + tables all cleaned in one pass."""
         text = (
