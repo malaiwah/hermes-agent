@@ -84,18 +84,20 @@ def check_delegate_requirements() -> bool:
 
 
 def _build_child_system_prompt(
-    goal: str,
-    context: Optional[str] = None,
     workspace_note: Optional[str] = None,
+    **_kwargs,
 ) -> str:
-    """Build a focused system prompt for a child agent."""
+    """Build a focused system prompt for a child agent.
+
+    Task-specific content (goal, context) is NOT included here — it flows
+    via run_conversation(user_message=...) as the first user message.
+    This keeps the system prompt stable across subagents, improving
+    prefix cache reuse on local LLM backends.
+    """
     parts = [
-        "You are a focused subagent working on a specific delegated task.",
-        "",
-        f"YOUR TASK:\n{goal}",
+        "You are a focused subagent working on a specific delegated task. "
+        "Your task is provided in the first user message below.",
     ]
-    if context and context.strip():
-        parts.append(f"\nCONTEXT:\n{context}")
     if workspace_note and workspace_note.strip():
         parts.append(f"\n{workspace_note.strip()}")
     parts.append(
@@ -168,10 +170,9 @@ def _configure_child_workspace(child, task_index: int, task_cfg: Dict[str, Any],
     prompt_note = plan.get("prompt_note", "").strip()
     if prompt_note:
         child.ephemeral_system_prompt = _build_child_system_prompt(
-            task_cfg["goal"],
-            task_cfg.get("context"),
-            prompt_note,
+            workspace_note=prompt_note,
         )
+    child._delegate_context = task_cfg.get("context")
 
 
 def _strip_blocked_tools(toolsets: List[str]) -> List[str]:
@@ -305,7 +306,7 @@ def _build_child_agent(
         child_toolsets = _strip_blocked_tools(DEFAULT_ALLOWED_TOOLSETS)
 
     workspace_hint = _resolve_workspace_hint(parent_agent)
-    child_prompt = _build_child_system_prompt(goal, context, workspace_note=workspace_hint)
+    child_prompt = _build_child_system_prompt(workspace_note=workspace_hint)
     # Extract parent's API key so subagents inherit auth (e.g. Nous Portal).
     parent_api_key = getattr(parent_agent, "api_key", None)
     if (not parent_api_key) and hasattr(parent_agent, "_client_kwargs"):
@@ -375,6 +376,8 @@ def _build_child_agent(
         _shared_memory_store=getattr(parent_agent, '_memory_store', None),
     )
     child._print_fn = getattr(parent_agent, '_print_fn', None)
+    # Store context for injection into user message (not system prompt)
+    child._delegate_context = context
     # Set delegation depth so children can't spawn grandchildren
     child._delegate_depth = getattr(parent_agent, '_delegate_depth', 0) + 1
 
@@ -442,7 +445,13 @@ def _run_single_child(
 
             register_task_env_overrides(child_task_id, child_env_overrides)
 
-        result = child.run_conversation(user_message=goal, task_id=child_task_id)
+        # Build user message: goal + context (context moved from system prompt
+        # to user message for prefix cache stability across subagents)
+        _user_msg = goal
+        _child_context = getattr(child, "_delegate_context", None)
+        if _child_context:
+            _user_msg = f"{goal}\n\nCONTEXT:\n{_child_context}"
+        result = child.run_conversation(user_message=_user_msg, task_id=child_task_id)
 
         # Flush any remaining batched progress to gateway
         if child_progress_cb and hasattr(child_progress_cb, '_flush'):
