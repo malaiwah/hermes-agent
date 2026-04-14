@@ -1450,6 +1450,16 @@ class BasePlatformAdapter(ABC):
                 # Skipped when the chat has voice mode disabled (/voice off)
                 _tts_played = False
                 _voice_already_streamed = getattr(event, "_voice_tts_streamed", False)
+
+                # Always strip [tts: ...] tags from text before display,
+                # regardless of whether streaming TTS already handled audio.
+                if event.message_type == MessageType.VOICE and text_content:
+                    import re as _tts_strip_re
+                    text_content = _tts_strip_re.sub(
+                        r'\[tts:\s*.+?\]\s*$', '', text_content,
+                        flags=_tts_strip_re.MULTILINE,
+                    ).rstrip()
+
                 if (event.message_type == MessageType.VOICE
                         and text_content
                         and not media_files
