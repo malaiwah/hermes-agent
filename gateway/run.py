@@ -5193,6 +5193,28 @@ class GatewayRunner:
             self._voice_mode[event.source.chat_id] = "all"
             self._save_voice_modes()
             self._set_adapter_auto_tts_disabled(adapter, event.source.chat_id, disabled=False)
+
+            # Seed STT priming with Honcho user context (names, terms, facts)
+            # so the first voice utterance benefits from context priming
+            # before the ring buffer has any conversation history.
+            # Uses the cached agent's memory manager — no raw HTTP calls.
+            try:
+                _session_key = f"agent:main:{event.source.platform.value}:{event.source.chat_id}"
+                with self._agent_cache_lock:
+                    _cached = self._agent_cache.get(_session_key)
+                if _cached:
+                    _agent_obj = _cached[0]
+                    _mm = getattr(_agent_obj, "_memory_manager", None)
+                    if _mm:
+                        for _prov in _mm.providers:
+                            _ftc = getattr(_prov, "_first_turn_context", None)
+                            if _ftc and hasattr(adapter, "_voice_priming_history"):
+                                adapter._append_voice_priming(guild_id, "system", _ftc[:500])
+                                logger.info("Voice: seeded STT priming with Honcho context (%d chars)", len(_ftc))
+                                break
+            except Exception as _e:
+                logger.debug("Voice: Honcho priming seed failed: %s", _e)
+
             return (
                 f"Joined voice channel **{voice_channel.name}**.\n"
                 f"I'll speak my replies and listen to you. Use /voice leave to disconnect."
