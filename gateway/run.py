@@ -3441,15 +3441,14 @@ class GatewayRunner:
                     "[tts: <brief description of tone and pace>]\n"
                     "Then your response on the next line. Match the emotional tone "
                     "to the conversation. Omit the tag to keep the current voice.\n"
-                    "VOICE FEEDBACK: If you need to use tools before answering "
-                    "(web search, code execution, file reads, etc.), FIRST call "
-                    "send_user_message with a brief spoken acknowledgment so the "
-                    "user knows you heard them and are working. Keep it natural "
-                    "and short (one sentence). Between multiple tool calls, use "
-                    "send_user_message again to give progress updates. Examples:\n"
-                    "  send_user_message('Let me look that up for you.')\n"
-                    "  send_user_message('Found some results, digging deeper.')\n"
-                    "  send_user_message('Almost done, just verifying the details.')]\n\n"
+                    "VOICE FEEDBACK: When using tools, call send_user_message IN "
+                    "PARALLEL with your first tool call to acknowledge the user. "
+                    "Keep it to 10-15 words max — a quick spoken note, not a full "
+                    "sentence. Between batches of tool calls, send another brief "
+                    "update. Examples:\n"
+                    "  send_user_message('Looking that up now.')\n"
+                    "  send_user_message('Found some results, checking further.')\n"
+                    "  send_user_message('Almost done.')]\n\n"
                     + message_text
                 )
 
@@ -7700,15 +7699,12 @@ class GatewayRunner:
                             except Exception as _ve:
                                 logger.warning("Voice update TTS failed: %s", _ve)
 
-                        # Block until TTS plays — the agent should wait for
-                        # the voice update to finish before continuing work.
-                        _future = asyncio.run_coroutine_threadsafe(
+                        # Fire-and-forget: the agent continues working (parallel
+                        # tool calls) while the voice update plays. The user
+                        # hears the acknowledgment concurrently with the tool.
+                        asyncio.run_coroutine_threadsafe(
                             _play_voice_update(), _loop_for_step
                         )
-                        try:
-                            _future.result(timeout=30)  # blocks the agent thread
-                        except Exception as _ve:
-                            logger.warning("Voice update playback failed: %s", _ve)
             except Exception as _e:
                 logger.debug("message_callback error: %s", _e)
 
