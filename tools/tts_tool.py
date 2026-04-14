@@ -262,7 +262,11 @@ def _resolve_qwen3_config(tts_config: Dict[str, Any], language: str = None) -> D
     for key, override in langs.items():
         if isinstance(override, dict) and key.lower() == language.lower():
             merged = dict(base)
-            merged.update(override)
+            # Defensive: don't let nested 'languages' / 'base_url' / 'timeout'
+            # in the override accidentally clobber structural keys.
+            safe_override = {k: v for k, v in override.items()
+                             if k not in ("languages",)}
+            merged.update(safe_override)
             merged["_language"] = key
             return merged
     return base
@@ -318,79 +322,6 @@ def _generate_qwen3_tts(text: str, output_path: str, tts_config: Dict[str, Any],
                 f.write(chunk)
 
     return output_path
-
-
-def _generate_qwen3_tts_stream(text: str, output_dir: str, tts_config: Dict[str, Any]):
-    """Generate audio using Qwen3-TTS streaming endpoint.
-
-    Calls ``/v1/audio/speech/stream`` which splits text into sentences and
-    generates audio per-sentence.  Yields file paths as each chunk is
-    written, allowing the caller to start playback immediately.
-
-    Each yielded file is a complete, self-contained audio file.
-
-    Falls back to the non-streaming endpoint if the streaming endpoint
-    is not available (HTTP 404/405).
-    """
-    import struct
-    from urllib.parse import urlencode
-    from urllib.request import Request, urlopen
-
-    qwen_config = tts_config.get("qwen3", tts_config.get("openai", {}))
-    base_url = qwen_config.get("base_url", "http://localhost:8001")
-    voice = qwen_config.get("voice", "ryan")
-    timeout = int(qwen_config.get("timeout", 120))
-
-    response_format = "opus"  # streaming always uses opus for speed
-    ext = ".ogg"
-
-    params_dict = {
-        "text": text,
-        "voice": voice,
-        "response_format": response_format,
-    }
-    instruct = qwen_config.get("instruct", "")
-    if instruct:
-        params_dict["instruct"] = instruct
-    params = urlencode(params_dict)
-    url = f"{base_url.rstrip('/')}/v1/audio/speech/stream?{params}"
-
-    req = Request(url, method="POST", headers={"Content-Length": "0"})
-    try:
-        resp = urlopen(req, timeout=timeout)
-    except Exception as exc:
-        # Streaming endpoint not available — fall back to non-streaming
-        if "404" in str(exc) or "405" in str(exc):
-            import datetime
-            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            fallback_path = os.path.join(output_dir, f"tts_{ts}{ext}")
-            _generate_qwen3_tts(text, fallback_path, tts_config)
-            yield fallback_path
-            return
-        raise
-
-    try:
-        chunk_idx = 0
-        while True:
-            header = resp.read(4)
-            if not header or len(header) < 4:
-                break
-            chunk_len = struct.unpack(">I", header)[0]
-            if chunk_len == 0:
-                break
-            chunk_data = resp.read(chunk_len)
-            if len(chunk_data) < chunk_len:
-                break
-
-            import datetime
-            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            chunk_path = os.path.join(output_dir, f"tts_{ts}_{chunk_idx}{ext}")
-            with open(chunk_path, "wb") as f:
-                f.write(chunk_data)
-            chunk_idx += 1
-            yield chunk_path
-    finally:
-        resp.close()
 
 
 # ===========================================================================

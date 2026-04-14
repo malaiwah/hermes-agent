@@ -90,6 +90,12 @@ class StreamingPCMAudioSource(discord.AudioSource if DISCORD_AVAILABLE else obje
     The audio source is consumed in a separate thread by discord.py's
     player.  The ``feed()`` method is called from another thread (the
     HTTP reader) to push PCM data into the buffer.
+
+    Uses a ``threading.Condition`` so ``read()`` blocks (without spinning)
+    until either a full frame is available, ``finish()`` is called, or
+    ``cancel()`` is called (e.g. barge-in).  A slow TTS server will NOT
+    cause the source to prematurely return empty bytes — only ``finish``
+    or ``cancel`` end the stream.
     """
 
     # Discord wants 48kHz stereo int16, 20ms frames = 3840 bytes
@@ -100,11 +106,14 @@ class StreamingPCMAudioSource(discord.AudioSource if DISCORD_AVAILABLE else obje
 
     def __init__(self):
         self._buffer = bytearray()
-        self._lock = threading.Lock()
+        self._cond = threading.Condition()
         self._done = False
+        self._cancelled = False
 
     def feed(self, pcm_24k_mono: bytes):
         """Feed 24kHz mono int16 PCM data into the buffer."""
+        if self._cancelled:
+            return
         import numpy as _np
         samples = _np.frombuffer(pcm_24k_mono, dtype=_np.int16)
         # Upsample 24kHz → 48kHz: repeat each sample twice
@@ -113,42 +122,101 @@ class StreamingPCMAudioSource(discord.AudioSource if DISCORD_AVAILABLE else obje
         stereo = _np.empty(len(upsampled) * 2, dtype=_np.int16)
         stereo[0::2] = upsampled
         stereo[1::2] = upsampled
-        with self._lock:
+        with self._cond:
             self._buffer.extend(stereo.tobytes())
+            self._cond.notify_all()
 
     def finish(self):
-        """Signal that no more data will be fed."""
-        self._done = True
+        """Signal that no more data will be fed (normal end of stream)."""
+        with self._cond:
+            self._done = True
+            self._cond.notify_all()
+
+    def cancel(self):
+        """Signal that playback should stop immediately (barge-in)."""
+        with self._cond:
+            self._cancelled = True
+            self._done = True
+            self._buffer.clear()
+            self._cond.notify_all()
+
+    @property
+    def is_cancelled(self) -> bool:
+        return self._cancelled
 
     def read(self) -> bytes:
         """Read one 20ms frame (3840 bytes) for Discord.
 
-        Called from discord.py's player thread.  Blocks briefly if data
-        isn't available yet; returns empty bytes when stream is complete.
+        Called from discord.py's player thread.  Blocks (no spin) until a
+        full frame is available, ``finish()`` is called, or ``cancel()``
+        is called.  Returns ``b''`` only on cancel/done+empty.
         """
-        import time as _t
-        # Wait up to 2s for enough data
-        for _ in range(200):
-            with self._lock:
+        with self._cond:
+            while True:
+                if self._cancelled:
+                    return b''
                 if len(self._buffer) >= self.DISCORD_FRAME_SIZE:
                     frame = bytes(self._buffer[:self.DISCORD_FRAME_SIZE])
                     del self._buffer[:self.DISCORD_FRAME_SIZE]
                     return frame
                 if self._done:
-                    # Pad remaining data to frame size
                     if self._buffer:
+                        # Pad remaining partial frame
                         remaining = bytes(self._buffer)
                         self._buffer.clear()
                         return remaining + b'\x00' * (self.DISCORD_FRAME_SIZE - len(remaining))
                     return b''
-            _t.sleep(0.01)
-        return b''
+                # Block until more data arrives (or done/cancel).
+                # The 30s cap is a safety valve — a truly stalled producer
+                # will eventually fail, and we don't want to hang the player
+                # thread forever.  On timeout, check state and loop.
+                self._cond.wait(timeout=30.0)
 
     def is_opus(self):
         return False
 
     def cleanup(self):
-        pass
+        # Ensure anyone still waiting on read() wakes up
+        self.cancel()
+
+
+def feed_pcm_stream_sync(url: str, source: "StreamingPCMAudioSource",
+                         timeout: float = 60.0) -> None:
+    """Read length-prefixed PCM frames from an HTTP stream and feed
+    them into a ``StreamingPCMAudioSource``.
+
+    Framing: ``[4-byte big-endian uint32 length][length bytes PCM]``.
+    A zero-length frame signals end of stream.
+
+    Always calls ``source.finish()`` before returning, so the reader
+    never hangs.  Exits early (without finishing the HTTP read) if
+    ``source.is_cancelled`` becomes True — caller's barge-in wiring
+    should set this via ``source.cancel()``.
+
+    This function is synchronous and blocking; run it in an executor.
+    """
+    import struct as _st
+    from urllib.request import Request as _Req, urlopen as _uopen
+    try:
+        _req = _Req(url, method="POST", headers={"Content-Length": "0"})
+        with _uopen(_req, timeout=timeout) as _resp:
+            while True:
+                if source.is_cancelled:
+                    return
+                _hdr = _resp.read(4)
+                if not _hdr or len(_hdr) < 4:
+                    break
+                _clen = _st.unpack(">I", _hdr)[0]
+                if _clen == 0:
+                    break
+                _pcm = _resp.read(_clen)
+                if len(_pcm) < _clen:
+                    break
+                source.feed(_pcm)
+    except Exception as e:
+        logger.warning("PCM stream feed error: %s", e)
+    finally:
+        source.finish()
 
 
 class VoiceReceiver:
@@ -663,6 +731,14 @@ class DiscordAdapter(BasePlatformAdapter):
         # Each entry is (role, text) — capped at _VOICE_PRIMING_MAX_TURNS.
         self._voice_priming_history: Dict[int, list] = {}
         self._VOICE_PRIMING_MAX_TURNS = 10
+        # Per-guild playback depth counter — supports nested/sequential
+        # play_*_in_voice_channel calls without prematurely resuming the
+        # voice receiver between chunks.
+        self._play_depth: Dict[int, int] = {}
+        # Per-guild asyncio.Lock for serializing TTS playbacks (voice
+        # progress updates + main reply) to avoid concurrent vc.play()
+        # races and concurrent TTS server calls (CUDA graph contention).
+        self._voice_play_locks: Dict[int, asyncio.Lock] = {}
         # Track threads where the bot has participated so follow-up messages
         # in those threads don't require @mention.  Persisted to disk so the
         # set survives gateway restarts.
@@ -1252,8 +1328,17 @@ class DiscordAdapter(BasePlatformAdapter):
 
     async def leave_voice_channel(self, guild_id: int) -> None:
         """Disconnect from the voice channel in a guild."""
-        # Clear priming history for this session
+        # Clear all per-guild voice state
         self._voice_priming_history.pop(guild_id, None)
+        self._play_depth.pop(guild_id, None)
+        self._voice_play_locks.pop(guild_id, None)
+        # Clear detected-language and per-chat instruct for any chats bound
+        # to this guild, so a future /voice join starts clean.
+        _bound_chat_id = self._voice_text_channels.get(guild_id)
+        if _bound_chat_id is not None:
+            _cid = str(_bound_chat_id)
+            self._voice_last_language.pop(_cid, None)
+            self._last_tts_instruct.pop(_cid, None)
         # Stop voice receiver first
         receiver = self._voice_receivers.pop(guild_id, None)
         if receiver:
@@ -1281,14 +1366,49 @@ class DiscordAdapter(BasePlatformAdapter):
         The source feeds 24kHz mono PCM which is upsampled to 48kHz stereo
         internally.  Discord.py's player reads 20ms frames from the source
         in a separate thread.
+
+        Returns ``True`` on normal completion, ``False`` on barge-in.
+
+        Serialized per-guild via ``_voice_play_locks`` so concurrent
+        ``send_user_message`` progress updates queue rather than race
+        (avoiding CUDA graph contention in the TTS server and vc.play
+        clobbering each other).
         """
         vc = self._voice_clients.get(guild_id)
         if not vc or not vc.is_connected():
             return False
 
+        # Serialize TTS playbacks per guild
+        _play_lock = self._voice_play_locks.setdefault(guild_id, asyncio.Lock())
+        async with _play_lock:
+            return await self._play_pcm_stream_locked(guild_id, pcm_source, vc)
+
+    async def _play_pcm_stream_locked(
+        self, guild_id: int, pcm_source: "StreamingPCMAudioSource", vc
+    ) -> bool:
+        """Inner PCM stream playback — must be called under the guild lock."""
         receiver = self._voice_receivers.get(guild_id)
-        if receiver:
+        depth = self._play_depth.get(guild_id, 0)
+        _barge_in_event = asyncio.Event() if depth == 0 else None
+
+        if receiver and depth == 0:
             receiver.start_playback()
+            _loop_b = asyncio.get_running_loop()
+
+            def _on_barge_in():
+                _loop_b.call_soon_threadsafe(_barge_in_event.set)
+                pcm_source.cancel()  # stop feeding + wake reader
+                if vc.is_playing():
+                    vc.stop()
+
+            receiver.on_barge_in = _on_barge_in
+        elif receiver:
+            # Nested call — inherit barge-in behavior by cancelling this
+            # source if the receiver's flag was already tripped.
+            if not receiver._playback_active:
+                pcm_source.cancel()
+
+        self._play_depth[guild_id] = depth + 1
 
         try:
             # Wait for any current playback to finish
@@ -1299,13 +1419,22 @@ class DiscordAdapter(BasePlatformAdapter):
                     break
                 await asyncio.sleep(0.1)
 
+            # Check if barge-in fired while waiting
+            if _barge_in_event and _barge_in_event.is_set():
+                pcm_source.cancel()
+                return False
+
             done = asyncio.Event()
             loop = asyncio.get_running_loop()
 
             def _after(error):
-                if error:
+                if error and not (_barge_in_event and _barge_in_event.is_set()):
                     logger.error("Voice stream playback error: %s", error)
                 loop.call_soon_threadsafe(done.set)
+
+            # Refresh playback start time for barge-in guard period
+            if receiver:
+                receiver.start_playback()
 
             vc.play(pcm_source, after=_after)
             try:
@@ -1314,10 +1443,16 @@ class DiscordAdapter(BasePlatformAdapter):
                 logger.warning("Voice stream playback timed out")
                 vc.stop()
             self._reset_voice_timeout(guild_id)
-            return True
+            return not (_barge_in_event and _barge_in_event.is_set())
         finally:
-            if receiver:
-                receiver.stop_playback()
+            new_depth = self._play_depth.get(guild_id, 1) - 1
+            if new_depth <= 0:
+                self._play_depth.pop(guild_id, None)
+                if receiver:
+                    receiver.stop_playback()
+                    receiver.on_barge_in = None
+            else:
+                self._play_depth[guild_id] = new_depth
 
     async def play_in_voice_channel(self, guild_id: int, audio_path: str) -> bool:
         """Play an audio file in the connected voice channel.
@@ -1330,32 +1465,37 @@ class DiscordAdapter(BasePlatformAdapter):
 
         A depth counter ensures the receiver only returns to normal
         listening mode when the outermost play call completes.
+
+        Serialized per-guild (shared lock with PCM stream path).
         """
         vc = self._voice_clients.get(guild_id)
         if not vc or not vc.is_connected():
             return False
 
-        receiver = self._voice_receivers.get(guild_id)
-        _depth_key = f"_play_depth_{guild_id}"
-        depth = getattr(self, _depth_key, 0)
-        if receiver and depth == 0:
-            # Switch to barge-in mode instead of full pause
-            receiver.start_playback()
+        _play_lock = self._voice_play_locks.setdefault(guild_id, asyncio.Lock())
+        async with _play_lock:
+            return await self._play_in_voice_channel_locked(guild_id, audio_path, vc)
 
-            # Wire up barge-in callback to stop current playback
-            _barge_in_event = asyncio.Event()
-            _loop = asyncio.get_running_loop()
+    async def _play_in_voice_channel_locked(
+        self, guild_id: int, audio_path: str, vc
+    ) -> bool:
+        """Inner file-based playback — must be called under the guild lock."""
+        receiver = self._voice_receivers.get(guild_id)
+        depth = self._play_depth.get(guild_id, 0)
+        _barge_in_event = asyncio.Event() if depth == 0 else None
+
+        if receiver and depth == 0:
+            receiver.start_playback()
+            _loop_b = asyncio.get_running_loop()
 
             def _on_barge_in():
-                _loop.call_soon_threadsafe(_barge_in_event.set)
+                _loop_b.call_soon_threadsafe(_barge_in_event.set)
                 if vc.is_playing():
                     vc.stop()
 
             receiver.on_barge_in = _on_barge_in
-        else:
-            _barge_in_event = None
 
-        setattr(self, _depth_key, depth + 1)
+        self._play_depth[guild_id] = depth + 1
 
         try:
             # Wait for current playback to finish (with timeout)
@@ -1367,7 +1507,6 @@ class DiscordAdapter(BasePlatformAdapter):
                     break
                 await asyncio.sleep(0.1)
 
-            # Check if barge-in already happened (e.g. during previous chunk)
             if _barge_in_event and _barge_in_event.is_set():
                 logger.info("Skipping playback — barge-in detected")
                 return False
@@ -1400,11 +1539,14 @@ class DiscordAdapter(BasePlatformAdapter):
             self._reset_voice_timeout(guild_id)
             return not (_barge_in_event and _barge_in_event.is_set())
         finally:
-            new_depth = getattr(self, _depth_key, 1) - 1
-            setattr(self, _depth_key, max(0, new_depth))
-            if receiver and new_depth <= 0:
-                receiver.stop_playback()
-                receiver.on_barge_in = None
+            new_depth = self._play_depth.get(guild_id, 1) - 1
+            if new_depth <= 0:
+                self._play_depth.pop(guild_id, None)
+                if receiver:
+                    receiver.stop_playback()
+                    receiver.on_barge_in = None
+            else:
+                self._play_depth[guild_id] = new_depth
 
     async def get_user_voice_channel(self, guild_id: int, user_id: str):
         """Return the voice channel the user is currently in, or None."""

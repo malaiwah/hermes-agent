@@ -1455,21 +1455,25 @@ class BasePlatformAdapter(ABC):
                 # TTS generates sentence N+1 while Discord plays sentence N.
                 # Skipped when the chat has voice mode disabled (/voice off)
                 _tts_played = False
-                _voice_already_streamed = getattr(event, "_voice_tts_streamed", False)
 
                 # Always strip [tts: ...] tags from text before display,
-                # regardless of whether streaming TTS already handled audio.
+                # regardless of whether streaming TTS handled audio.
                 # Also extract and save the instruct for carry-forward.
+                # Tag may appear anywhere (LLM is prompted to place it first;
+                # older prompts placed it last — handle both case-insensitively).
                 _extracted_instruct = None
-                if event.message_type == MessageType.VOICE and text_content:
+                if text_content:
                     import re as _tts_strip_re
-                    _tag = _tts_strip_re.search(r'\[tts:\s*(.+?)\]', text_content)
+                    _tag = _tts_strip_re.search(
+                        r'\[tts:\s*(.+?)\]', text_content, flags=_tts_strip_re.IGNORECASE,
+                    )
                     if _tag:
                         _extracted_instruct = _tag.group(1).strip()
                         self._last_tts_instruct[event.source.chat_id] = _extracted_instruct
-                    text_content = _tts_strip_re.sub(
-                        r'\[tts:\s*.+?\]\s*', '', text_content,
-                    ).strip()
+                        text_content = _tts_strip_re.sub(
+                            r'\[tts:\s*.+?\]\s*', '', text_content,
+                            flags=_tts_strip_re.IGNORECASE,
+                        ).strip()
 
                 # Multi-modal TTS: also fire auto-TTS for TEXT messages when the
                 # bot is connected to a voice channel bound to this chat (e.g.
@@ -1488,24 +1492,10 @@ class BasePlatformAdapter(ABC):
                 if (_should_auto_tts
                         and text_content
                         and not media_files
-                        and not _voice_already_streamed
                         and event.source.chat_id not in self._auto_tts_disabled_chats):
                     try:
                         from tools.tts_tool import check_tts_requirements, _preprocess_tts_text, _load_tts_config, _get_provider
-                        import re as _re
                         if check_tts_requirements():
-                            # Extract dynamic TTS instruct from LLM response
-                            _dynamic_instruct = None
-                            _tts_tag_match = _re.search(
-                                r'\[tts:\s*(.+?)\]\s*$', text_content,
-                                flags=_re.MULTILINE,
-                            )
-                            if _tts_tag_match:
-                                _dynamic_instruct = _tts_tag_match.group(1).strip()
-                                # Strip the tag from text (don't speak or display it)
-                                text_content = text_content[:_tts_tag_match.start()].rstrip()
-                                logger.info("[%s] Dynamic TTS instruct: %s", self.name, _dynamic_instruct)
-
                             _tts_max = self._tts_max_chars
                             speech_text = _preprocess_tts_text(text_content[:_tts_max])
                             if not speech_text:
@@ -1514,15 +1504,15 @@ class BasePlatformAdapter(ABC):
                             _tts_cfg = _load_tts_config()
                             _tts_provider = _get_provider(_tts_cfg)
 
-                            # Override config instruct: use LLM tag if present,
-                            # else carry forward last turn's instruct, else config default.
+                            # Use LLM [tts:] tag if present, else carry forward
+                            # last turn's instruct, else fall back to config default.
+                            # (_extracted_instruct was set above by the text-strip block.)
                             _effective_instruct = (
                                 _extracted_instruct
                                 or self._last_tts_instruct.get(event.source.chat_id)
                             )
-                            if _effective_instruct:
-                                qwen_cfg = _tts_cfg.get("qwen3", _tts_cfg.get("openai", {}))
-                                qwen_cfg["instruct"] = _effective_instruct
+                            if _extracted_instruct:
+                                logger.info("[%s] Dynamic TTS instruct: %s", self.name, _extracted_instruct)
 
                             if _tts_provider == "qwen3":
                                 # PCM streaming: send FULL text to one TTS call so
@@ -1543,10 +1533,8 @@ class BasePlatformAdapter(ABC):
                                 if hasattr(self, "play_pcm_stream_in_voice_channel"):
                                     try:
                                         from urllib.parse import urlencode as _ue
-                                        from urllib.request import Request as _Req, urlopen as _uopen
-                                        import struct as _st
 
-                                        _p = {"text": speech_text, "voice": _voice, "chunk_size": "4"}
+                                        _p = {"text": speech_text, "voice": _voice, "chunk_size": 4}
                                         if _instruct:
                                             _p["instruct"] = _instruct
                                         if _tts_language:
@@ -1561,35 +1549,18 @@ class BasePlatformAdapter(ABC):
                                                 break
 
                                         if _gid:
-                                            from gateway.platforms.discord import StreamingPCMAudioSource
+                                            from gateway.platforms.discord import (
+                                                StreamingPCMAudioSource, feed_pcm_stream_sync,
+                                            )
                                             _src = StreamingPCMAudioSource()
-
-                                            def _feed_pcm():
-                                                try:
-                                                    _req = _Req(_url, method="POST", headers={"Content-Length": "0"})
-                                                    with _uopen(_req, timeout=120) as _resp:
-                                                        while True:
-                                                            _hdr = _resp.read(4)
-                                                            if not _hdr or len(_hdr) < 4:
-                                                                break
-                                                            _clen = _st.unpack(">I", _hdr)[0]
-                                                            if _clen == 0:
-                                                                break
-                                                            _pcm = _resp.read(_clen)
-                                                            if len(_pcm) < _clen:
-                                                                break
-                                                            _src.feed(_pcm)
-                                                except Exception as _e:
-                                                    logger.warning("PCM feed error: %s", _e)
-                                                finally:
-                                                    _src.finish()
-
                                             _loop = asyncio.get_running_loop()
-                                            _feed_task = _loop.run_in_executor(None, _feed_pcm)
-                                            await self.play_pcm_stream_in_voice_channel(_gid, _src)
+                                            _feed_task = _loop.run_in_executor(
+                                                None, feed_pcm_stream_sync, _url, _src, 120.0,
+                                            )
+                                            _play_ok = await self.play_pcm_stream_in_voice_channel(_gid, _src)
                                             await _feed_task
                                             _pcm_ok = True
-                                            _tts_played = True
+                                            _tts_played = _play_ok
                                     except Exception as _e:
                                         logger.info("[%s] PCM stream failed: %s", self.name, _e)
 

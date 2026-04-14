@@ -25,10 +25,9 @@ import signal
 import tempfile
 import threading
 import time
-import struct
 from pathlib import Path
 from datetime import datetime, timedelta
-from typing import Callable, Dict, Optional, Any, List
+from typing import Dict, Optional, Any, List
 
 # ---------------------------------------------------------------------------
 # SSL certificate auto-detection for NixOS and other non-standard systems.
@@ -3450,31 +3449,26 @@ class GatewayRunner:
                     "[tts: <brief description of tone and pace>]\n"
                     "Then your response on the next line. Match the emotional tone "
                     "to the conversation. Omit the tag to keep the current voice.\n"
-                    "VOICE FEEDBACK: When using tools, call send_user_message IN "
+                    "VOICE FEEDBACK: When using tools, call send_user_message in "
                     "PARALLEL with your first tool call to acknowledge the user. "
-                    "Speak in FIRST PERSON, natural conversational tone — like "
-                    "you're talking to a friend. Start with 'I', 'Let me', 'On it', "
-                    "etc. NOT robotic descriptions like 'Searching for X' or "
-                    "'Executing tool Y'. Keep to 5-12 words.\n"
-                    "END PROGRESS UPDATES WITH '...' to signal continuation (the "
-                    "TTS uses trailing intonation — natural 'I'm still working' "
-                    "cue). Only the FINAL answer uses a period/exclamation.\n"
-                    "MATCH THE TONE TO THE TASK:\n"
-                    "  Quick task (single tool, <5s): 'One sec...' / 'On it...'\n"
-                    "  Medium task (few tools): 'Let me check that...' / 'Looking into it...'\n"
-                    "  Complex task (web search, research): 'This might take a moment, digging in...' / 'Give me a minute, researching...'\n"
-                    "  Mid-progress: 'Getting closer...' / 'Found some hits, going deeper...'\n"
-                    "  Near done: 'Almost there...' / 'Just wrapping up...'\n"
-                    "  Unexpected complication: 'Hmm, hit a snag — trying another angle...'\n"
-                    "Vary the phrasing — don't repeat the same acknowledgment.]\n\n"
+                    "Speak in FIRST PERSON, natural conversational tone. Start "
+                    "with 'I', 'Let me', 'On it', etc. NOT 'Searching for X' or "
+                    "'Executing tool Y'. Keep to 5-12 words. ALWAYS end progress "
+                    "updates with '...' (trailing intonation); only the FINAL "
+                    "answer uses period/exclamation. Vary phrasing, match tone "
+                    "to task complexity:\n"
+                    "  Quick:   'One sec...'  /  'On it...'\n"
+                    "  Medium:  'Let me check that...'  /  'Looking into it...'\n"
+                    "  Complex: 'This might take a moment, digging in...'\n"
+                    "  Mid:     'Getting closer...'  /  'Found some hits, going deeper...'\n"
+                    "  Near:    'Almost there...'  /  'Just wrapping up...'\n"
+                    "  Snag:    'Hmm, hit a snag, trying another angle...']\n\n"
                     + message_text
                 )
 
-            # Voice streaming is handled AFTER _run_agent returns — we send
-            # the FULL response text to a single TTS pcm-stream call so the
-            # model generates all sentences in one pass, preserving prosody
-            # and intonation across sentence boundaries.
-            _voice_cb = None  # no sentence-level streaming needed
+            # Voice TTS is handled by the auto-TTS path in base.py
+            # (with the FULL response text in one pcm-stream call for
+            # prosody coherence).  No pre-stream setup needed here.
 
             # Run the agent
             agent_result = await self._run_agent(
@@ -3486,18 +3480,7 @@ class GatewayRunner:
                 session_key=session_key,
                 event_message_id=event.message_id,
                 persist_user_message=getattr(event, "persist_user_message", None),
-                voice_sentence_callback=None,
             )
-
-            # Wait for voice TTS to finish playing
-            _voice_tts_task = None
-            if _voice_tts_task:
-                try:
-                    await asyncio.wait_for(_voice_tts_task, timeout=120)
-                    # Mark the event so base.py auto-TTS skips (already played)
-                    event._voice_tts_streamed = True
-                except (asyncio.TimeoutError, Exception) as _e:
-                    logger.warning("Voice TTS task error: %s", _e)
 
             # Stop persistent typing indicator now that the agent is done
             try:
@@ -5172,7 +5155,7 @@ class GatewayRunner:
             # before the ring buffer has any conversation history.
             # Uses the cached agent's memory manager — no raw HTTP calls.
             try:
-                _session_key = f"agent:main:{event.source.platform.value}:{event.source.chat_id}"
+                _session_key = self._session_key_for_source(event.source)
                 with self._agent_cache_lock:
                     _cached = self._agent_cache.get(_session_key)
                 if _cached:
@@ -5202,49 +5185,37 @@ class GatewayRunner:
                 ]
                 _greeting = _rnd.choice(_greetings)
                 try:
-                    from tools.tts_tool import _load_tts_config, _get_provider
+                    from tools.tts_tool import _load_tts_config, _get_provider, _resolve_qwen3_config
                     _cfg = _load_tts_config()
                     if _get_provider(_cfg) != "qwen3":
                         return
-                    _qc = _cfg.get("qwen3", {})
+                    # Per-language resolution (in case last session ended in French)
+                    _det_lang = getattr(adapter, "_voice_last_language", {}).get(str(event.source.chat_id))
+                    _qc = _resolve_qwen3_config(_cfg, _det_lang)
                     _base = _qc.get("base_url", "http://localhost:8001")
                     _voice = _qc.get("voice", "ryan")
                     _instruct = _qc.get("instruct", "")
 
                     from urllib.parse import urlencode as _ue
-                    from urllib.request import Request as _Req, urlopen as _uopen
-                    _p = {"text": _greeting, "voice": _voice, "chunk_size": "4"}
+                    _p = {"text": _greeting, "voice": _voice, "chunk_size": 4}
                     if _instruct:
                         _p["instruct"] = _instruct
+                    if _det_lang:
+                        _p["language"] = _det_lang
                     _url = f"{_base.rstrip('/')}/v1/audio/speech/pcm-stream?{_ue(_p)}"
 
-                    from gateway.platforms.discord import StreamingPCMAudioSource
+                    from gateway.platforms.discord import (
+                        StreamingPCMAudioSource, feed_pcm_stream_sync,
+                    )
                     _src = StreamingPCMAudioSource()
                     _loop = asyncio.get_running_loop()
-
-                    def _feed():
-                        try:
-                            _req = _Req(_url, method="POST", headers={"Content-Length": "0"})
-                            with _uopen(_req, timeout=15) as _resp:
-                                while True:
-                                    _hdr = _resp.read(4)
-                                    if not _hdr or len(_hdr) < 4: break
-                                    import struct as _st
-                                    _clen = _st.unpack(">I", _hdr)[0]
-                                    if _clen == 0: break
-                                    _pcm = _resp.read(_clen)
-                                    if len(_pcm) < _clen: break
-                                    _src.feed(_pcm)
-                        except Exception:
-                            pass
-                        finally:
-                            _src.finish()
-
-                    _loop.run_in_executor(None, _feed)
+                    _loop.run_in_executor(
+                        None, feed_pcm_stream_sync, _url, _src, 30.0,
+                    )
                     await adapter.play_pcm_stream_in_voice_channel(guild_id, _src)
                     logger.info("Voice: greeting played (%r)", _greeting)
                 except Exception as _e:
-                    logger.debug("Voice greeting failed: %s", _e)
+                    logger.warning("Voice greeting failed: %s", _e)
 
             asyncio.create_task(_speak_greeting())
 
@@ -7403,7 +7374,6 @@ class GatewayRunner:
         _interrupt_depth: int = 0,
         event_message_id: Optional[str] = None,
         persist_user_message: Optional[str] = None,
-        voice_sentence_callback: Optional[Callable] = None,
     ) -> Dict[str, Any]:
         """
         Run the agent with the given message and context.
@@ -7722,84 +7692,78 @@ class GatewayRunner:
             if not _status_adapter or not message:
                 return
             try:
-                # Send text message
+                # Detect active voice channel for this chat (suppresses noisy
+                # text echo of progress updates when the user is in voice).
+                _gid = None
+                _in_voice = False
+                if (source.platform == Platform.DISCORD
+                        and hasattr(_status_adapter, "play_pcm_stream_in_voice_channel")
+                        and hasattr(_status_adapter, "_voice_text_channels")):
+                    for gid, tch in _status_adapter._voice_text_channels.items():
+                        if str(tch) == _status_chat_id and _status_adapter.is_in_voice_channel(gid):
+                            _gid = gid
+                            _in_voice = True
+                            break
+
+                # Send text message — in voice mode, post as a quiet status
+                # marker so the user can still see it in scrollback without
+                # the channel turning into "thinking out loud" noise.
+                _text_to_send = f"💬 {message}" if _in_voice else message
                 asyncio.run_coroutine_threadsafe(
                     _status_adapter.send(
                         _status_chat_id,
-                        message,
+                        _text_to_send,
                         metadata=_status_thread_metadata,
                     ),
                     _loop_for_step,
                 )
 
-                # Voice mode: also generate TTS and play the message
-                # so the user hears progress updates while the agent works.
-                if (source.platform == Platform.DISCORD
-                        and hasattr(_status_adapter, "play_pcm_stream_in_voice_channel")
-                        and hasattr(_status_adapter, "_voice_text_channels")):
-                    _gid = None
-                    for gid, tch in _status_adapter._voice_text_channels.items():
-                        if str(tch) == _status_chat_id and _status_adapter.is_in_voice_channel(gid):
-                            _gid = gid
-                            break
-                    if _gid:
-                        async def _play_voice_update():
-                            logger.info("Voice update: playing TTS for send_user_message (%d chars)", len(message))
-                            try:
-                                from tools.tts_tool import _load_tts_config, _get_provider, _preprocess_tts_text, _resolve_qwen3_config
-                                _cfg = _load_tts_config()
-                                if _get_provider(_cfg) != "qwen3":
-                                    return
-                                # Resolve per-language config
-                                _det_lang = getattr(_status_adapter, "_voice_last_language", {}).get(_status_chat_id)
-                                _qc = _resolve_qwen3_config(_cfg, _det_lang)
-                                _base = _qc.get("base_url", "http://localhost:8001")
-                                _voice = _qc.get("voice", "ryan")
-                                _instruct = _qc.get("instruct", "")
-                                _clean = _preprocess_tts_text(message[:200])
-                                if not _clean:
-                                    return
+                if _gid:
+                    async def _play_voice_update():
+                        logger.info("Voice update: playing TTS for send_user_message (%d chars)", len(message))
+                        try:
+                            from tools.tts_tool import _load_tts_config, _get_provider, _preprocess_tts_text, _resolve_qwen3_config
+                            _cfg = _load_tts_config()
+                            if _get_provider(_cfg) != "qwen3":
+                                return
+                            # Resolve per-language config
+                            _det_lang = getattr(_status_adapter, "_voice_last_language", {}).get(_status_chat_id)
+                            _qc = _resolve_qwen3_config(_cfg, _det_lang)
+                            _base = _qc.get("base_url", "http://localhost:8001")
+                            _voice = _qc.get("voice", "ryan")
+                            _instruct = _qc.get("instruct", "")
+                            # Progress updates are prompted to be 5-12 words;
+                            # 400 chars is plenty and avoids mid-word cuts.
+                            _clean = _preprocess_tts_text(message[:400])
+                            if not _clean:
+                                return
 
-                                from urllib.parse import urlencode as _ue
-                                from urllib.request import Request as _Req, urlopen as _uopen
-                                _p = {"text": _clean, "voice": _voice, "chunk_size": "4"}
-                                if _instruct:
-                                    _p["instruct"] = _instruct
-                                if _det_lang:
-                                    _p["language"] = _det_lang
-                                _url = f"{_base.rstrip('/')}/v1/audio/speech/pcm-stream?{_ue(_p)}"
+                            from urllib.parse import urlencode as _ue
+                            _p = {"text": _clean, "voice": _voice, "chunk_size": 4}
+                            if _instruct:
+                                _p["instruct"] = _instruct
+                            if _det_lang:
+                                _p["language"] = _det_lang
+                            _url = f"{_base.rstrip('/')}/v1/audio/speech/pcm-stream?{_ue(_p)}"
 
-                                from gateway.platforms.discord import StreamingPCMAudioSource
-                                _src = StreamingPCMAudioSource()
+                            from gateway.platforms.discord import (
+                                StreamingPCMAudioSource, feed_pcm_stream_sync,
+                            )
+                            _src = StreamingPCMAudioSource()
+                            _loop_for_step.run_in_executor(
+                                None, feed_pcm_stream_sync, _url, _src, 60.0,
+                            )
+                            await _status_adapter.play_pcm_stream_in_voice_channel(_gid, _src)
+                        except Exception as _ve:
+                            logger.warning("Voice update TTS failed: %s", _ve)
 
-                                def _feed():
-                                    try:
-                                        _req = _Req(_url, method="POST", headers={"Content-Length": "0"})
-                                        with _uopen(_req, timeout=30) as _resp:
-                                            while True:
-                                                _hdr = _resp.read(4)
-                                                if not _hdr or len(_hdr) < 4: break
-                                                _clen = struct.unpack(">I", _hdr)[0]
-                                                if _clen == 0: break
-                                                _pcm = _resp.read(_clen)
-                                                if len(_pcm) < _clen: break
-                                                _src.feed(_pcm)
-                                    except Exception:
-                                        pass
-                                    finally:
-                                        _src.finish()
-
-                                _loop_for_step.run_in_executor(None, _feed)
-                                await _status_adapter.play_pcm_stream_in_voice_channel(_gid, _src)
-                            except Exception as _ve:
-                                logger.warning("Voice update TTS failed: %s", _ve)
-
-                        # Fire-and-forget: the agent continues working (parallel
-                        # tool calls) while the voice update plays. The user
-                        # hears the acknowledgment concurrently with the tool.
-                        asyncio.run_coroutine_threadsafe(
-                            _play_voice_update(), _loop_for_step
-                        )
+                    # Fire-and-forget: the agent continues working (parallel
+                    # tool calls) while the voice update plays. The per-guild
+                    # lock in play_pcm_stream_in_voice_channel serializes
+                    # concurrent updates so they queue instead of racing.
+                    asyncio.run_coroutine_threadsafe(
+                        _play_voice_update(), _loop_for_step
+                    )
             except Exception as _e:
                 logger.debug("message_callback error: %s", _e)
 
@@ -7918,55 +7882,6 @@ class GatewayRunner:
                         stream_consumer_holder[0] = _stream_consumer
                 except Exception as _sc_err:
                     logger.debug("Could not set up stream consumer: %s", _sc_err)
-
-            # Voice streaming: wrap the stream delta callback with a sentence
-            # accumulator that feeds completed sentences to TTS immediately
-            # while the LLM continues generating.
-            _voice_sentence_buf = ""
-            _voice_sentence_re = None
-            _original_stream_cb = _stream_delta_cb
-            if voice_sentence_callback:
-                import re as _vs_re
-                _voice_sentence_re = _vs_re.compile(r"(?<=[.!?])\s+")
-                _voice_tts_tag_re = _vs_re.compile(r"^\s*\[tts:\s*(.+?)\]\s*\n?")
-                _voice_sentence_lock = threading.Lock()
-                _voice_tts_instruct_parsed = False
-
-                def _voice_aware_delta(text):
-                    nonlocal _voice_sentence_buf, _voice_tts_instruct_parsed
-                    # Forward to the original stream consumer (text display)
-                    if _original_stream_cb:
-                        _original_stream_cb(text)
-                    if text is None:
-                        return
-                    with _voice_sentence_lock:
-                        _voice_sentence_buf += text
-
-                        # Parse [tts: ...] tag from the FRONT of the stream
-                        # (LLM is instructed to output it first).  Send it
-                        # as a special "__tts_instruct:..." message to the
-                        # consumer, which applies it to all TTS calls.
-                        if not _voice_tts_instruct_parsed:
-                            tag_match = _voice_tts_tag_re.match(_voice_sentence_buf)
-                            if tag_match:
-                                instruct = tag_match.group(1).strip()
-                                voice_sentence_callback(f"__tts_instruct:{instruct}")
-                                _voice_sentence_buf = _voice_sentence_buf[tag_match.end():]
-                                _voice_tts_instruct_parsed = True
-                            elif len(_voice_sentence_buf) > 80:
-                                # No tag found after 80 chars — give up waiting
-                                _voice_tts_instruct_parsed = True
-
-                        # Check for sentence boundaries
-                        parts = _voice_sentence_re.split(_voice_sentence_buf)
-                        if len(parts) > 1:
-                            for sentence in parts[:-1]:
-                                sentence = sentence.strip()
-                                if sentence:
-                                    voice_sentence_callback(sentence)
-                            _voice_sentence_buf = parts[-1]
-
-                _stream_delta_cb = _voice_aware_delta
 
             # Estimate context tokens for smart routing decision.
             # Use cached agent's last prompt tokens if available; otherwise
@@ -8382,18 +8297,6 @@ class GatewayRunner:
                     )
                 except Exception:
                     pass
-
-            # Flush remaining voice sentence buffer
-            if voice_sentence_callback and _voice_sentence_buf.strip():
-                _remaining = _voice_sentence_buf.strip()
-                # Don't send [tts: ...] tags as speech
-                import re as _flush_re
-                _tts_tag = _flush_re.search(r'\[tts:\s*(.+?)\]', _remaining)
-                if _tts_tag:
-                    _remaining = _remaining[:_tts_tag.start()].strip()
-                if _remaining:
-                    voice_sentence_callback(_remaining)
-                voice_sentence_callback(None)  # sentinel: stream complete
 
             return {
                 "final_response": final_response,
