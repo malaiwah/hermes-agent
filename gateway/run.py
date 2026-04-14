@@ -7654,6 +7654,7 @@ class GatewayRunner:
                             break
                     if _gid:
                         async def _play_voice_update():
+                            logger.info("Voice update: playing TTS for send_user_message (%d chars)", len(message))
                             try:
                                 from tools.tts_tool import _load_tts_config, _get_provider, _preprocess_tts_text
                                 _cfg = _load_tts_config()
@@ -7697,9 +7698,17 @@ class GatewayRunner:
                                 _loop_for_step.run_in_executor(None, _feed)
                                 await _status_adapter.play_pcm_stream_in_voice_channel(_gid, _src)
                             except Exception as _ve:
-                                logger.debug("Voice update TTS failed: %s", _ve)
+                                logger.warning("Voice update TTS failed: %s", _ve)
 
-                        asyncio.run_coroutine_threadsafe(_play_voice_update(), _loop_for_step)
+                        # Block until TTS plays — the agent should wait for
+                        # the voice update to finish before continuing work.
+                        _future = asyncio.run_coroutine_threadsafe(
+                            _play_voice_update(), _loop_for_step
+                        )
+                        try:
+                            _future.result(timeout=30)  # blocks the agent thread
+                        except Exception as _ve:
+                            logger.warning("Voice update playback failed: %s", _ve)
             except Exception as _e:
                 logger.debug("message_callback error: %s", _e)
 
