@@ -1496,69 +1496,91 @@ class BasePlatformAdapter(ABC):
                                 qwen_cfg["instruct"] = _dynamic_instruct
 
                             if _tts_provider == "qwen3":
-                                # Streaming TTS: generate+play sentence-by-sentence
-                                # using an asyncio.Queue to bridge the blocking
-                                # generator thread and async playback loop.
-                                from tools.tts_tool import _generate_qwen3_tts_stream
-                                import tempfile as _tf
-                                import threading as _threading
-                                _tts_dir = _tf.mkdtemp(prefix="tts_stream_")
-                                _q: asyncio.Queue = asyncio.Queue()
-                                _loop = asyncio.get_running_loop()
-                                _cancel = _threading.Event()
+                                # PCM streaming: send FULL text to one TTS call so
+                                # the model generates all sentences in one pass,
+                                # preserving prosody across sentence boundaries.
+                                # Audio streams via token-level PCM chunks directly
+                                # into Discord's voice encoder — no temp files.
+                                _pcm_ok = False
+                                _qwen_cfg = _tts_cfg.get("qwen3", _tts_cfg.get("openai", {}))
+                                _base_url = _qwen_cfg.get("base_url", "http://localhost:8001")
+                                _voice = _qwen_cfg.get("voice", "ryan")
+                                _instruct = _qwen_cfg.get("instruct", "")
 
-                                def _producer():
-                                    _gen = _generate_qwen3_tts_stream(speech_text, _tts_dir, _tts_cfg)
+                                if hasattr(self, "play_pcm_stream_in_voice_channel"):
                                     try:
-                                        for p in _gen:
-                                            _loop.call_soon_threadsafe(_q.put_nowait, p)
-                                            if _cancel.is_set():
-                                                logger.info("TTS stream producer: cancelled by barge-in")
+                                        from urllib.parse import urlencode as _ue
+                                        from urllib.request import Request as _Req, urlopen as _uopen
+                                        import struct as _st
+
+                                        _p = {"text": speech_text, "voice": _voice, "chunk_size": "4"}
+                                        if _instruct:
+                                            _p["instruct"] = _instruct
+                                        _url = f"{_base_url.rstrip('/')}/v1/audio/speech/pcm-stream?{_ue(_p)}"
+
+                                        # Find guild_id for this chat
+                                        _gid = None
+                                        for gid, tch in getattr(self, "_voice_text_channels", {}).items():
+                                            if str(tch) == str(event.source.chat_id):
+                                                _gid = gid
                                                 break
-                                    finally:
-                                        _gen.close()  # closes the HTTP response
-                                        _loop.call_soon_threadsafe(_q.put_nowait, None)  # sentinel
 
-                                _prod_task = _loop.run_in_executor(None, _producer)
+                                        if _gid:
+                                            from gateway.platforms.discord import StreamingPCMAudioSource
+                                            _src = StreamingPCMAudioSource()
 
-                                # Play chunks as they arrive; stop on barge-in
-                                _barged_in = False
-                                while True:
-                                    chunk_path = await _q.get()
-                                    if chunk_path is None:
-                                        break
-                                    if _barged_in:
-                                        # Barge-in already detected — discard remaining chunks
+                                            def _feed_pcm():
+                                                try:
+                                                    _req = _Req(_url, method="POST", headers={"Content-Length": "0"})
+                                                    with _uopen(_req, timeout=120) as _resp:
+                                                        while True:
+                                                            _hdr = _resp.read(4)
+                                                            if not _hdr or len(_hdr) < 4:
+                                                                break
+                                                            _clen = _st.unpack(">I", _hdr)[0]
+                                                            if _clen == 0:
+                                                                break
+                                                            _pcm = _resp.read(_clen)
+                                                            if len(_pcm) < _clen:
+                                                                break
+                                                            _src.feed(_pcm)
+                                                except Exception as _e:
+                                                    logger.warning("PCM feed error: %s", _e)
+                                                finally:
+                                                    _src.finish()
+
+                                            _loop = asyncio.get_running_loop()
+                                            _feed_task = _loop.run_in_executor(None, _feed_pcm)
+                                            await self.play_pcm_stream_in_voice_channel(_gid, _src)
+                                            await _feed_task
+                                            _pcm_ok = True
+                                            _tts_played = True
+                                    except Exception as _e:
+                                        logger.info("[%s] PCM stream failed: %s", self.name, _e)
+
+                                # Fallback: file-based TTS
+                                if not _pcm_ok:
+                                    from tools.tts_tool import _generate_qwen3_tts
+                                    import tempfile as _tf
+                                    _tts_dir = _tf.mkdtemp(prefix="tts_fb_")
+                                    _chunk_path = os.path.join(_tts_dir, "tts.ogg")
+                                    await asyncio.to_thread(
+                                        _generate_qwen3_tts, speech_text, _chunk_path, _tts_cfg
+                                    )
+                                    if Path(_chunk_path).exists():
                                         try:
-                                            os.remove(chunk_path)
-                                        except OSError:
-                                            pass
-                                        continue
-                                    if Path(chunk_path).exists():
-                                        try:
-                                            _result = await self.play_tts(
+                                            await self.play_tts(
                                                 chat_id=event.source.chat_id,
-                                                audio_path=chunk_path,
+                                                audio_path=_chunk_path,
                                                 metadata=_thread_metadata,
                                             )
-                                            if hasattr(_result, "success") and not _result.success:
-                                                # play_tts returns success=False on barge-in
-                                                logger.info("[%s] Barge-in — stopping TTS stream", self.name)
-                                                _barged_in = True
-                                                _cancel.set()  # stop the producer thread
-                                            else:
-                                                _tts_played = True
+                                            _tts_played = True
                                         finally:
                                             try:
-                                                os.remove(chunk_path)
+                                                os.remove(_chunk_path)
+                                                os.rmdir(_tts_dir)
                                             except OSError:
                                                 pass
-
-                                await _prod_task  # ensure producer finished cleanly
-                                try:
-                                    os.rmdir(_tts_dir)
-                                except OSError:
-                                    pass
                             else:
                                 # Non-streaming fallback for other providers
                                 import json as _json
