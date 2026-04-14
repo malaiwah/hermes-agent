@@ -1455,7 +1455,20 @@ class BasePlatformAdapter(ABC):
                         and event.source.chat_id not in self._auto_tts_disabled_chats):
                     try:
                         from tools.tts_tool import check_tts_requirements, _preprocess_tts_text, _load_tts_config, _get_provider
+                        import re as _re
                         if check_tts_requirements():
+                            # Extract dynamic TTS instruct from LLM response
+                            _dynamic_instruct = None
+                            _tts_tag_match = _re.search(
+                                r'\[tts:\s*(.+?)\]\s*$', text_content,
+                                flags=_re.MULTILINE,
+                            )
+                            if _tts_tag_match:
+                                _dynamic_instruct = _tts_tag_match.group(1).strip()
+                                # Strip the tag from text (don't speak or display it)
+                                text_content = text_content[:_tts_tag_match.start()].rstrip()
+                                logger.info("[%s] Dynamic TTS instruct: %s", self.name, _dynamic_instruct)
+
                             _tts_max = self._tts_max_chars
                             speech_text = _preprocess_tts_text(text_content[:_tts_max])
                             if not speech_text:
@@ -1463,6 +1476,11 @@ class BasePlatformAdapter(ABC):
 
                             _tts_cfg = _load_tts_config()
                             _tts_provider = _get_provider(_tts_cfg)
+
+                            # Override config instruct with LLM-generated one
+                            if _dynamic_instruct:
+                                qwen_cfg = _tts_cfg.get("qwen3", _tts_cfg.get("openai", {}))
+                                qwen_cfg["instruct"] = _dynamic_instruct
 
                             if _tts_provider == "qwen3":
                                 # Streaming TTS: generate+play sentence-by-sentence

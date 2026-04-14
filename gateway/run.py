@@ -3419,7 +3419,14 @@ class GatewayRunner:
                     "[Voice mode: The user is speaking via voice and your response "
                     "will be converted to live speech. Keep your response concise "
                     "(1-3 sentences). Do not use emojis or special characters. "
-                    "Avoid markdown formatting, code blocks, and tables.]\n\n"
+                    "Avoid markdown formatting, code blocks, and tables.\n"
+                    "After your response, on a NEW line, output a TTS voice "
+                    "direction tag: [tts: <brief description of tone and pace>]\n"
+                    "Match the emotional tone to the conversation context. Examples:\n"
+                    "  [tts: Warm and reassuring, moderate pace]\n"
+                    "  [tts: Excited and enthusiastic, faster pace]\n"
+                    "  [tts: Calm and matter-of-fact, steady pace]\n"
+                    "  [tts: Apologetic and gentle, slower pace]]\n\n"
                     + message_text
                 )
 
