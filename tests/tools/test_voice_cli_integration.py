@@ -182,6 +182,65 @@ class TestPreprocessTtsText:
     def test_only_emojis(self):
         assert _preprocess_tts_text("😊🎉✅") == ""
 
+
+class TestNumberNormalization:
+    """Tests for _normalize_numbers (num2words-backed integer/decimal expansion)."""
+
+    @patch("tools.tts_tool._load_tts_config", return_value={"normalize_numbers": True})
+    def test_year_english_uses_year_style(self, _mock):
+        """4-digit years in range should read as 'twenty twenty-six' style."""
+        result = _preprocess_tts_text("In 2026, we shipped it.")
+        # num2words(2026, to="year") → "twenty twenty-six"
+        assert "twenty twenty-six" in result.lower()
+        assert "2026" not in result
+
+    @patch("tools.tts_tool._load_tts_config", return_value={"normalize_numbers": True})
+    def test_port_expands_to_thousand(self, _mock):
+        """Port numbers should expand to cardinal form."""
+        result = _preprocess_tts_text("Bound on port 8000.")
+        assert "eight thousand" in result.lower()
+        assert "8000" not in result
+
+    @patch("tools.tts_tool._load_tts_config", return_value={"normalize_numbers": True})
+    def test_french_language(self, _mock):
+        """French language should use French number words."""
+        result = _preprocess_tts_text("Sur le port 8000.", language="French")
+        assert "huit mille" in result.lower()
+        assert "8000" not in result
+
+    @patch("tools.tts_tool._load_tts_config", return_value={"normalize_numbers": True})
+    def test_decimal_point(self, _mock):
+        result = _preprocess_tts_text("Version 3.14.")
+        # num2words(3.14) → "three point one four"
+        assert "point" in result.lower()
+        assert "3.14" not in result
+
+    @patch("tools.tts_tool._load_tts_config", return_value={"normalize_numbers": True})
+    def test_ip_address_not_touched(self, _mock):
+        """IP-like fragments shouldn't get partially expanded."""
+        result = _preprocess_tts_text("Connect to 10.21.0.235 now.")
+        # Heuristic: lookaround keeps multi-dotted numerics intact
+        assert "10.21.0.235" in result
+
+    @patch("tools.tts_tool._load_tts_config", return_value={"normalize_numbers": True})
+    def test_version_with_multiple_dots_not_expanded(self, _mock):
+        """Semantic version like v3.12.5 shouldn't normalize."""
+        result = _preprocess_tts_text("Python 3.12.5 is out.")
+        assert "3.12.5" in result
+
+    @patch("tools.tts_tool._load_tts_config", return_value={"normalize_numbers": False})
+    def test_disable_via_config(self, _mock):
+        """tts.normalize_numbers=false keeps raw digits."""
+        result = _preprocess_tts_text("In 2026, port 8000.")
+        assert "2026" in result
+        assert "8000" in result
+
+    @patch("tools.tts_tool._load_tts_config", return_value={"normalize_numbers": True})
+    def test_unknown_language_falls_back_to_english(self, _mock):
+        result = _preprocess_tts_text("In 2026.", language="Klingon")
+        # Falls back to English year style
+        assert "twenty twenty-six" in result.lower()
+
     @patch("tools.tts_tool._load_tts_config", return_value={})
     def test_only_newlines(self, _mock):
         assert _preprocess_tts_text("\n\n\n") == ""

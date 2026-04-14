@@ -7756,7 +7756,8 @@ class GatewayRunner:
                             _instruct = _qc.get("instruct", "")
                             # Progress updates are prompted to be 5-12 words;
                             # 400 chars is plenty and avoids mid-word cuts.
-                            _clean = _preprocess_tts_text(message[:400])
+                            # Use detected language for number/date expansion.
+                            _clean = _preprocess_tts_text(message[:400], language=_det_lang or "English")
                             if not _clean:
                                 return
 

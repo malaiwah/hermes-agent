@@ -32,6 +32,8 @@ dependencies = [
   "fal-client>=0.13.1,<1",
   # Text-to-speech (Edge TTS is free, no API key needed)
   "edge-tts>=7.2.7,<8",
+  # Text normalization: number → words (English, French, etc.) for natural TTS
+  "num2words>=0.5.13,<1",
   # Skills Hub (GitHub App JWT auth — optional, only needed for bot identity)
   "PyJWT[crypto]>=2.12.0,<3",  # CVE-2026-32597
   "pytest-xdist>=3.8.0",

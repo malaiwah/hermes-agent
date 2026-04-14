@@ -1497,7 +1497,8 @@ class BasePlatformAdapter(ABC):
                         from tools.tts_tool import check_tts_requirements, _preprocess_tts_text, _load_tts_config, _get_provider
                         if check_tts_requirements():
                             _tts_max = self._tts_max_chars
-                            speech_text = _preprocess_tts_text(text_content[:_tts_max])
+                            _lang_hint = self._voice_last_language.get(event.source.chat_id, "English")
+                            speech_text = _preprocess_tts_text(text_content[:_tts_max], language=_lang_hint)
                             if not speech_text:
                                 raise ValueError("Empty text after markdown cleanup")
 

@@ -823,6 +823,69 @@ _TABLE_CHARS_RE = re.compile(r'[|┌┐└┘├┤┬┴┼─━│┃]+')
 _MEDIA_TAG_RE = re.compile(r'MEDIA:[^\s]+')
 
 
+# --- Number normalization (optional — requires num2words) ---
+# Matches a standalone numeric "atom": digits optionally punctuated with
+# dots (handles "2026", "3.14", "10.21.0.235", "1.2.3-beta" prefix, etc.).
+# Lookbehind/ahead prevents matching the numeric fragment inside an
+# identifier like "abc123" or a fragment of a longer slug; a trailing
+# period is allowed (sentence punctuation) because the `[\d]*\d` shape
+# won't end on a dot.
+_NUMERIC_TOKEN_RE = re.compile(r'(?<![\w\-:/])(-?\d(?:[\d.]*\d)?)(?![\w\-:/])')
+
+# Language code → num2words language tag.  num2words uses "fr" etc.
+_LANG_TO_N2W = {
+    "english": "en",
+    "french": "fr",
+    "en": "en",
+    "fr": "fr",
+    "spanish": "es",
+    "german": "de",
+    "italian": "it",
+    "portuguese": "pt",
+    "russian": "ru",
+    "japanese": "ja",
+    "korean": "ko",
+    "chinese": "zh",
+}
+
+
+def _normalize_numbers(text: str, language: str = "English") -> str:
+    """Expand bare integers and decimals to words using num2words.
+
+    - 4-digit years in 1900-2099 (English only) → "twenty twenty-six" style
+    - Other integers → standard cardinals ("eight thousand")
+    - Single-dot decimals → "three point one four"
+    - Multi-dot tokens (IP addresses, semver like 10.21.0.235 or 3.12.5)
+      are left untouched — the LLM is prompted to avoid these but this
+      is a defensive guard for when they slip through
+    - Unknown language falls back to English
+    - Silently no-op if ``num2words`` is unavailable
+    """
+    try:
+        from num2words import num2words
+    except ImportError:
+        return text
+
+    lang = _LANG_TO_N2W.get((language or "").strip().lower(), "en")
+
+    def _sub(m):
+        token = m.group(0)
+        # Multi-dot (IP / semver / hash-like) — leave alone
+        if token.count('.') >= 2:
+            return token
+        try:
+            if '.' in token:
+                return num2words(float(token), lang=lang)
+            n = int(token)
+            if lang == "en" and 1900 <= n <= 2099:
+                return num2words(n, lang=lang, to="year")
+            return num2words(n, lang=lang)
+        except Exception:
+            return token
+
+    return _NUMERIC_TOKEN_RE.sub(_sub, text)
+
+
 def _strip_markdown_for_tts(text: str) -> str:
     """Remove markdown formatting that shouldn't be spoken aloud."""
     text = _MD_CODE_BLOCK.sub(' ', text)
@@ -838,7 +901,7 @@ def _strip_markdown_for_tts(text: str) -> str:
     return text.strip()
 
 
-def _preprocess_tts_text(text: str) -> str:
+def _preprocess_tts_text(text: str, language: str = "English") -> str:
     """Normalize text for natural speech output.
 
     Builds on ``_strip_markdown_for_tts`` and adds:
@@ -848,6 +911,11 @@ def _preprocess_tts_text(text: str) -> str:
     - Newline → sentence-break conversion (configurable via ``tts.strip_newlines``,
       default **true**; some TTS backends like Kokoro truncate at the first ``\\n``)
     - Whitespace collapse
+    - Number → word expansion via ``num2words`` (``tts.normalize_numbers``,
+      default **true**).  Languages: en, fr, es, de, it, pt, ru, ja, ko, zh.
+
+    ``language`` is the human language name (e.g. "English", "French") —
+    matches what the ASR returns so the same value can be plumbed through.
 
     Credits: emoji-range approach inspired by kas-cor's upstream PR #8205.
     """
@@ -875,6 +943,12 @@ def _preprocess_tts_text(text: str) -> str:
 
     # Collapse repeated periods from newline conversion (e.g. "sentence.\n\n" → "sentence.. ")
     text = re.sub(r'\.{2,}', '.', text)
+
+    # Number normalization — "2026" → "twenty twenty-six", "port 8000" →
+    # "port eight thousand".  Skipped when tts.normalize_numbers is false
+    # or num2words is not installed.
+    if tts_config.get("normalize_numbers", True):
+        text = _normalize_numbers(text, language=language)
 
     # Collapse runs of whitespace
     text = re.sub(r'[ \t]{2,}', ' ', text)
