@@ -151,7 +151,7 @@ class VoiceReceiver:
         # start() to let the Discord voice connection stabilize.
         # Connection setup produces noise artifacts that ASR can't transcribe,
         # causing the first real utterance to include garbage audio.
-        self._startup_grace = 2.0
+        self._startup_grace = 3.0
         self._start_time: float = 0.0
 
     # ------------------------------------------------------------------
