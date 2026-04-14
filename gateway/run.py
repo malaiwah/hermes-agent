@@ -3278,7 +3278,7 @@ class GatewayRunner:
                     audio_paths.append(path)
             if audio_paths:
                 message_text = await self._enrich_message_with_transcription(
-                    message_text, audio_paths
+                    message_text, audio_paths, source=event.source,
                 )
                 # If STT failed, send a direct message to the user so they
                 # know voice isn't configured — don't rely on the agent to
@@ -3414,7 +3414,11 @@ class GatewayRunner:
             # avoid mutating the system prompt, which would change the agent
             # config signature and invalidate the prompt/KV cache on every
             # voice↔text alternation.
-            if event.message_type == MessageType.VOICE:
+            # Voice-mode coverage: VOICE (voice channel input) OR AUDIO
+            # (Discord voice message attachment, Telegram voice note, etc.)
+            # — both are spoken input and deserve the voice prompt block.
+            _is_voice_input = event.message_type in (MessageType.VOICE, MessageType.AUDIO)
+            if _is_voice_input:
                 # Get the current/last TTS instruct for context
                 _adapter_for_instruct = self.adapters.get(event.source.platform)
                 _last_instruct = ""
@@ -7154,6 +7158,7 @@ class GatewayRunner:
         self,
         user_text: str,
         audio_paths: List[str],
+        source: "SessionSource" = None,
     ) -> str:
         """
         Auto-transcribe user voice/audio messages using the configured STT provider
@@ -7194,6 +7199,14 @@ class GatewayRunner:
                         f'[The user sent a voice message~ '
                         f'Here\'s what they said: "{transcript}"]'
                     )
+                    # Propagate detected language to the adapter so the
+                    # TTS reply uses the matching voice/config (e.g.
+                    # French ASR → French TTS voice).
+                    _detected_lang = result.get("language")
+                    if _detected_lang and source is not None:
+                        _adapter = self.adapters.get(source.platform)
+                        if _adapter and hasattr(_adapter, "_voice_last_language"):
+                            _adapter._voice_last_language[source.chat_id] = _detected_lang
                 else:
                     error = result.get("error", "unknown error")
                     if (
