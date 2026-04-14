@@ -3446,12 +3446,15 @@ class GatewayRunner:
                     "Speak in FIRST PERSON, natural conversational tone — like "
                     "you're talking to a friend. Start with 'I', 'Let me', 'On it', "
                     "etc. NOT robotic descriptions like 'Searching for X' or "
-                    "'Executing tool Y'. Keep to 5-12 words. Examples:\n"
-                    "  send_user_message('Let me check that for you.')\n"
-                    "  send_user_message('I am looking into it now.')\n"
-                    "  send_user_message('On it — one moment.')\n"
-                    "  send_user_message('I found some hits, digging deeper.')\n"
-                    "  send_user_message('Almost there, wrapping up.')]\n\n"
+                    "'Executing tool Y'. Keep to 5-12 words.\n"
+                    "MATCH THE TONE TO THE TASK:\n"
+                    "  Quick task (single tool, <5s): 'One sec.' / 'On it.'\n"
+                    "  Medium task (few tools): 'Let me check that.' / 'Looking into it.'\n"
+                    "  Complex task (web search, research): 'This might take a moment, digging in.' / 'Give me a minute to research this properly.'\n"
+                    "  Mid-progress: 'Getting closer.' / 'Found some hits, going deeper.'\n"
+                    "  Near done: 'Almost there.' / 'Just wrapping up.'\n"
+                    "  Unexpected complication: 'Hmm, hit a snag — trying another angle.'\n"
+                    "Vary the phrasing — don't repeat the same acknowledgment.]\n\n"
                     + message_text
                 )
 
@@ -5172,6 +5175,66 @@ class GatewayRunner:
                                 break
             except Exception as _e:
                 logger.debug("Voice: Honcho priming seed failed: %s", _e)
+
+            # Play a spoken greeting so the user hears audio confirmation.
+            # This also fills the 3s VoiceReceiver grace period with useful
+            # audio instead of silence.  Runs in the background.
+            async def _speak_greeting():
+                import random as _rnd
+                _greetings = [
+                    "Hey, I am here.",
+                    "I am listening.",
+                    "All set, what is up?",
+                    "I am in, go ahead.",
+                    "Voice is live, I am listening.",
+                ]
+                _greeting = _rnd.choice(_greetings)
+                try:
+                    from tools.tts_tool import _load_tts_config, _get_provider
+                    _cfg = _load_tts_config()
+                    if _get_provider(_cfg) != "qwen3":
+                        return
+                    _qc = _cfg.get("qwen3", {})
+                    _base = _qc.get("base_url", "http://localhost:8001")
+                    _voice = _qc.get("voice", "ryan")
+                    _instruct = _qc.get("instruct", "")
+
+                    from urllib.parse import urlencode as _ue
+                    from urllib.request import Request as _Req, urlopen as _uopen
+                    _p = {"text": _greeting, "voice": _voice, "chunk_size": "4"}
+                    if _instruct:
+                        _p["instruct"] = _instruct
+                    _url = f"{_base.rstrip('/')}/v1/audio/speech/pcm-stream?{_ue(_p)}"
+
+                    from gateway.platforms.discord import StreamingPCMAudioSource
+                    _src = StreamingPCMAudioSource()
+                    _loop = asyncio.get_running_loop()
+
+                    def _feed():
+                        try:
+                            _req = _Req(_url, method="POST", headers={"Content-Length": "0"})
+                            with _uopen(_req, timeout=15) as _resp:
+                                while True:
+                                    _hdr = _resp.read(4)
+                                    if not _hdr or len(_hdr) < 4: break
+                                    import struct as _st
+                                    _clen = _st.unpack(">I", _hdr)[0]
+                                    if _clen == 0: break
+                                    _pcm = _resp.read(_clen)
+                                    if len(_pcm) < _clen: break
+                                    _src.feed(_pcm)
+                        except Exception:
+                            pass
+                        finally:
+                            _src.finish()
+
+                    _loop.run_in_executor(None, _feed)
+                    await adapter.play_pcm_stream_in_voice_channel(guild_id, _src)
+                    logger.info("Voice: greeting played (%r)", _greeting)
+                except Exception as _e:
+                    logger.debug("Voice greeting failed: %s", _e)
+
+            asyncio.create_task(_speak_greeting())
 
             return (
                 f"Joined voice channel **{voice_channel.name}**.\n"
