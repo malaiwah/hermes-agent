@@ -3419,6 +3419,7 @@ class GatewayRunner:
                 # Get the current/last TTS instruct for context
                 _adapter_for_instruct = self.adapters.get(event.source.platform)
                 _last_instruct = ""
+                _detected_lang = getattr(event, "_voice_language", None)
                 if _adapter_for_instruct and hasattr(_adapter_for_instruct, "_last_tts_instruct"):
                     _last_instruct = _adapter_for_instruct._last_tts_instruct.get(event.source.chat_id, "")
                 if not _last_instruct:
@@ -3429,11 +3430,19 @@ class GatewayRunner:
                     except Exception:
                         _last_instruct = "Speak naturally at a steady conversational pace."
 
+                _lang_hint = ""
+                if _detected_lang:
+                    _lang_hint = (
+                        f"The ASR detected the user spoke in {_detected_lang}. "
+                        f"Respond in {_detected_lang} to match. "
+                    )
+
                 message_text = (
                     "[Voice mode: The user is speaking via voice and your response "
                     "will be converted to live speech. Keep your response concise "
                     "(1-3 sentences). Do not use emojis or special characters. "
                     "Avoid markdown formatting, code blocks, and tables.\n"
+                    f"{_lang_hint}"
                     f"Current voice direction: {_last_instruct}\n"
                     "Start your reply with a TTS voice direction tag on its own "
                     "line BEFORE your response text (only if the tone should "
@@ -5281,12 +5290,17 @@ class GatewayRunner:
         self._set_adapter_auto_tts_disabled(adapter, chat_id, disabled=True)
 
     async def _handle_voice_channel_input(
-        self, guild_id: int, user_id: int, transcript: str
+        self, guild_id: int, user_id: int, transcript: str, language: str = None
     ):
         """Handle transcribed voice from a user in a voice channel.
 
         Creates a synthetic MessageEvent and processes it through the
         adapter's full message pipeline (session, typing, agent, TTS reply).
+
+        ``language`` (e.g. "English", "French") is detected by the ASR
+        model and used to:
+        - Inform the LLM which language to respond in
+        - Select the appropriate TTS voice/language for the reply
         """
         adapter = self.adapters.get(Platform.DISCORD)
         if not adapter:
@@ -5308,6 +5322,11 @@ class GatewayRunner:
             logger.debug("Unauthorized voice input from user %d, ignoring", user_id)
             return
 
+        # Remember the detected language on the adapter so the TTS path
+        # can select the matching voice/config.
+        if language and hasattr(adapter, "_voice_last_language"):
+            adapter._voice_last_language[str(text_ch_id)] = language
+
         # Show transcript in text channel (after auth, with mention sanitization)
         try:
             channel = adapter._client.get_channel(text_ch_id)
@@ -5327,6 +5346,9 @@ class GatewayRunner:
             message_type=MessageType.VOICE,
             raw_message=SimpleNamespace(guild_id=guild_id, guild=None),
         )
+        # Attach detected language so downstream handlers can use it
+        if language:
+            event._voice_language = language
 
         await adapter.handle_message(event)
 
@@ -7724,11 +7746,13 @@ class GatewayRunner:
                         async def _play_voice_update():
                             logger.info("Voice update: playing TTS for send_user_message (%d chars)", len(message))
                             try:
-                                from tools.tts_tool import _load_tts_config, _get_provider, _preprocess_tts_text
+                                from tools.tts_tool import _load_tts_config, _get_provider, _preprocess_tts_text, _resolve_qwen3_config
                                 _cfg = _load_tts_config()
                                 if _get_provider(_cfg) != "qwen3":
                                     return
-                                _qc = _cfg.get("qwen3", {})
+                                # Resolve per-language config
+                                _det_lang = getattr(_status_adapter, "_voice_last_language", {}).get(_status_chat_id)
+                                _qc = _resolve_qwen3_config(_cfg, _det_lang)
                                 _base = _qc.get("base_url", "http://localhost:8001")
                                 _voice = _qc.get("voice", "ryan")
                                 _instruct = _qc.get("instruct", "")
@@ -7741,6 +7765,8 @@ class GatewayRunner:
                                 _p = {"text": _clean, "voice": _voice, "chunk_size": "4"}
                                 if _instruct:
                                     _p["instruct"] = _instruct
+                                if _det_lang:
+                                    _p["language"] = _det_lang
                                 _url = f"{_base.rstrip('/')}/v1/audio/speech/pcm-stream?{_ue(_p)}"
 
                                 from gateway.platforms.discord import StreamingPCMAudioSource

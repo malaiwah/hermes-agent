@@ -1608,6 +1608,7 @@ class DiscordAdapter(BasePlatformAdapter):
                             result.get("error", "unknown"))
                 return
             transcript = result.get("transcript", "").strip()
+            language = result.get("language")  # "English", "French", etc. or None
             if not transcript:
                 logger.info("Voice STT returned empty transcript for user %d", user_id)
                 return
@@ -1615,7 +1616,8 @@ class DiscordAdapter(BasePlatformAdapter):
                 logger.info("Voice STT filtered hallucination for user %d: %r", user_id, transcript)
                 return
 
-            logger.info("Voice input from user %d: %s", user_id, transcript[:100])
+            logger.info("Voice input from user %d (lang=%s): %s",
+                        user_id, language or "?", transcript[:100])
 
             # Record user turn for STT context priming
             self._append_voice_priming(guild_id, "user", transcript)
@@ -1629,6 +1631,7 @@ class DiscordAdapter(BasePlatformAdapter):
                     guild_id=guild_id,
                     user_id=user_id,
                     transcript=transcript,
+                    language=language,
                 )
         except Exception as e:
             logger.warning("Voice input processing failed: %s", e, exc_info=True)

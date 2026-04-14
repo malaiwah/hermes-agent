@@ -234,17 +234,54 @@ def _generate_elevenlabs(text: str, output_path: str, tts_config: Dict[str, Any]
 # ===========================================================================
 # Provider: Qwen3-TTS (query-param API, not OpenAI SDK compatible)
 # ===========================================================================
-def _generate_qwen3_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
+def _resolve_qwen3_config(tts_config: Dict[str, Any], language: str = None) -> Dict[str, Any]:
+    """Resolve qwen3 config, applying per-language overrides when available.
+
+    Config structure::
+
+        tts:
+          qwen3:
+            voice: ryan
+            instruct: "Speak naturally..."
+            languages:
+              English:
+                voice: ryan
+                instruct: "Speak naturally in English..."
+              French:
+                voice: aiden
+                instruct: "Parle naturellement en français..."
+
+    Returns a new dict with per-language keys overlaid on the base config.
+    Falls back to base config when no match is found.
+    """
+    base = dict(tts_config.get("qwen3", tts_config.get("openai", {})))
+    if not language:
+        return base
+    langs = base.get("languages", {}) or {}
+    # Case-insensitive match
+    for key, override in langs.items():
+        if isinstance(override, dict) and key.lower() == language.lower():
+            merged = dict(base)
+            merged.update(override)
+            merged["_language"] = key
+            return merged
+    return base
+
+
+def _generate_qwen3_tts(text: str, output_path: str, tts_config: Dict[str, Any], language: str = None) -> str:
     """Generate audio using Qwen3-TTS.
 
     Qwen3-TTS uses a query-parameter API (``/v1/audio/speech?text=...&voice=...``)
     rather than the OpenAI JSON body format.  We call it directly with urllib
     to avoid the SDK mismatch.
+
+    When ``language`` is provided (e.g. "English", "French"), applies
+    per-language voice/instruct overrides from ``tts.qwen3.languages``.
     """
     from urllib.parse import urlencode
     from urllib.request import Request, urlopen
 
-    qwen_config = tts_config.get("qwen3", tts_config.get("openai", {}))
+    qwen_config = _resolve_qwen3_config(tts_config, language)
     base_url = qwen_config.get("base_url", "http://localhost:8001")
     voice = qwen_config.get("voice", "ryan")
     timeout = int(qwen_config.get("timeout", 120))
@@ -265,6 +302,9 @@ def _generate_qwen3_tts(text: str, output_path: str, tts_config: Dict[str, Any])
     instruct = qwen_config.get("instruct", "")
     if instruct:
         params_dict["instruct"] = instruct
+    _lang_for_tts = language or qwen_config.get("language")
+    if _lang_for_tts:
+        params_dict["language"] = _lang_for_tts
     params = urlencode(params_dict)
     url = f"{base_url.rstrip('/')}/v1/audio/speech?{params}"
 

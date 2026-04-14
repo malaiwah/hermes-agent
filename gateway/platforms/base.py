@@ -645,6 +645,9 @@ class BasePlatformAdapter(ABC):
         # Per-chat last TTS instruct — carried forward to next turn so tone
         # transitions naturally instead of resetting to the config default.
         self._last_tts_instruct: Dict[str, str] = {}
+        # Per-chat last detected ASR language (e.g. "English", "French")
+        # — used to pick matching TTS voice/config so replies match input.
+        self._voice_last_language: Dict[str, str] = {}
 
     @property
     def has_fatal_error(self) -> bool:
@@ -1468,7 +1471,21 @@ class BasePlatformAdapter(ABC):
                         r'\[tts:\s*.+?\]\s*', '', text_content,
                     ).strip()
 
-                if (event.message_type == MessageType.VOICE
+                # Multi-modal TTS: also fire auto-TTS for TEXT messages when the
+                # bot is connected to a voice channel bound to this chat (e.g.
+                # user sends an image mid-voice-conversation — agent replies
+                # verbally about the image).
+                _in_voice_for_chat = False
+                if hasattr(self, "_voice_text_channels") and hasattr(self, "is_in_voice_channel"):
+                    for _gid_chk, _tch_chk in self._voice_text_channels.items():
+                        if str(_tch_chk) == str(event.source.chat_id) and self.is_in_voice_channel(_gid_chk):
+                            _in_voice_for_chat = True
+                            break
+                _should_auto_tts = (
+                    event.message_type == MessageType.VOICE or _in_voice_for_chat
+                )
+
+                if (_should_auto_tts
                         and text_content
                         and not media_files
                         and not _voice_already_streamed
@@ -1514,10 +1531,14 @@ class BasePlatformAdapter(ABC):
                                 # Audio streams via token-level PCM chunks directly
                                 # into Discord's voice encoder — no temp files.
                                 _pcm_ok = False
-                                _qwen_cfg = _tts_cfg.get("qwen3", _tts_cfg.get("openai", {}))
+                                # Resolve per-language config (e.g. French voice)
+                                _det_lang = self._voice_last_language.get(event.source.chat_id)
+                                from tools.tts_tool import _resolve_qwen3_config as _rqc
+                                _qwen_cfg = _rqc(_tts_cfg, _det_lang)
                                 _base_url = _qwen_cfg.get("base_url", "http://localhost:8001")
                                 _voice = _qwen_cfg.get("voice", "ryan")
-                                _instruct = _qwen_cfg.get("instruct", "")
+                                _instruct = _effective_instruct or _qwen_cfg.get("instruct", "")
+                                _tts_language = _det_lang or _qwen_cfg.get("language", "English")
 
                                 if hasattr(self, "play_pcm_stream_in_voice_channel"):
                                     try:
@@ -1528,6 +1549,8 @@ class BasePlatformAdapter(ABC):
                                         _p = {"text": speech_text, "voice": _voice, "chunk_size": "4"}
                                         if _instruct:
                                             _p["instruct"] = _instruct
+                                        if _tts_language:
+                                            _p["language"] = _tts_language
                                         _url = f"{_base_url.rstrip('/')}/v1/audio/speech/pcm-stream?{_ue(_p)}"
 
                                         # Find guild_id for this chat
@@ -1577,7 +1600,7 @@ class BasePlatformAdapter(ABC):
                                     _tts_dir = _tf.mkdtemp(prefix="tts_fb_")
                                     _chunk_path = os.path.join(_tts_dir, "tts.ogg")
                                     await asyncio.to_thread(
-                                        _generate_qwen3_tts, speech_text, _chunk_path, _tts_cfg
+                                        _generate_qwen3_tts, speech_text, _chunk_path, _tts_cfg, _tts_language
                                     )
                                     if Path(_chunk_path).exists():
                                         try:

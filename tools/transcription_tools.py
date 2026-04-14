@@ -740,17 +740,22 @@ def _transcribe_chat_completions(
         with _ur.urlopen(req, timeout=30) as resp:
             result = json.loads(resp.read())
 
-        text = result["choices"][0]["message"]["content"]
-        text = _extract_transcript_text(text)
+        raw_text = result["choices"][0]["message"]["content"]
+        text, language = _extract_transcript_text_and_language(raw_text)
         usage = result.get("usage", {})
         logger.info(
             "Transcribed %s via chat/completions (%s, %d chars, "
-            "prompt_tokens=%s, priming=%d chars)",
-            Path(file_path).name, model_name, len(text),
+            "lang=%s, prompt_tokens=%s, priming=%d chars)",
+            Path(file_path).name, model_name, len(text), language or "?",
             usage.get("prompt_tokens", "?"), len(priming_context),
         )
 
-        return {"success": True, "transcript": text, "provider": "openai_primed"}
+        return {
+            "success": True,
+            "transcript": text,
+            "language": language,
+            "provider": "openai_primed",
+        }
 
     except Exception as exc:
         logger.warning(
@@ -882,6 +887,18 @@ def _resolve_openai_audio_client_config() -> tuple[str, str]:
 
 def _extract_transcript_text(transcription: Any) -> str:
     """Normalize text and JSON transcription responses to a plain string."""
+    text, _ = _extract_transcript_text_and_language(transcription)
+    return text
+
+
+def _extract_transcript_text_and_language(transcription: Any) -> tuple:
+    """Return (transcript, language) from a Qwen3-ASR response.
+
+    The Qwen3-ASR model prefixes output with "language <Lang><asr_text>text".
+    Extracts both the language hint and the clean transcript.
+    Returns (text, None) when no language prefix is found.
+    """
+    import re as _re
     if isinstance(transcription, str):
         text = transcription.strip()
     elif hasattr(transcription, "text"):
@@ -893,9 +910,17 @@ def _extract_transcript_text(transcription: Any) -> str:
     else:
         text = str(transcription).strip()
 
-    # Strip Qwen3-ASR output prefix: "language English<asr_text>actual text"
+    # Extract language from "language <Lang><asr_text>" prefix
+    language = None
     asr_marker = "<asr_text>"
     if asr_marker in text:
-        text = text.split(asr_marker, 1)[1].strip()
+        prefix, _, rest = text.partition(asr_marker)
+        # prefix is like "language English" or "language None"
+        _lm = _re.match(r"^\s*language\s+([A-Za-z]+)\s*$", prefix)
+        if _lm:
+            _l = _lm.group(1)
+            if _l.lower() != "none":
+                language = _l
+        text = rest.strip()
 
-    return text
+    return text, language
