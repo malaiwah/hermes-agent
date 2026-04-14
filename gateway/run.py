@@ -5207,17 +5207,59 @@ class GatewayRunner:
             # This also fills the 3s VoiceReceiver grace period with useful
             # audio instead of silence.  Runs in the background.
             async def _speak_greeting():
-                import random as _rnd
-                _greetings = [
-                    "Hey, I am here.",
-                    "I am listening.",
-                    "All set, what is up?",
-                    "I am in, go ahead.",
-                    "Voice is live, I am listening.",
-                ]
-                _greeting = _rnd.choice(_greetings)
+                # ---- Build a contextual greeting -------------------------
+                # Bot identity (Discord display name; falls back to "the assistant")
+                _bot_name = "the assistant"
                 try:
-                    from tools.tts_tool import _load_tts_config, _get_provider, _resolve_qwen3_config
+                    _client_user = getattr(getattr(adapter, "_client", None), "user", None)
+                    if _client_user is not None:
+                        _bot_name = (
+                            getattr(_client_user, "display_name", None)
+                            or getattr(_client_user, "name", None)
+                            or _bot_name
+                        )
+                except Exception:
+                    pass
+
+                # Source channel / thread name where /voice was invoked
+                _src_name = None
+                _src_kind = "channel"  # "channel" or "thread"
+                try:
+                    _src_chan = adapter._client.get_channel(int(event.source.chat_id))
+                    if _src_chan is not None:
+                        _src_name = getattr(_src_chan, "name", None)
+                        # Thread instances have a non-null .parent attribute
+                        if getattr(_src_chan, "parent", None) is not None:
+                            _src_kind = "thread"
+                except Exception:
+                    pass
+
+                # Summoner (display name preferred)
+                _summoner = (
+                    getattr(event.source, "user_name", None)
+                    or "you"
+                )
+
+                # Compose a friendly, informative one-liner.  Keep it short
+                # — the audio plays before the user's first utterance, so
+                # latency matters more than verbosity.
+                _vc_name = getattr(voice_channel, "name", "the voice channel")
+                if _src_name:
+                    _greeting = (
+                        f"Voice is live. I am {_bot_name}, joining {_vc_name}, "
+                        f"invited by {_summoner} from the {_src_name} {_src_kind}."
+                    )
+                else:
+                    _greeting = (
+                        f"Voice is live. I am {_bot_name}, joining {_vc_name}, "
+                        f"invited by {_summoner}."
+                    )
+
+                try:
+                    from tools.tts_tool import (
+                        _load_tts_config, _get_provider,
+                        _resolve_qwen3_config, _preprocess_tts_text,
+                    )
                     _cfg = _load_tts_config()
                     if _get_provider(_cfg) != "qwen3":
                         return
@@ -5227,6 +5269,19 @@ class GatewayRunner:
                     _base = _qc.get("base_url", "http://localhost:8001")
                     _voice = _qc.get("voice", "ryan")
                     _instruct = _qc.get("instruct", "")
+
+                    # Sanitize the greeting through the standard TTS
+                    # preprocessor (markdown strip, emoji strip, MEDIA: tag
+                    # removal, number → words, whitespace collapse) — same
+                    # path the auto-TTS reply pipeline uses.  Without this,
+                    # any future template tweak could leak markdown / tags
+                    # into the spoken audio.
+                    try:
+                        _greeting = _preprocess_tts_text(
+                            _greeting, language=(_det_lang or "English"),
+                        )
+                    except Exception as _se:
+                        logger.debug("Voice greeting: preprocess failed (%s); using raw text", _se)
 
                     from urllib.parse import urlencode as _ue
                     _p = {"text": _greeting, "voice": _voice, "chunk_size": 4}
