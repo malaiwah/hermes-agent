@@ -25,6 +25,7 @@ import signal
 import tempfile
 import threading
 import time
+import struct
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Callable, Dict, Optional, Any, List
@@ -3457,6 +3458,13 @@ class GatewayRunner:
                         async def _voice_tts_consumer():
                             """Async task: consume sentences, generate TTS, play.
 
+                            Uses PCM streaming when available: reads raw 24kHz PCM
+                            from the TTS server and pipes it directly into Discord's
+                            voice encoder via StreamingPCMAudioSource.  No temp files,
+                            no ffmpeg.
+
+                            Falls back to file-based TTS when PCM streaming fails.
+
                             Handles special messages:
                             - ``__tts_instruct:...`` — set the TTS instruct for
                               subsequent sentences (parsed from LLM ``[tts:]`` tag).
@@ -3467,22 +3475,23 @@ class GatewayRunner:
                             if not _adapter:
                                 return
                             _chars_sent = 0
-                            # Start with config instruct; override when LLM tag arrives
                             _qwen_cfg = _vtts_cfg.get("qwen3", _vtts_cfg.get("openai", {}))
                             _current_instruct = _qwen_cfg.get("instruct", "")
+                            _base_url = _qwen_cfg.get("base_url", "http://localhost:8001")
+                            _voice = _qwen_cfg.get("voice", "ryan")
+                            # Check if adapter supports PCM stream playback
+                            _can_pcm_stream = hasattr(_adapter, "play_pcm_stream_in_voice_channel")
 
                             while True:
                                 sentence = await _vtts_q.get()
                                 if sentence is None:
                                     break
 
-                                # Handle dynamic instruct from LLM [tts:] tag
                                 if isinstance(sentence, str) and sentence.startswith("__tts_instruct:"):
                                     _current_instruct = sentence[15:]
                                     logger.info("Voice stream: dynamic instruct = %r", _current_instruct)
                                     continue
 
-                                # Preprocess and budget
                                 sentence = _preprocess_tts_text(sentence)
                                 if not sentence:
                                     continue
@@ -3492,36 +3501,83 @@ class GatewayRunner:
                                         break
                                 _chars_sent += len(sentence)
 
-                                # Generate TTS for this single sentence (non-streaming
-                                # endpoint — each sentence is already one unit, no need
-                                # for the /stream endpoint's sentence splitting).
-                                try:
-                                    import datetime as _dt
-                                    _ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-                                    _chunk_path = os.path.join(_vtts_dir, f"tts_{_ts}.ogg")
-                                    # Apply the current instruct
-                                    _gen_cfg = dict(_vtts_cfg)
-                                    _gen_qwen = dict(_gen_cfg.get("qwen3", _gen_cfg.get("openai", {})))
-                                    if _current_instruct:
-                                        _gen_qwen["instruct"] = _current_instruct
-                                    _gen_cfg["qwen3"] = _gen_qwen
-                                    await asyncio.to_thread(
-                                        _generate_qwen3_tts, sentence, _chunk_path, _gen_cfg
-                                    )
-                                    if Path(_chunk_path).exists():
-                                        try:
-                                            await _adapter.play_tts(
-                                                chat_id=event.source.chat_id,
-                                                audio_path=_chunk_path,
-                                            )
-                                        finally:
+                                # Try PCM streaming (no temp files, direct pipe to Discord)
+                                _pcm_ok = False
+                                if _can_pcm_stream:
+                                    try:
+                                        from urllib.parse import urlencode as _ue
+                                        from urllib.request import Request as _Req, urlopen as _uopen
+                                        _p = {"text": sentence, "voice": _voice, "chunk_size": "4"}
+                                        if _current_instruct:
+                                            _p["instruct"] = _current_instruct
+                                        _url = f"{_base_url.rstrip('/')}/v1/audio/speech/pcm-stream?{_ue(_p)}"
+
+                                        # Get guild_id for this chat
+                                        _gid = None
+                                        for gid, tch in _adapter._voice_text_channels.items():
+                                            if str(tch) == str(event.source.chat_id):
+                                                _gid = gid
+                                                break
+
+                                        if _gid:
+                                            from gateway.platforms.discord import StreamingPCMAudioSource
+                                            _src = StreamingPCMAudioSource()
+
+                                            # Feed PCM chunks in a background thread
+                                            def _feed_pcm():
+                                                try:
+                                                    _req = _Req(_url, method="POST", headers={"Content-Length": "0"})
+                                                    with _uopen(_req, timeout=60) as _resp:
+                                                        while True:
+                                                            _hdr = _resp.read(4)
+                                                            if not _hdr or len(_hdr) < 4:
+                                                                break
+                                                            _clen = struct.unpack(">I", _hdr)[0]
+                                                            if _clen == 0:
+                                                                break
+                                                            _pcm = _resp.read(_clen)
+                                                            if len(_pcm) < _clen:
+                                                                break
+                                                            _src.feed(_pcm)
+                                                except Exception as _e:
+                                                    logger.warning("PCM feed error: %s", _e)
+                                                finally:
+                                                    _src.finish()
+
+                                            _feed_task = asyncio.get_running_loop().run_in_executor(None, _feed_pcm)
+                                            await _adapter.play_pcm_stream_in_voice_channel(_gid, _src)
+                                            await _feed_task
+                                            _pcm_ok = True
+                                    except Exception as _e:
+                                        logger.info("PCM stream failed, falling back to file: %s", _e)
+
+                                # Fallback: file-based TTS
+                                if not _pcm_ok:
+                                    try:
+                                        import datetime as _dt
+                                        _ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+                                        _chunk_path = os.path.join(_vtts_dir, f"tts_{_ts}.ogg")
+                                        _gen_cfg = dict(_vtts_cfg)
+                                        _gen_qwen = dict(_gen_cfg.get("qwen3", _gen_cfg.get("openai", {})))
+                                        if _current_instruct:
+                                            _gen_qwen["instruct"] = _current_instruct
+                                        _gen_cfg["qwen3"] = _gen_qwen
+                                        await asyncio.to_thread(
+                                            _generate_qwen3_tts, sentence, _chunk_path, _gen_cfg
+                                        )
+                                        if Path(_chunk_path).exists():
                                             try:
-                                                os.remove(_chunk_path)
-                                            except OSError:
-                                                pass
-                                except Exception as _e:
-                                    logger.warning("Voice TTS stream error: %s", _e)
-                            # Cleanup
+                                                await _adapter.play_tts(
+                                                    chat_id=event.source.chat_id,
+                                                    audio_path=_chunk_path,
+                                                )
+                                            finally:
+                                                try:
+                                                    os.remove(_chunk_path)
+                                                except OSError:
+                                                    pass
+                                    except Exception as _e:
+                                        logger.warning("Voice TTS error: %s", _e)
                             try:
                                 os.rmdir(_vtts_dir)
                             except OSError:

@@ -80,6 +80,77 @@ def check_discord_requirements() -> bool:
     return DISCORD_AVAILABLE
 
 
+class StreamingPCMAudioSource:
+    """Discord AudioSource that reads PCM from a TTS PCM stream.
+
+    Reads 24kHz mono int16 PCM chunks from an HTTP stream, upsamples to
+    48kHz stereo int16 (Discord's native format), and serves 20ms frames
+    via ``read()``.  No temp files, no ffmpeg subprocess.
+
+    The audio source is consumed in a separate thread by discord.py's
+    player.  The ``feed()`` method is called from another thread (the
+    HTTP reader) to push PCM data into the buffer.
+    """
+
+    # Discord wants 48kHz stereo int16, 20ms frames = 3840 bytes
+    DISCORD_FRAME_SIZE = 3840  # 960 samples × 2 channels × 2 bytes
+    DISCORD_RATE = 48000
+    SRC_RATE = 24000
+    UPSAMPLE_RATIO = 2  # 24000 → 48000
+
+    def __init__(self):
+        self._buffer = bytearray()
+        self._lock = threading.Lock()
+        self._done = False
+
+    def feed(self, pcm_24k_mono: bytes):
+        """Feed 24kHz mono int16 PCM data into the buffer."""
+        import numpy as _np
+        samples = _np.frombuffer(pcm_24k_mono, dtype=_np.int16)
+        # Upsample 24kHz → 48kHz: repeat each sample twice
+        upsampled = _np.repeat(samples, self.UPSAMPLE_RATIO)
+        # Mono → stereo: interleave same sample for L and R
+        stereo = _np.empty(len(upsampled) * 2, dtype=_np.int16)
+        stereo[0::2] = upsampled
+        stereo[1::2] = upsampled
+        with self._lock:
+            self._buffer.extend(stereo.tobytes())
+
+    def finish(self):
+        """Signal that no more data will be fed."""
+        self._done = True
+
+    def read(self) -> bytes:
+        """Read one 20ms frame (3840 bytes) for Discord.
+
+        Called from discord.py's player thread.  Blocks briefly if data
+        isn't available yet; returns empty bytes when stream is complete.
+        """
+        import time as _t
+        # Wait up to 2s for enough data
+        for _ in range(200):
+            with self._lock:
+                if len(self._buffer) >= self.DISCORD_FRAME_SIZE:
+                    frame = bytes(self._buffer[:self.DISCORD_FRAME_SIZE])
+                    del self._buffer[:self.DISCORD_FRAME_SIZE]
+                    return frame
+                if self._done:
+                    # Pad remaining data to frame size
+                    if self._buffer:
+                        remaining = bytes(self._buffer)
+                        self._buffer.clear()
+                        return remaining + b'\x00' * (self.DISCORD_FRAME_SIZE - len(remaining))
+                    return b''
+            _t.sleep(0.01)
+        return b''
+
+    def is_opus(self):
+        return False
+
+    def cleanup(self):
+        pass
+
+
 class VoiceReceiver:
     """Captures and decodes voice audio from a Discord voice channel.
 
@@ -1201,6 +1272,52 @@ class DiscordAdapter(BasePlatformAdapter):
 
     # Maximum seconds to wait for voice playback before giving up
     PLAYBACK_TIMEOUT = 120
+
+    async def play_pcm_stream_in_voice_channel(
+        self, guild_id: int, pcm_source: "StreamingPCMAudioSource"
+    ) -> bool:
+        """Play a streaming PCM audio source in the voice channel.
+
+        The source feeds 24kHz mono PCM which is upsampled to 48kHz stereo
+        internally.  Discord.py's player reads 20ms frames from the source
+        in a separate thread.
+        """
+        vc = self._voice_clients.get(guild_id)
+        if not vc or not vc.is_connected():
+            return False
+
+        receiver = self._voice_receivers.get(guild_id)
+        if receiver:
+            receiver.start_playback()
+
+        try:
+            # Wait for any current playback to finish
+            wait_start = time.monotonic()
+            while vc.is_playing():
+                if time.monotonic() - wait_start > self.PLAYBACK_TIMEOUT:
+                    vc.stop()
+                    break
+                await asyncio.sleep(0.1)
+
+            done = asyncio.Event()
+            loop = asyncio.get_running_loop()
+
+            def _after(error):
+                if error:
+                    logger.error("Voice stream playback error: %s", error)
+                loop.call_soon_threadsafe(done.set)
+
+            vc.play(pcm_source, after=_after)
+            try:
+                await asyncio.wait_for(done.wait(), timeout=self.PLAYBACK_TIMEOUT)
+            except asyncio.TimeoutError:
+                logger.warning("Voice stream playback timed out")
+                vc.stop()
+            self._reset_voice_timeout(guild_id)
+            return True
+        finally:
+            if receiver:
+                receiver.stop_playback()
 
     async def play_in_voice_channel(self, guild_id: int, audio_path: str) -> bool:
         """Play an audio file in the connected voice channel.
