@@ -523,30 +523,35 @@ class VoiceReceiver:
     @staticmethod
     def pcm_to_wav(pcm_data: bytes, output_path: str,
                    src_rate: int = 48000, src_channels: int = 2):
-        """Convert raw PCM to 16kHz mono WAV via ffmpeg."""
-        with tempfile.NamedTemporaryFile(suffix=".pcm", delete=False) as f:
-            f.write(pcm_data)
-            pcm_path = f.name
-        try:
-            subprocess.run(
-                [
-                    "ffmpeg", "-y", "-loglevel", "error",
-                    "-f", "s16le",
-                    "-ar", str(src_rate),
-                    "-ac", str(src_channels),
-                    "-i", pcm_path,
-                    "-ar", "16000",
-                    "-ac", "1",
-                    output_path,
-                ],
-                check=True,
-                timeout=30,
-            )
-        finally:
-            try:
-                os.unlink(pcm_path)
-            except OSError:
-                pass
+        """Convert raw PCM (48kHz stereo) to 16kHz mono WAV.
+
+        Uses numpy for resampling — no ffmpeg subprocess needed.
+        Discord audio is always 48kHz stereo int16, downsampled to
+        16kHz mono for Whisper/ASR models.
+        """
+        import numpy as _np
+        import wave as _wave
+
+        # Parse int16 PCM
+        samples = _np.frombuffer(pcm_data, dtype=_np.int16)
+
+        # Stereo → mono: average channels
+        if src_channels == 2:
+            samples = samples.reshape(-1, 2).mean(axis=1).astype(_np.int16)
+
+        # 48kHz → 16kHz: decimate by 3 (48000/16000 = 3)
+        # Simple decimation works well for speech; no anti-alias filter
+        # needed since Discord already band-limits voice to ~8kHz.
+        ratio = src_rate // 16000
+        if ratio > 1:
+            samples = samples[::ratio]
+
+        # Write WAV
+        with _wave.open(output_path, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(16000)
+            wf.writeframes(samples.tobytes())
 
 
 class DiscordAdapter(BasePlatformAdapter):
