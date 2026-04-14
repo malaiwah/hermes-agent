@@ -3443,12 +3443,15 @@ class GatewayRunner:
                     "to the conversation. Omit the tag to keep the current voice.\n"
                     "VOICE FEEDBACK: When using tools, call send_user_message IN "
                     "PARALLEL with your first tool call to acknowledge the user. "
-                    "Keep it to 10-15 words max — a quick spoken note, not a full "
-                    "sentence. Between batches of tool calls, send another brief "
-                    "update. Examples:\n"
-                    "  send_user_message('Looking that up now.')\n"
-                    "  send_user_message('Found some results, checking further.')\n"
-                    "  send_user_message('Almost done.')]\n\n"
+                    "Speak in FIRST PERSON, natural conversational tone — like "
+                    "you're talking to a friend. Start with 'I', 'Let me', 'On it', "
+                    "etc. NOT robotic descriptions like 'Searching for X' or "
+                    "'Executing tool Y'. Keep to 5-12 words. Examples:\n"
+                    "  send_user_message('Let me check that for you.')\n"
+                    "  send_user_message('I am looking into it now.')\n"
+                    "  send_user_message('On it — one moment.')\n"
+                    "  send_user_message('I found some hits, digging deeper.')\n"
+                    "  send_user_message('Almost there, wrapping up.')]\n\n"
                     + message_text
                 )
 
