@@ -3430,6 +3430,80 @@ class GatewayRunner:
                     + message_text
                 )
 
+            # Set up voice streaming pipeline: LLM → sentence chunker → TTS → Discord
+            _voice_tts_task = None
+            _voice_cb = None
+            if event.message_type == MessageType.VOICE:
+                try:
+                    from tools.tts_tool import (
+                        check_tts_requirements, _load_tts_config, _get_provider,
+                        _preprocess_tts_text, _generate_qwen3_tts_stream,
+                    )
+                    _vtts_cfg = _load_tts_config()
+                    if check_tts_requirements() and _get_provider(_vtts_cfg) == "qwen3":
+                        import tempfile as _vtf
+                        _vtts_dir = _vtf.mkdtemp(prefix="vtts_stream_")
+                        _vtts_q: asyncio.Queue = asyncio.Queue()
+                        _vtts_loop = asyncio.get_running_loop()
+                        _vtts_max = int(_vtts_cfg.get("max_chars", 1000))
+
+                        def _voice_sentence_cb(sentence):
+                            """Called from agent thread on each sentence boundary."""
+                            _vtts_loop.call_soon_threadsafe(_vtts_q.put_nowait, sentence)
+
+                        _voice_cb = _voice_sentence_cb
+
+                        async def _voice_tts_consumer():
+                            """Async task: consume sentences, generate TTS, play."""
+                            _adapter = self.adapters.get(event.source.platform)
+                            if not _adapter:
+                                return
+                            _thread_meta = {}
+                            raw_msg = getattr(event, "raw_message", None)
+                            _chars_sent = 0
+                            while True:
+                                sentence = await _vtts_q.get()
+                                if sentence is None:
+                                    break
+                                # Respect max_chars budget
+                                sentence = _preprocess_tts_text(sentence)
+                                if not sentence:
+                                    continue
+                                if _chars_sent + len(sentence) > _vtts_max:
+                                    sentence = sentence[:_vtts_max - _chars_sent]
+                                    if not sentence:
+                                        break
+                                _chars_sent += len(sentence)
+
+                                # Generate TTS for this sentence
+                                try:
+                                    for chunk_path in _generate_qwen3_tts_stream(
+                                        sentence, _vtts_dir, _vtts_cfg
+                                    ):
+                                        if Path(chunk_path).exists():
+                                            try:
+                                                await _adapter.play_tts(
+                                                    chat_id=event.source.chat_id,
+                                                    audio_path=chunk_path,
+                                                )
+                                            finally:
+                                                try:
+                                                    os.remove(chunk_path)
+                                                except OSError:
+                                                    pass
+                                except Exception as _e:
+                                    logger.warning("Voice TTS stream error: %s", _e)
+                            # Cleanup
+                            try:
+                                os.rmdir(_vtts_dir)
+                            except OSError:
+                                pass
+
+                        _voice_tts_task = asyncio.create_task(_voice_tts_consumer())
+                except Exception as _e:
+                    logger.debug("Voice streaming setup failed: %s", _e)
+                    _voice_cb = None
+
             # Run the agent
             agent_result = await self._run_agent(
                 message=message_text,
@@ -3440,7 +3514,17 @@ class GatewayRunner:
                 session_key=session_key,
                 event_message_id=event.message_id,
                 persist_user_message=getattr(event, "persist_user_message", None),
+                voice_sentence_callback=_voice_cb,
             )
+
+            # Wait for voice TTS to finish playing
+            if _voice_tts_task:
+                try:
+                    await asyncio.wait_for(_voice_tts_task, timeout=120)
+                    # Mark the event so base.py auto-TTS skips (already played)
+                    event._voice_tts_streamed = True
+                except (asyncio.TimeoutError, Exception) as _e:
+                    logger.warning("Voice TTS task error: %s", _e)
 
             # Stop persistent typing indicator now that the agent is done
             try:
@@ -7251,6 +7335,7 @@ class GatewayRunner:
         _interrupt_depth: int = 0,
         event_message_id: Optional[str] = None,
         persist_user_message: Optional[str] = None,
+        voice_sentence_callback: Optional[Callable] = None,
     ) -> Dict[str, Any]:
         """
         Run the agent with the given message and context.
@@ -7696,6 +7781,38 @@ class GatewayRunner:
                 except Exception as _sc_err:
                     logger.debug("Could not set up stream consumer: %s", _sc_err)
 
+            # Voice streaming: wrap the stream delta callback with a sentence
+            # accumulator that feeds completed sentences to TTS immediately
+            # while the LLM continues generating.
+            _voice_sentence_buf = ""
+            _voice_sentence_re = None
+            _original_stream_cb = _stream_delta_cb
+            if voice_sentence_callback:
+                import re as _vs_re
+                _voice_sentence_re = _vs_re.compile(r"(?<=[.!?])\s+")
+                _voice_sentence_lock = threading.Lock()
+
+                def _voice_aware_delta(text):
+                    nonlocal _voice_sentence_buf
+                    # Forward to the original stream consumer (text display)
+                    if _original_stream_cb:
+                        _original_stream_cb(text)
+                    if text is None:
+                        return
+                    with _voice_sentence_lock:
+                        _voice_sentence_buf += text
+                        # Check for sentence boundaries
+                        parts = _voice_sentence_re.split(_voice_sentence_buf)
+                        if len(parts) > 1:
+                            # All but last are complete sentences
+                            for sentence in parts[:-1]:
+                                sentence = sentence.strip()
+                                if sentence:
+                                    voice_sentence_callback(sentence)
+                            _voice_sentence_buf = parts[-1]
+
+                _stream_delta_cb = _voice_aware_delta
+
             # Estimate context tokens for smart routing decision.
             # Use cached agent's last prompt tokens if available; otherwise
             # rough estimate from history length (4 chars ≈ 1 token).
@@ -8110,6 +8227,18 @@ class GatewayRunner:
                     )
                 except Exception:
                     pass
+
+            # Flush remaining voice sentence buffer
+            if voice_sentence_callback and _voice_sentence_buf.strip():
+                _remaining = _voice_sentence_buf.strip()
+                # Don't send [tts: ...] tags as speech
+                import re as _flush_re
+                _tts_tag = _flush_re.search(r'\[tts:\s*(.+?)\]', _remaining)
+                if _tts_tag:
+                    _remaining = _remaining[:_tts_tag.start()].strip()
+                if _remaining:
+                    voice_sentence_callback(_remaining)
+                voice_sentence_callback(None)  # sentinel: stream complete
 
             return {
                 "final_response": final_response,

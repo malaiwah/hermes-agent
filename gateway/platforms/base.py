@@ -1449,9 +1449,11 @@ class BasePlatformAdapter(ABC):
                 # TTS generates sentence N+1 while Discord plays sentence N.
                 # Skipped when the chat has voice mode disabled (/voice off)
                 _tts_played = False
+                _voice_already_streamed = getattr(event, "_voice_tts_streamed", False)
                 if (event.message_type == MessageType.VOICE
                         and text_content
                         and not media_files
+                        and not _voice_already_streamed
                         and event.source.chat_id not in self._auto_tts_disabled_chats):
                     try:
                         from tools.tts_tool import check_tts_requirements, _preprocess_tts_text, _load_tts_config, _get_provider
