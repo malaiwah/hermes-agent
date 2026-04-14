@@ -3429,42 +3429,70 @@ class GatewayRunner:
                     except Exception:
                         _last_instruct = "Speak naturally at a steady conversational pace."
 
+                # Sanitize any ASR-returned language string before interpolating
+                # it into the user prompt — defensive against a compromised ASR
+                # that could inject newlines or instruction text.
                 _lang_hint = ""
                 if _detected_lang:
-                    _lang_hint = (
-                        f"The ASR detected the user spoke in {_detected_lang}. "
-                        f"Respond in {_detected_lang} to match. "
-                    )
+                    _safe_lang = re.sub(r'[^\w\- ]', '', str(_detected_lang))[:32].strip()
+                    if _safe_lang:
+                        _lang_hint = (
+                            f"The ASR detected the user spoke in {_safe_lang}. "
+                            f"Respond in {_safe_lang} to match. "
+                        )
 
-                message_text = (
-                    "[Voice mode: The user is speaking via voice and your response "
-                    "will be converted to live speech. Keep your response concise "
-                    "(1-3 sentences). Do not use emojis or special characters. "
-                    "Avoid markdown formatting, code blocks, and tables.\n"
-                    f"{_lang_hint}"
-                    f"Current voice direction: {_last_instruct}\n"
-                    "Start your reply with a TTS voice direction tag on its own "
-                    "line BEFORE your response text (only if the tone should "
-                    "change from the current direction):\n"
-                    "[tts: <brief description of tone and pace>]\n"
-                    "Then your response on the next line. Match the emotional tone "
-                    "to the conversation. Omit the tag to keep the current voice.\n"
-                    "VOICE FEEDBACK: When using tools, call send_user_message in "
-                    "PARALLEL with your first tool call to acknowledge the user. "
-                    "Speak in FIRST PERSON, natural conversational tone. Start "
-                    "with 'I', 'Let me', 'On it', etc. NOT 'Searching for X' or "
-                    "'Executing tool Y'. Keep to 5-12 words. ALWAYS end progress "
-                    "updates with '...' (trailing intonation); only the FINAL "
-                    "answer uses period/exclamation. Vary phrasing, match tone "
-                    "to task complexity:\n"
-                    "  Quick:   'One sec...'  /  'On it...'\n"
-                    "  Medium:  'Let me check that...'  /  'Looking into it...'\n"
-                    "  Complex: 'This might take a moment, digging in...'\n"
-                    "  Mid:     'Getting closer...'  /  'Found some hits, going deeper...'\n"
-                    "  Near:    'Almost there...'  /  'Just wrapping up...'\n"
-                    "  Snag:    'Hmm, hit a snag, trying another angle...']\n\n"
-                    + message_text
+                # Show the full primer (with cue examples and feedback rules)
+                # only on the FIRST voice turn per session.  Subsequent voice
+                # turns get a compact prefix — the LLM has already seen the
+                # rules in conversation history, repeating them bloats every
+                # turn with ~28 lines (~400 tokens) of boilerplate.
+                _primer_shown = (
+                    _adapter_for_instruct is not None
+                    and hasattr(_adapter_for_instruct, "_voice_primer_shown")
+                    and event.source.chat_id in _adapter_for_instruct._voice_primer_shown
                 )
+
+                if not _primer_shown:
+                    message_text = (
+                        "[Voice mode: The user is speaking via voice; your response "
+                        "will be converted to live speech. Keep replies concise "
+                        "(1-3 sentences). Do not use emojis or special characters. "
+                        "Avoid markdown formatting, code blocks, and tables.\n"
+                        f"{_lang_hint}"
+                        f"Current voice direction: {_last_instruct}\n"
+                        "Start your reply with a TTS voice direction tag on its "
+                        "own line BEFORE your response (only if the tone should "
+                        "change from the current direction):\n"
+                        "[tts: <brief description of tone and pace>]\n"
+                        "Then your response on the next line. Omit the tag to "
+                        "keep the current voice.\n"
+                        "VOICE FEEDBACK: When using tools, call send_user_message "
+                        "in PARALLEL with your first tool call to acknowledge the "
+                        "user. Speak in FIRST PERSON, natural conversational tone "
+                        "('I', 'Let me', 'On it' — never 'Searching for X'). Keep "
+                        "to 5-12 words. END progress updates with '...' (trailing "
+                        "intonation); only the FINAL answer uses period/exclamation. "
+                        "Vary phrasing, match tone to task complexity:\n"
+                        "  Quick:   'One sec...'  /  'On it...'\n"
+                        "  Medium:  'Let me check that...'  /  'Looking into it...'\n"
+                        "  Complex: 'This might take a moment, digging in...'\n"
+                        "  Mid:     'Getting closer...'  /  'Found some hits, going deeper...'\n"
+                        "  Near:    'Almost there...'  /  'Just wrapping up...'\n"
+                        "  Snag:    'Hmm, hit a snag, trying another angle...']\n\n"
+                        + message_text
+                    )
+                    if _adapter_for_instruct and hasattr(_adapter_for_instruct, "_voice_primer_shown"):
+                        _adapter_for_instruct._voice_primer_shown.add(event.source.chat_id)
+                else:
+                    # Compact per-turn prefix — only the dynamic bits the LLM
+                    # can't remember from history (current voice direction and
+                    # detected language).  The full rules live in history.
+                    message_text = (
+                        "[Voice mode. "
+                        f"{_lang_hint}"
+                        f"Current voice direction: {_last_instruct}]\n\n"
+                        + message_text
+                    )
 
             # Voice TTS is handled by the auto-TTS path in base.py
             # (with the FULL response text in one pcm-stream call for
@@ -5209,15 +5237,28 @@ class GatewayRunner:
                     )
                     _src = StreamingPCMAudioSource()
                     _loop = asyncio.get_running_loop()
-                    _loop.run_in_executor(
+                    _feed_fut = _loop.run_in_executor(
                         None, feed_pcm_stream_sync, _url, _src, 30.0,
                     )
-                    await adapter.play_pcm_stream_in_voice_channel(guild_id, _src)
+                    try:
+                        _played = await adapter.play_pcm_stream_in_voice_channel(guild_id, _src)
+                        if not _played:
+                            _src.cancel()
+                    finally:
+                        try:
+                            await _feed_fut
+                        except Exception:
+                            pass
                     logger.info("Voice: greeting played (%r)", _greeting)
                 except Exception as _e:
                     logger.warning("Voice greeting failed: %s", _e)
 
-            asyncio.create_task(_speak_greeting())
+            # Track the greeting task so shutdown can cancel it cleanly.
+            _greeting_task = asyncio.create_task(_speak_greeting())
+            if not hasattr(self, "_voice_background_tasks"):
+                self._voice_background_tasks = set()
+            self._voice_background_tasks.add(_greeting_task)
+            _greeting_task.add_done_callback(self._voice_background_tasks.discard)
 
             return (
                 f"Joined voice channel **{voice_channel.name}**.\n"
@@ -7753,7 +7794,12 @@ class GatewayRunner:
                             _qc = _resolve_qwen3_config(_cfg, _det_lang)
                             _base = _qc.get("base_url", "http://localhost:8001")
                             _voice = _qc.get("voice", "ryan")
-                            _instruct = _qc.get("instruct", "")
+                            # Carry-forward priority matches main reply path:
+                            # last LLM [tts:] tag > config default.
+                            _instruct = (
+                                getattr(_status_adapter, "_last_tts_instruct", {}).get(_status_chat_id)
+                                or _qc.get("instruct", "")
+                            )
                             # Progress updates are prompted to be 5-12 words;
                             # 400 chars is plenty and avoids mid-word cuts.
                             # Use detected language for number/date expansion.
@@ -7773,10 +7819,24 @@ class GatewayRunner:
                                 StreamingPCMAudioSource, feed_pcm_stream_sync,
                             )
                             _src = StreamingPCMAudioSource()
-                            _loop_for_step.run_in_executor(
+                            _feed_fut = _loop_for_step.run_in_executor(
                                 None, feed_pcm_stream_sync, _url, _src, 60.0,
                             )
-                            await _status_adapter.play_pcm_stream_in_voice_channel(_gid, _src)
+                            try:
+                                _played = await _status_adapter.play_pcm_stream_in_voice_channel(_gid, _src)
+                                if not _played:
+                                    # Barge-in or connection lost — stop the feed
+                                    # reader so it doesn't pump the rest of the
+                                    # response into a dead source.
+                                    _src.cancel()
+                            finally:
+                                # Always await the feed task so its exceptions
+                                # surface (instead of being swallowed) and the
+                                # executor thread doesn't leak.
+                                try:
+                                    await _feed_fut
+                                except Exception as _fe:
+                                    logger.debug("Feed task error: %s", _fe)
                         except Exception as _ve:
                             logger.warning("Voice update TTS failed: %s", _ve)
 

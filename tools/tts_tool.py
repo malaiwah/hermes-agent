@@ -825,12 +825,18 @@ _MEDIA_TAG_RE = re.compile(r'MEDIA:[^\s]+')
 
 # --- Number normalization (optional — requires num2words) ---
 # Matches a standalone numeric "atom": digits optionally punctuated with
-# dots (handles "2026", "3.14", "10.21.0.235", "1.2.3-beta" prefix, etc.).
-# Lookbehind/ahead prevents matching the numeric fragment inside an
-# identifier like "abc123" or a fragment of a longer slug; a trailing
-# period is allowed (sentence punctuation) because the `[\d]*\d` shape
-# won't end on a dot.
-_NUMERIC_TOKEN_RE = re.compile(r'(?<![\w\-:/])(-?\d(?:[\d.]*\d)?)(?![\w\-:/])')
+# dots (handles "2026", "3.14", "10.21.0.235", etc.).
+#
+# Lookbehind excludes dots so we don't restart matching in the middle of
+# a version string (``v1.2.3`` → was matching ``2.3`` → "v1.two point
+# three").  Lookahead excludes dots too: a trailing ``.`` that isn't
+# followed by a digit is sentence punctuation (handled by ``\d`` end
+# anchor in the group); trailing ``.<digit>`` would indicate the token
+# is part of a larger multi-dot fragment that the outer match didn't
+# capture, and we skip it to be safe.
+_NUMERIC_TOKEN_RE = re.compile(
+    r'(?<![\w\-:/.])(-?\d(?:[\d.]*\d)?)(?!\.\d)(?![\w\-:/])'
+)
 
 # Language code → num2words language tag.  num2words uses "fr" etc.
 _LANG_TO_N2W = {
@@ -849,6 +855,10 @@ _LANG_TO_N2W = {
 }
 
 
+_n2w_missing_logged = False
+_n2w_unknown_lang_logged: set = set()
+
+
 def _normalize_numbers(text: str, language: str = "English") -> str:
     """Expand bare integers and decimals to words using num2words.
 
@@ -858,15 +868,32 @@ def _normalize_numbers(text: str, language: str = "English") -> str:
     - Multi-dot tokens (IP addresses, semver like 10.21.0.235 or 3.12.5)
       are left untouched — the LLM is prompted to avoid these but this
       is a defensive guard for when they slip through
-    - Unknown language falls back to English
-    - Silently no-op if ``num2words`` is unavailable
+    - Unknown language falls back to English (logged once per language)
+    - No-op if ``num2words`` is unavailable (logged once)
     """
+    global _n2w_missing_logged
     try:
         from num2words import num2words
     except ImportError:
+        if not _n2w_missing_logged:
+            logger.warning(
+                "num2words not installed — TTS number normalization "
+                "disabled; install via 'pip install num2words'"
+            )
+            _n2w_missing_logged = True
         return text
 
-    lang = _LANG_TO_N2W.get((language or "").strip().lower(), "en")
+    _raw_lang = (language or "").strip().lower()
+    lang = _LANG_TO_N2W.get(_raw_lang)
+    if lang is None:
+        lang = "en"
+        if _raw_lang and _raw_lang not in _n2w_unknown_lang_logged:
+            logger.info(
+                "TTS number normalization: unknown language %r — "
+                "falling back to English",
+                language,
+            )
+            _n2w_unknown_lang_logged.add(_raw_lang)
 
     def _sub(m):
         token = m.group(0)

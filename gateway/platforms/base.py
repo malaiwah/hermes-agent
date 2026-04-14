@@ -648,6 +648,11 @@ class BasePlatformAdapter(ABC):
         # Per-chat last detected ASR language (e.g. "English", "French")
         # — used to pick matching TTS voice/config so replies match input.
         self._voice_last_language: Dict[str, str] = {}
+        # Chats that have received the full voice-mode primer (with cue
+        # examples).  Subsequent voice turns get a compact prefix to
+        # avoid re-injecting ~28 lines of boilerplate into every message.
+        # Cleared on /voice leave.
+        self._voice_primer_shown: set = set()
 
     @property
     def has_fatal_error(self) -> bool:
@@ -1558,8 +1563,15 @@ class BasePlatformAdapter(ABC):
                                             _feed_task = _loop.run_in_executor(
                                                 None, feed_pcm_stream_sync, _url, _src, 120.0,
                                             )
-                                            _play_ok = await self.play_pcm_stream_in_voice_channel(_gid, _src)
-                                            await _feed_task
+                                            try:
+                                                _play_ok = await self.play_pcm_stream_in_voice_channel(_gid, _src)
+                                                if not _play_ok:
+                                                    _src.cancel()  # stop the feed reader
+                                            finally:
+                                                try:
+                                                    await _feed_task
+                                                except Exception as _fe:
+                                                    logger.debug("Feed task error: %s", _fe)
                                             _pcm_ok = True
                                             _tts_played = _play_ok
                                     except Exception as _e:

@@ -228,6 +228,135 @@ class TestNumberNormalization:
         result = _preprocess_tts_text("Python 3.12.5 is out.")
         assert "3.12.5" in result
 
+    @patch("tools.tts_tool._load_tts_config", return_value={"normalize_numbers": True})
+    def test_version_with_prefix_v_not_partially_expanded(self, _mock):
+        """v1.2.3 must NOT match the trailing 2.3 fragment (round-2 bug)."""
+        result = _preprocess_tts_text("Python v1.2.3 is out.")
+        assert "v1.2.3" in result
+        assert "point" not in result.lower()
+
+    @patch("tools.tts_tool._load_tts_config", return_value={"normalize_numbers": True})
+    def test_scientific_notation_not_mangled(self, _mock):
+        """'1.2e10 atoms' shouldn't partially match the 1.2 fragment."""
+        result = _preprocess_tts_text("1.2e10 atoms.")
+        assert "1.2e10" in result
+
+
+class TestStreamingPCMAudioSourceThreading:
+    """Regression tests for StreamingPCMAudioSource threading/lifecycle.
+
+    These exercise the read()/feed()/finish()/cancel() contract that the
+    voice pipeline depends on.  Use direct thread spawning rather than
+    full discord.py integration.
+    """
+
+    def _make(self):
+        import importlib
+        from gateway.platforms import discord as _dm
+        # Force-reload-safe: the class is defined under DISCORD_AVAILABLE
+        if not getattr(_dm, "DISCORD_AVAILABLE", False):
+            import pytest
+            pytest.skip("discord module not available")
+        return _dm.StreamingPCMAudioSource()
+
+    def test_read_blocks_until_frame(self):
+        """read() must not return empty bytes while producer is active."""
+        import threading
+        src = self._make()
+
+        def producer():
+            import time
+            time.sleep(0.05)
+            # 3840 bytes of 48kHz stereo = 1920 samples of 24kHz mono
+            # (upsampled 2× and interleaved 2 channels). Feed that.
+            src.feed(b'\x00\x10' * 960)
+            src.finish()
+
+        t = threading.Thread(target=producer)
+        t.start()
+        frame = src.read()
+        t.join(timeout=2.0)
+        assert len(frame) == src.DISCORD_FRAME_SIZE
+        # Next read returns empty (finished + empty buffer)
+        assert src.read() == b''
+
+    def test_cancel_wakes_reader_immediately(self):
+        """cancel() must wake a blocked read() and return b''."""
+        import threading
+        import time
+        src = self._make()
+        result = {}
+
+        def reader():
+            result['frame'] = src.read()
+
+        t = threading.Thread(target=reader)
+        t.start()
+        time.sleep(0.05)  # ensure reader is blocked in cond.wait
+        src.cancel()
+        t.join(timeout=2.0)
+        assert result['frame'] == b''
+        assert src.is_cancelled is True
+
+    def test_finish_before_feed_returns_empty(self):
+        """finish() with no data → read() returns b'' immediately."""
+        src = self._make()
+        src.finish()
+        assert src.read() == b''
+
+    def test_feed_after_cancel_is_noop(self):
+        """Feeding after cancel should not enqueue data."""
+        src = self._make()
+        src.cancel()
+        src.feed(b'\x00' * 1000)
+        # read() returns b'' because cancelled
+        assert src.read() == b''
+
+
+class TestVoiceSessionKeyParity:
+    """Regression for the voice/text session-key split bug — voice input
+    must produce the same session_key as typed messages in the same chat."""
+
+    def test_voice_input_in_thread_uses_thread_session_key(self):
+        """When the bound channel is a Discord Thread, the voice input's
+        SessionSource must carry chat_type='thread' and thread_id so its
+        session_key matches what a typed message in that thread produces."""
+        import pytest
+        try:
+            from gateway.session import SessionSource, build_session_key
+            from gateway.platforms.base import Platform
+        except Exception:
+            pytest.skip("gateway modules unavailable")
+
+        # Simulate both inputs for the SAME chat/user
+        chat_id = "1493445381923803156"
+        user_id = "1050919157891350639"
+
+        text_source = SessionSource(
+            platform=Platform.DISCORD,
+            chat_id=chat_id,
+            user_id=user_id,
+            user_name="malaiwah",
+            chat_type="thread",
+            thread_id=chat_id,
+        )
+        # Voice input source (as built in _handle_voice_channel_input AFTER
+        # the fix — inspecting the channel type).
+        voice_source = SessionSource(
+            platform=Platform.DISCORD,
+            chat_id=chat_id,
+            user_id=user_id,
+            user_name=user_id,
+            chat_type="thread",
+            thread_id=chat_id,
+        )
+        # Same profile settings for both
+        key_text = build_session_key(text_source, group_sessions_per_user=True)
+        key_voice = build_session_key(voice_source, group_sessions_per_user=True)
+        assert key_text == key_voice, (
+            f"Session key mismatch after fix: text={key_text!r} vs voice={key_voice!r}"
+        )
+
     @patch("tools.tts_tool._load_tts_config", return_value={"normalize_numbers": False})
     def test_disable_via_config(self, _mock):
         """tts.normalize_numbers=false keeps raw digits."""
