@@ -1455,10 +1455,11 @@ class BasePlatformAdapter(ABC):
                 # regardless of whether streaming TTS already handled audio.
                 if event.message_type == MessageType.VOICE and text_content:
                     import re as _tts_strip_re
+                    # Strip [tts: ...] tags from anywhere in the text
+                    # (LLM may output at start or end of response)
                     text_content = _tts_strip_re.sub(
-                        r'\[tts:\s*.+?\]\s*$', '', text_content,
-                        flags=_tts_strip_re.MULTILINE,
-                    ).rstrip()
+                        r'\[tts:\s*.+?\]\s*', '', text_content,
+                    ).strip()
 
                 if (event.message_type == MessageType.VOICE
                         and text_content

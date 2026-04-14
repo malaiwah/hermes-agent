@@ -3420,13 +3420,14 @@ class GatewayRunner:
                     "will be converted to live speech. Keep your response concise "
                     "(1-3 sentences). Do not use emojis or special characters. "
                     "Avoid markdown formatting, code blocks, and tables.\n"
-                    "After your response, on a NEW line, output a TTS voice "
-                    "direction tag: [tts: <brief description of tone and pace>]\n"
-                    "Match the emotional tone to the conversation context. Examples:\n"
-                    "  [tts: Warm and reassuring, moderate pace]\n"
+                    "IMPORTANT: Start your reply with a TTS voice direction tag on "
+                    "its own line BEFORE your response text:\n"
+                    "[tts: <brief description of tone and pace>]\n"
+                    "Then your response on the next line. Match the emotional tone "
+                    "to the conversation. Examples:\n"
+                    "  [tts: Warm and friendly, moderate pace]\n"
                     "  [tts: Excited and enthusiastic, faster pace]\n"
-                    "  [tts: Calm and matter-of-fact, steady pace]\n"
-                    "  [tts: Apologetic and gentle, slower pace]]\n\n"
+                    "  [tts: Calm and steady, moderate pace]]\n\n"
                     + message_text
                 )
 
@@ -3454,18 +3455,34 @@ class GatewayRunner:
                         _voice_cb = _voice_sentence_cb
 
                         async def _voice_tts_consumer():
-                            """Async task: consume sentences, generate TTS, play."""
+                            """Async task: consume sentences, generate TTS, play.
+
+                            Handles special messages:
+                            - ``__tts_instruct:...`` — set the TTS instruct for
+                              subsequent sentences (parsed from LLM ``[tts:]`` tag).
+                            - ``None`` — sentinel, stream complete.
+                            """
+                            from tools.tts_tool import _generate_qwen3_tts
                             _adapter = self.adapters.get(event.source.platform)
                             if not _adapter:
                                 return
-                            _thread_meta = {}
-                            raw_msg = getattr(event, "raw_message", None)
                             _chars_sent = 0
+                            # Start with config instruct; override when LLM tag arrives
+                            _qwen_cfg = _vtts_cfg.get("qwen3", _vtts_cfg.get("openai", {}))
+                            _current_instruct = _qwen_cfg.get("instruct", "")
+
                             while True:
                                 sentence = await _vtts_q.get()
                                 if sentence is None:
                                     break
-                                # Respect max_chars budget
+
+                                # Handle dynamic instruct from LLM [tts:] tag
+                                if isinstance(sentence, str) and sentence.startswith("__tts_instruct:"):
+                                    _current_instruct = sentence[15:]
+                                    logger.info("Voice stream: dynamic instruct = %r", _current_instruct)
+                                    continue
+
+                                # Preprocess and budget
                                 sentence = _preprocess_tts_text(sentence)
                                 if not sentence:
                                     continue
@@ -3475,22 +3492,33 @@ class GatewayRunner:
                                         break
                                 _chars_sent += len(sentence)
 
-                                # Generate TTS for this sentence
+                                # Generate TTS for this single sentence (non-streaming
+                                # endpoint — each sentence is already one unit, no need
+                                # for the /stream endpoint's sentence splitting).
                                 try:
-                                    for chunk_path in _generate_qwen3_tts_stream(
-                                        sentence, _vtts_dir, _vtts_cfg
-                                    ):
-                                        if Path(chunk_path).exists():
+                                    import datetime as _dt
+                                    _ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+                                    _chunk_path = os.path.join(_vtts_dir, f"tts_{_ts}.ogg")
+                                    # Apply the current instruct
+                                    _gen_cfg = dict(_vtts_cfg)
+                                    _gen_qwen = dict(_gen_cfg.get("qwen3", _gen_cfg.get("openai", {})))
+                                    if _current_instruct:
+                                        _gen_qwen["instruct"] = _current_instruct
+                                    _gen_cfg["qwen3"] = _gen_qwen
+                                    await asyncio.to_thread(
+                                        _generate_qwen3_tts, sentence, _chunk_path, _gen_cfg
+                                    )
+                                    if Path(_chunk_path).exists():
+                                        try:
+                                            await _adapter.play_tts(
+                                                chat_id=event.source.chat_id,
+                                                audio_path=_chunk_path,
+                                            )
+                                        finally:
                                             try:
-                                                await _adapter.play_tts(
-                                                    chat_id=event.source.chat_id,
-                                                    audio_path=chunk_path,
-                                                )
-                                            finally:
-                                                try:
-                                                    os.remove(chunk_path)
-                                                except OSError:
-                                                    pass
+                                                os.remove(_chunk_path)
+                                            except OSError:
+                                                pass
                                 except Exception as _e:
                                     logger.warning("Voice TTS stream error: %s", _e)
                             # Cleanup
@@ -7812,10 +7840,12 @@ class GatewayRunner:
             if voice_sentence_callback:
                 import re as _vs_re
                 _voice_sentence_re = _vs_re.compile(r"(?<=[.!?])\s+")
+                _voice_tts_tag_re = _vs_re.compile(r"^\s*\[tts:\s*(.+?)\]\s*\n?")
                 _voice_sentence_lock = threading.Lock()
+                _voice_tts_instruct_parsed = False
 
                 def _voice_aware_delta(text):
-                    nonlocal _voice_sentence_buf
+                    nonlocal _voice_sentence_buf, _voice_tts_instruct_parsed
                     # Forward to the original stream consumer (text display)
                     if _original_stream_cb:
                         _original_stream_cb(text)
@@ -7823,10 +7853,25 @@ class GatewayRunner:
                         return
                     with _voice_sentence_lock:
                         _voice_sentence_buf += text
+
+                        # Parse [tts: ...] tag from the FRONT of the stream
+                        # (LLM is instructed to output it first).  Send it
+                        # as a special "__tts_instruct:..." message to the
+                        # consumer, which applies it to all TTS calls.
+                        if not _voice_tts_instruct_parsed:
+                            tag_match = _voice_tts_tag_re.match(_voice_sentence_buf)
+                            if tag_match:
+                                instruct = tag_match.group(1).strip()
+                                voice_sentence_callback(f"__tts_instruct:{instruct}")
+                                _voice_sentence_buf = _voice_sentence_buf[tag_match.end():]
+                                _voice_tts_instruct_parsed = True
+                            elif len(_voice_sentence_buf) > 80:
+                                # No tag found after 80 chars — give up waiting
+                                _voice_tts_instruct_parsed = True
+
                         # Check for sentence boundaries
                         parts = _voice_sentence_re.split(_voice_sentence_buf)
                         if len(parts) > 1:
-                            # All but last are complete sentences
                             for sentence in parts[:-1]:
                                 sentence = sentence.strip()
                                 if sentence:
