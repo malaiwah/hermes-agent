@@ -153,6 +153,7 @@ class VoiceReceiver:
         # causing the first real utterance to include garbage audio.
         self._startup_grace = 3.0
         self._start_time: float = 0.0
+        self._grace_ended = False
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -258,8 +259,24 @@ class VoiceReceiver:
         # Startup grace period: drop all packets for the first N seconds
         # after connection to let Discord voice stabilize.  Early packets
         # contain codec warmup artifacts that produce empty STT results.
-        if self._start_time and (time.monotonic() - self._start_time) < self._startup_grace:
-            return
+        # During the grace period, Opus decoders may receive garbled data
+        # (e.g. DAVE ciphertext before SSRC→user mapping) which corrupts
+        # their internal state.  We drop all packets AND reset decoders
+        # when the grace period ends so the first real frame starts clean.
+        if self._start_time:
+            _elapsed = time.monotonic() - self._start_time
+            if _elapsed < self._startup_grace:
+                return
+            if not getattr(self, "_grace_ended", False):
+                # Grace period just ended — reset decoder state
+                with self._lock:
+                    self._decoders.clear()
+                    self._buffers.clear()
+                    self._last_packet_time.clear()
+                    self._rms_sum.clear()
+                    self._rms_count.clear()
+                self._grace_ended = True
+                logger.info("Voice: startup grace period ended, decoders reset")
 
         # During playback: only process packets for barge-in detection
         # after the guard period has elapsed.
