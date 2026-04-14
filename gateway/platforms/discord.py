@@ -540,7 +540,7 @@ class VoiceReceiver:
                     output_path,
                 ],
                 check=True,
-                timeout=10,
+                timeout=30,
             )
         finally:
             try:
@@ -1457,19 +1457,6 @@ class DiscordAdapter(BasePlatformAdapter):
                         logger.info("Voice: dropping utterance from unauthorized user %d (%.1fs)", user_id, buf_dur)
                         continue
                     logger.info("Voice: processing utterance from user %d (%.1fs PCM)", user_id, buf_dur)
-
-                    # Debug: save raw utterance PCM to /opt/data for analysis
-                    try:
-                        import datetime as _dt
-                        _ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-                        _dbg_dir = "/opt/data/voice-debug"
-                        os.makedirs(_dbg_dir, exist_ok=True)
-                        _dbg_path = os.path.join(_dbg_dir, f"utterance_{_ts}_{user_id}.wav")
-                        VoiceReceiver.pcm_to_wav(pcm_data, _dbg_path)
-                        logger.info("Voice: saved debug WAV to %s", _dbg_path)
-                    except Exception as _e:
-                        logger.debug("Voice: failed to save debug WAV: %s", _e)
-
                     await self._process_voice_input(guild_id, user_id, pcm_data)
         except asyncio.CancelledError:
             pass
