@@ -5281,13 +5281,35 @@ class GatewayRunner:
         if not text_ch_id:
             return
 
+        # Build a SessionSource that matches what a typed message in the
+        # same Discord channel would produce — otherwise voice input and
+        # text input produce different session keys and the agent sees
+        # two parallel conversations for the same chat (e.g. images
+        # uploaded via text never reach the voice-input session).
+        _chat_type = "channel"
+        _thread_id = None
+        _chat_name = None
+        try:
+            _ch = adapter._client.get_channel(text_ch_id)
+            if _ch is not None:
+                # Discord thread subtypes: PublicThread, PrivateThread, NewsThread
+                import discord as _discord
+                if isinstance(_ch, getattr(_discord, "Thread", type(None))):
+                    _chat_type = "thread"
+                    _thread_id = str(_ch.id)
+                _chat_name = getattr(_ch, "name", None)
+        except Exception:
+            pass
+
         # Check authorization before processing voice input
         source = SessionSource(
             platform=Platform.DISCORD,
             chat_id=str(text_ch_id),
             user_id=str(user_id),
             user_name=str(user_id),
-            chat_type="channel",
+            chat_type=_chat_type,
+            thread_id=_thread_id,
+            chat_name=_chat_name,
         )
         if not self._is_user_authorized(source):
             logger.debug("Unauthorized voice input from user %d, ignoring", user_id)
