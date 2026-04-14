@@ -80,7 +80,7 @@ def check_discord_requirements() -> bool:
     return DISCORD_AVAILABLE
 
 
-class StreamingPCMAudioSource:
+class StreamingPCMAudioSource(discord.AudioSource if DISCORD_AVAILABLE else object):
     """Discord AudioSource that reads PCM from a TTS PCM stream.
 
     Reads 24kHz mono int16 PCM chunks from an HTTP stream, upsamples to
