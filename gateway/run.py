@@ -3428,7 +3428,16 @@ class GatewayRunner:
                     "to the conversation. Examples:\n"
                     "  [tts: Warm and friendly, moderate pace]\n"
                     "  [tts: Excited and enthusiastic, faster pace]\n"
-                    "  [tts: Calm and steady, moderate pace]]\n\n"
+                    "  [tts: Calm and steady, moderate pace]\n"
+                    "VOICE FEEDBACK: If you need to use tools before answering "
+                    "(web search, code execution, file reads, etc.), FIRST call "
+                    "send_user_message with a brief spoken acknowledgment so the "
+                    "user knows you heard them and are working. Keep it natural "
+                    "and short (one sentence). Between multiple tool calls, use "
+                    "send_user_message again to give progress updates. Examples:\n"
+                    "  send_user_message('Let me look that up for you.')\n"
+                    "  send_user_message('Found some results, digging deeper.')\n"
+                    "  send_user_message('Almost done, just verifying the details.')]\n\n"
                     + message_text
                 )
 
@@ -7611,6 +7620,7 @@ class GatewayRunner:
             if not _status_adapter or not message:
                 return
             try:
+                # Send text message
                 asyncio.run_coroutine_threadsafe(
                     _status_adapter.send(
                         _status_chat_id,
@@ -7619,6 +7629,65 @@ class GatewayRunner:
                     ),
                     _loop_for_step,
                 )
+
+                # Voice mode: also generate TTS and play the message
+                # so the user hears progress updates while the agent works.
+                if (source.platform == Platform.DISCORD
+                        and hasattr(_status_adapter, "play_pcm_stream_in_voice_channel")
+                        and hasattr(_status_adapter, "_voice_text_channels")):
+                    _gid = None
+                    for gid, tch in _status_adapter._voice_text_channels.items():
+                        if str(tch) == _status_chat_id and _status_adapter.is_in_voice_channel(gid):
+                            _gid = gid
+                            break
+                    if _gid:
+                        async def _play_voice_update():
+                            try:
+                                from tools.tts_tool import _load_tts_config, _get_provider, _preprocess_tts_text
+                                _cfg = _load_tts_config()
+                                if _get_provider(_cfg) != "qwen3":
+                                    return
+                                _qc = _cfg.get("qwen3", {})
+                                _base = _qc.get("base_url", "http://localhost:8001")
+                                _voice = _qc.get("voice", "ryan")
+                                _instruct = _qc.get("instruct", "")
+                                _clean = _preprocess_tts_text(message[:200])
+                                if not _clean:
+                                    return
+
+                                from urllib.parse import urlencode as _ue
+                                from urllib.request import Request as _Req, urlopen as _uopen
+                                _p = {"text": _clean, "voice": _voice, "chunk_size": "4"}
+                                if _instruct:
+                                    _p["instruct"] = _instruct
+                                _url = f"{_base.rstrip('/')}/v1/audio/speech/pcm-stream?{_ue(_p)}"
+
+                                from gateway.platforms.discord import StreamingPCMAudioSource
+                                _src = StreamingPCMAudioSource()
+
+                                def _feed():
+                                    try:
+                                        _req = _Req(_url, method="POST", headers={"Content-Length": "0"})
+                                        with _uopen(_req, timeout=30) as _resp:
+                                            while True:
+                                                _hdr = _resp.read(4)
+                                                if not _hdr or len(_hdr) < 4: break
+                                                _clen = struct.unpack(">I", _hdr)[0]
+                                                if _clen == 0: break
+                                                _pcm = _resp.read(_clen)
+                                                if len(_pcm) < _clen: break
+                                                _src.feed(_pcm)
+                                    except Exception:
+                                        pass
+                                    finally:
+                                        _src.finish()
+
+                                _loop_for_step.run_in_executor(None, _feed)
+                                await _status_adapter.play_pcm_stream_in_voice_channel(_gid, _src)
+                            except Exception as _ve:
+                                logger.debug("Voice update TTS failed: %s", _ve)
+
+                        asyncio.run_coroutine_threadsafe(_play_voice_update(), _loop_for_step)
             except Exception as _e:
                 logger.debug("message_callback error: %s", _e)
 
