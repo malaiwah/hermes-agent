@@ -642,6 +642,9 @@ class BasePlatformAdapter(ABC):
         # Chats where typing indicator is paused (e.g. during approval waits).
         # _keep_typing skips send_typing when the chat_id is in this set.
         self._typing_paused: set = set()
+        # Per-chat last TTS instruct — carried forward to next turn so tone
+        # transitions naturally instead of resetting to the config default.
+        self._last_tts_instruct: Dict[str, str] = {}
 
     @property
     def has_fatal_error(self) -> bool:
@@ -1453,10 +1456,14 @@ class BasePlatformAdapter(ABC):
 
                 # Always strip [tts: ...] tags from text before display,
                 # regardless of whether streaming TTS already handled audio.
+                # Also extract and save the instruct for carry-forward.
+                _extracted_instruct = None
                 if event.message_type == MessageType.VOICE and text_content:
                     import re as _tts_strip_re
-                    # Strip [tts: ...] tags from anywhere in the text
-                    # (LLM may output at start or end of response)
+                    _tag = _tts_strip_re.search(r'\[tts:\s*(.+?)\]', text_content)
+                    if _tag:
+                        _extracted_instruct = _tag.group(1).strip()
+                        self._last_tts_instruct[event.source.chat_id] = _extracted_instruct
                     text_content = _tts_strip_re.sub(
                         r'\[tts:\s*.+?\]\s*', '', text_content,
                     ).strip()
@@ -1490,10 +1497,15 @@ class BasePlatformAdapter(ABC):
                             _tts_cfg = _load_tts_config()
                             _tts_provider = _get_provider(_tts_cfg)
 
-                            # Override config instruct with LLM-generated one
-                            if _dynamic_instruct:
+                            # Override config instruct: use LLM tag if present,
+                            # else carry forward last turn's instruct, else config default.
+                            _effective_instruct = (
+                                _extracted_instruct
+                                or self._last_tts_instruct.get(event.source.chat_id)
+                            )
+                            if _effective_instruct:
                                 qwen_cfg = _tts_cfg.get("qwen3", _tts_cfg.get("openai", {}))
-                                qwen_cfg["instruct"] = _dynamic_instruct
+                                qwen_cfg["instruct"] = _effective_instruct
 
                             if _tts_provider == "qwen3":
                                 # PCM streaming: send FULL text to one TTS call so

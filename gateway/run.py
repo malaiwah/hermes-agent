@@ -3416,19 +3416,31 @@ class GatewayRunner:
             # config signature and invalidate the prompt/KV cache on every
             # voice↔text alternation.
             if event.message_type == MessageType.VOICE:
+                # Get the current/last TTS instruct for context
+                _adapter_for_instruct = self.adapters.get(event.source.platform)
+                _last_instruct = ""
+                if _adapter_for_instruct and hasattr(_adapter_for_instruct, "_last_tts_instruct"):
+                    _last_instruct = _adapter_for_instruct._last_tts_instruct.get(event.source.chat_id, "")
+                if not _last_instruct:
+                    try:
+                        from tools.tts_tool import _load_tts_config
+                        _li_cfg = _load_tts_config().get("qwen3", {})
+                        _last_instruct = _li_cfg.get("instruct", "Speak naturally at a steady conversational pace.")
+                    except Exception:
+                        _last_instruct = "Speak naturally at a steady conversational pace."
+
                 message_text = (
                     "[Voice mode: The user is speaking via voice and your response "
                     "will be converted to live speech. Keep your response concise "
                     "(1-3 sentences). Do not use emojis or special characters. "
                     "Avoid markdown formatting, code blocks, and tables.\n"
-                    "IMPORTANT: Start your reply with a TTS voice direction tag on "
-                    "its own line BEFORE your response text:\n"
+                    f"Current voice direction: {_last_instruct}\n"
+                    "Start your reply with a TTS voice direction tag on its own "
+                    "line BEFORE your response text (only if the tone should "
+                    "change from the current direction):\n"
                     "[tts: <brief description of tone and pace>]\n"
                     "Then your response on the next line. Match the emotional tone "
-                    "to the conversation. Examples:\n"
-                    "  [tts: Warm and friendly, moderate pace]\n"
-                    "  [tts: Excited and enthusiastic, faster pace]\n"
-                    "  [tts: Calm and steady, moderate pace]\n"
+                    "to the conversation. Omit the tag to keep the current voice.\n"
                     "VOICE FEEDBACK: If you need to use tools before answering "
                     "(web search, code execution, file reads, etc.), FIRST call "
                     "send_user_message with a brief spoken acknowledgment so the "
