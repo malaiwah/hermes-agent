@@ -4182,7 +4182,20 @@ class GatewayRunner:
             if idle_prompt or model:
                 try:
                     from agent.model_metadata import get_model_context_length
-                    context_limit = get_model_context_length(str(model or "unknown"))
+                    _idle_cfg = _load_gateway_config()
+                    _idle_model_cfg = _idle_cfg.get("model", {}) if isinstance(_idle_cfg, dict) else {}
+                    _idle_ctx = None
+                    if isinstance(_idle_model_cfg, dict):
+                        _raw = _idle_model_cfg.get("context_length")
+                        if _raw is not None:
+                            try:
+                                _idle_ctx = int(_raw)
+                            except (TypeError, ValueError):
+                                pass
+                    context_limit = get_model_context_length(
+                        str(model or "unknown"),
+                        config_context_length=_idle_ctx,
+                    )
                 except Exception:
                     context_limit = None
                 if idle_prompt:
