@@ -7251,8 +7251,10 @@ class GatewayRunner:
                 if result["success"]:
                     transcript = result["transcript"]
                     enriched_parts.append(
-                        f'[The user sent a voice message~ '
-                        f'Here\'s what they said: "{transcript}"]'
+                        f'[The user sent a voice message (audio file: {path})~ '
+                        f'Here\'s what they said: "{transcript}". '
+                        f'The audio_path can be passed to register_voice_clone with '
+                        f'ref_text="{transcript}" to create a voice clone.]'
                     )
                     # Propagate detected language to the adapter so the
                     # TTS reply uses the matching voice/config (e.g.
