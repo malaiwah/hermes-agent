@@ -645,10 +645,11 @@ class BasePlatformAdapter(ABC):
         # Per-chat last TTS instruct — carried forward to next turn so tone
         # transitions naturally instead of resetting to the config default.
         self._last_tts_instruct: Dict[str, str] = {}
-        # Per-chat active voice clone ID — set via [voice: vc_XXXX] tag in the
-        # LLM response after register_voice_clone; persists across turns so the
-        # cloned voice carries forward without the agent repeating the tag.
-        # Cleared on /voice leave.  Empty string = use config default.
+        # Per-chat active TTS voice — set via [voice: <id>] tag in the LLM
+        # response; accepts preset names (vivian, serena, …) and custom clone
+        # IDs (vc_XXXX).  Persists across turns so the voice carries forward
+        # without the agent repeating the tag.  Cleared on /voice leave.
+        # Empty string = use config default.
         self._last_tts_voice: Dict[str, str] = {}
         # Per-chat last detected ASR language (e.g. "English", "French")
         # — used to pick matching TTS voice/config so replies match input.
@@ -1494,10 +1495,15 @@ class BasePlatformAdapter(ABC):
                     )
                     if _voice_tag:
                         _extracted_voice_id = _voice_tag.group(1).strip()
-                        # Validate format — only persist well-formed clone IDs
-                        # (vc_ prefix + at least 8 hex chars) to prevent prompt-
-                        # injection via ASR transcripts activating arbitrary IDs.
-                        if _tts_strip_re.fullmatch(r'vc_[0-9a-f]{8,}', _extracted_voice_id):
+                        # Validate format — accept well-formed clone IDs
+                        # (vc_ prefix + at least 8 hex chars) AND preset voice
+                        # names (lowercase alphanumeric + underscore, 1–32 chars,
+                        # e.g. vivian, serena, sohee) to prevent ASR injection
+                        # activating arbitrary strings.  Both forms are only ever
+                        # forwarded as a TTS server query param, never used for
+                        # filesystem access.
+                        _VALID_VOICE = r'vc_[0-9a-f]{8,}|[a-z][a-z0-9_]{0,31}'
+                        if _tts_strip_re.fullmatch(_VALID_VOICE, _extracted_voice_id):
                             self._last_tts_voice[event.source.chat_id] = _extracted_voice_id
                             logger.info(
                                 "[%s] Active TTS voice set to %s for chat %s",
