@@ -925,9 +925,11 @@ class DiscordAdapter(BasePlatformAdapter):
                     # If an allowed bot sends a message containing only [SILENT],
                     # drop it without routing to the agent. This lets either bot
                     # end the exchange cleanly without triggering a reply.
-                    # Strip common markdown wrappers (backticks, bold, italic)
-                    # that LLMs may add around the token.
-                    _silent_check = message.content.strip().strip("`").strip("*").strip("_").strip()
+                    # Strip @mentions (required when allow_bots=mentions forces the
+                    # sender to include an @mention just to pass the gate) and
+                    # common markdown wrappers that LLMs may add around the token.
+                    import re as _re
+                    _silent_check = _re.sub(r"<@!?\d+>", "", message.content).strip().strip("`").strip("*").strip("_").strip()
                     if _silent_check == "[SILENT]":
                         logger.debug("[%s] Dropping [SILENT] terminator from bot %s", self.name, message.author.id)
                         return
