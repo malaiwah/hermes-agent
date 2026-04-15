@@ -687,13 +687,16 @@ def text_to_speech_tool(
                 "error": f"TTS generation produced no output (provider: {provider})"
             }, ensure_ascii=False)
 
-        # Try Opus conversion for Telegram compatibility
-        # Edge TTS outputs MP3, NeuTTS outputs WAV — both need ffmpeg conversion
+        # Try Opus conversion for Telegram voice-bubble compatibility.
+        # Edge TTS / NeuTTS / Qwen3 output MP3/WAV → convert to OGG Opus.
         voice_compatible = False
-        if provider in ("edge", "neutts", "minimax") and not file_str.endswith(".ogg"):
+        if provider in ("edge", "neutts", "minimax", "qwen3") and not file_str.endswith(".ogg"):
             opus_path = _convert_to_opus(file_str)
             if opus_path:
                 file_str = opus_path
+                voice_compatible = True
+            else:
+                # ffmpeg unavailable but Discord can play MP3 as audio attachment
                 voice_compatible = True
         elif provider in ("elevenlabs", "openai"):
             # These providers can output Opus natively if the path ends in .ogg
