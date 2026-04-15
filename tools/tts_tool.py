@@ -278,6 +278,7 @@ def _generate_qwen3_tts(
     tts_config: Dict[str, Any],
     language: str = None,
     voice_override: str = None,
+    instruct_override: str = None,
 ) -> str:
     """Generate audio using Qwen3-TTS.
 
@@ -291,6 +292,9 @@ def _generate_qwen3_tts(
     When ``voice_override`` is provided it takes precedence over the
     config-resolved voice (preset name, OpenAI alias, or custom clone ID
     like ``vc_e87c8ed1``).
+
+    When ``instruct_override`` is provided it replaces the config-resolved
+    instruct string (e.g. "excited and enthusiastic", "sad and slow").
     """
     from urllib.parse import urlencode
     from urllib.request import Request, urlopen
@@ -313,7 +317,7 @@ def _generate_qwen3_tts(
         "voice": voice,
         "response_format": response_format,
     }
-    instruct = qwen_config.get("instruct", "")
+    instruct = instruct_override or qwen_config.get("instruct", "")
     if instruct:
         params_dict["instruct"] = instruct
     _lang_for_tts = language or qwen_config.get("language")
@@ -551,6 +555,7 @@ def text_to_speech_tool(
     text: str,
     output_path: Optional[str] = None,
     voice: Optional[str] = None,
+    instruct: Optional[str] = None,
 ) -> str:
     """
     Convert text to speech audio.
@@ -569,6 +574,11 @@ def text_to_speech_tool(
                or a custom clone ID returned by register_voice_clone
                (e.g. ``vc_e87c8ed1``).  When omitted the user-configured
                voice/language defaults apply.
+        instruct: Optional speaking style/emotion instruction for Qwen3 TTS
+                  (e.g. "excited and enthusiastic", "sad and slow",
+                  "warm and friendly, moderate pace").  Overrides the
+                  per-language instruct set in config.  Ignored by other
+                  providers.
 
     Returns:
         str: JSON result with success, file_path, and optionally MEDIA tag.
@@ -624,7 +634,7 @@ def text_to_speech_tool(
 
         elif provider == "qwen3":
             logger.info("Generating speech with Qwen3-TTS...")
-            _generate_qwen3_tts(text, file_str, tts_config, voice_override=voice)
+            _generate_qwen3_tts(text, file_str, tts_config, voice_override=voice, instruct_override=instruct)
 
         elif provider == "openai":
             try:
@@ -1396,6 +1406,16 @@ TTS_SCHEMA = {
                     "or a custom clone ID returned by register_voice_clone (e.g. vc_e87c8ed1). "
                     "When omitted the user-configured voice default applies."
                 )
+            },
+            "instruct": {
+                "type": "string",
+                "description": (
+                    "Speaking style or emotion instruction for Qwen3 TTS. "
+                    "Short natural-language phrase describing how to deliver the speech. "
+                    "Examples: 'excited and enthusiastic', 'sad and slow', "
+                    "'warm and friendly, moderate pace', 'whispering, tense'. "
+                    "Overrides the per-language instruct in config. Ignored by other providers."
+                )
             }
         },
         "required": ["text"]
@@ -1409,7 +1429,8 @@ registry.register(
     handler=lambda args, **kw: text_to_speech_tool(
         text=args.get("text", ""),
         output_path=args.get("output_path"),
-        voice=args.get("voice")),
+        voice=args.get("voice"),
+        instruct=args.get("instruct")),
     check_fn=check_tts_requirements,
     emoji="🔊",
 )
