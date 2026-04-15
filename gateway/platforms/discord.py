@@ -2805,7 +2805,15 @@ class DiscordAdapter(BasePlatformAdapter):
 
             # Skip the mention check if the message is in a thread where
             # the bot has previously participated (auto-created or replied in).
-            in_bot_thread = is_thread and thread_id in self._bot_participated_threads
+            # Exception: bots always require an explicit @mention regardless of
+            # thread participation — the thread bypass must not apply bot→bot,
+            # as it would silently re-open chains after [SILENT] or loop on any
+            # bot message in a thread Angelos has replied to before.
+            in_bot_thread = (
+                is_thread
+                and thread_id in self._bot_participated_threads
+                and not message.author.bot
+            )
 
             if require_mention and not is_free_channel and not in_bot_thread:
                 if self._client.user not in message.mentions:
