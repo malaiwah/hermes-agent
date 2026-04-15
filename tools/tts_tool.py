@@ -345,6 +345,12 @@ def _generate_qwen3_tts(
                 "The voice ID is not registered on the TTS server. "
                 "Use register_voice_clone to register it first, then retry."
             ) from exc
+        if exc.code == 500:
+            raise ValueError(
+                f"TTS server error (HTTP 500) while synthesising with voice '{voice}'. "
+                "The voice clone may be corrupted. "
+                "Try a different voice or re-register the clone with register_voice_clone."
+            ) from exc
         raise
 
     return output_path
