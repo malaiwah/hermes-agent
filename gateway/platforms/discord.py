@@ -921,6 +921,14 @@ class DiscordAdapter(BasePlatformAdapter):
                             return
                     # "all" falls through to handle_message
 
+                    # [SILENT] — bot-to-bot chain terminator.
+                    # If an allowed bot sends a message containing only [SILENT],
+                    # drop it without routing to the agent. This lets either bot
+                    # end the exchange cleanly without triggering a reply.
+                    if message.content.strip() == "[SILENT]":
+                        logger.debug("[%s] Dropping [SILENT] terminator from bot %s", self.name, message.author.id)
+                        return
+
                 # If the message @mentions other users but NOT the bot, the
                 # sender is talking to someone else — stay silent.  Only
                 # applies in server channels; in DMs the user is always
