@@ -501,7 +501,8 @@ def _transcribe_openai(file_path: str, model_name: str) -> Dict[str, Any]:
         from openai import OpenAI, APIError, APIConnectionError, APITimeoutError
         client = OpenAI(api_key=api_key, base_url=base_url, timeout=30, max_retries=0)
         try:
-            # Language hint from config (e.g. "en" or "fr") improves accuracy
+            # Language hint from config (e.g. "en", "fr", or full "French") improves accuracy.
+            # Normalise to ISO 639-1 code — vLLM qwen-asr-serve validates against short codes.
             openai_cfg = _load_stt_config().get("openai", {})
             language = openai_cfg.get("language")
 
@@ -510,7 +511,7 @@ def _transcribe_openai(file_path: str, model_name: str) -> Dict[str, Any]:
                 "response_format": "text" if model_name == "whisper-1" else "json",
             }
             if language:
-                create_kwargs["language"] = language
+                create_kwargs["language"] = _normalize_language_code(language)
 
             with open(file_path, "rb") as audio_file:
                 create_kwargs["file"] = audio_file
@@ -889,6 +890,47 @@ def _extract_transcript_text(transcription: Any) -> str:
     """Normalize text and JSON transcription responses to a plain string."""
     text, _ = _extract_transcript_text_and_language(transcription)
     return text
+
+
+# Map full language names returned by Qwen3-ASR → ISO 639-1 codes accepted
+# by ASR backends (Whisper, vLLM qwen-asr-serve).  When a language hint is
+# passed as a form field to /v1/audio/transcriptions, most backends require
+# the short code.  The TTS path uses full names (e.g. "French") — they are
+# kept unchanged; only the STT `language=` param is normalised.
+_LANG_NAME_TO_ISO: dict = {
+    "afrikaans": "af", "arabic": "ar", "armenian": "hy", "azerbaijani": "az",
+    "belarusian": "be", "bosnian": "bs", "bulgarian": "bg", "catalan": "ca",
+    "chinese": "zh", "mandarin": "zh", "croatian": "hr", "czech": "cs",
+    "danish": "da", "dutch": "nl", "english": "en", "estonian": "et",
+    "finnish": "fi", "french": "fr", "galician": "gl", "german": "de",
+    "greek": "el", "hebrew": "he", "hindi": "hi", "hungarian": "hu",
+    "icelandic": "is", "indonesian": "id", "italian": "it", "japanese": "ja",
+    "kannada": "kn", "kazakh": "kk", "korean": "ko", "latvian": "lv",
+    "lithuanian": "lt", "macedonian": "mk", "malay": "ms", "marathi": "mr",
+    "maori": "mi", "nepali": "ne", "norwegian": "no", "persian": "fa",
+    "polish": "pl", "portuguese": "pt", "romanian": "ro", "russian": "ru",
+    "serbian": "sr", "slovak": "sk", "slovenian": "sl", "spanish": "es",
+    "swahili": "sw", "swedish": "sv", "tagalog": "tl", "tamil": "ta",
+    "thai": "th", "turkish": "tr", "ukrainian": "uk", "urdu": "ur",
+    "vietnamese": "vi", "welsh": "cy",
+}
+
+
+def _normalize_language_code(lang: str) -> str:
+    """Return the ISO 639-1 code for a language name or passthrough if already short.
+
+    Examples:
+        "French"  → "fr"
+        "English" → "en"
+        "fr"      → "fr"   (already a code — unchanged)
+        "zh-CN"   → "zh-CN"  (regional tag — passed through)
+    """
+    if not lang:
+        return lang
+    if len(lang) <= 3 and lang.isalpha():
+        # Already looks like a code (en, fr, zh, …) — normalise to lowercase.
+        return lang.lower()
+    return _LANG_NAME_TO_ISO.get(lang.lower(), lang)
 
 
 def _extract_transcript_text_and_language(transcription: Any) -> tuple:

@@ -272,7 +272,13 @@ def _resolve_qwen3_config(tts_config: Dict[str, Any], language: str = None) -> D
     return base
 
 
-def _generate_qwen3_tts(text: str, output_path: str, tts_config: Dict[str, Any], language: str = None) -> str:
+def _generate_qwen3_tts(
+    text: str,
+    output_path: str,
+    tts_config: Dict[str, Any],
+    language: str = None,
+    voice_override: str = None,
+) -> str:
     """Generate audio using Qwen3-TTS.
 
     Qwen3-TTS uses a query-parameter API (``/v1/audio/speech?text=...&voice=...``)
@@ -281,13 +287,17 @@ def _generate_qwen3_tts(text: str, output_path: str, tts_config: Dict[str, Any],
 
     When ``language`` is provided (e.g. "English", "French"), applies
     per-language voice/instruct overrides from ``tts.qwen3.languages``.
+
+    When ``voice_override`` is provided it takes precedence over the
+    config-resolved voice (preset name, OpenAI alias, or custom clone ID
+    like ``vc_e87c8ed1``).
     """
     from urllib.parse import urlencode
     from urllib.request import Request, urlopen
 
     qwen_config = _resolve_qwen3_config(tts_config, language)
     base_url = qwen_config.get("base_url", "http://localhost:8001")
-    voice = qwen_config.get("voice", "ryan")
+    voice = voice_override or qwen_config.get("voice", "ryan")
     timeout = int(qwen_config.get("timeout", 120))
 
     # Determine response format from extension
@@ -540,12 +550,12 @@ def _generate_neutts(text: str, output_path: str, tts_config: Dict[str, Any]) ->
 def text_to_speech_tool(
     text: str,
     output_path: Optional[str] = None,
+    voice: Optional[str] = None,
 ) -> str:
     """
     Convert text to speech audio.
 
     Reads provider/voice config from ~/.hermes/config.yaml (tts: section).
-    The model sends text; the user configures voice and provider.
 
     On messaging platforms, the returned MEDIA:<path> tag is intercepted
     by the send pipeline and delivered as a native voice message.
@@ -553,7 +563,12 @@ def text_to_speech_tool(
 
     Args:
         text: The text to convert to speech.
-        output_path: Optional custom save path. Defaults to ~/voice-memos/<timestamp>.mp3
+        output_path: Optional custom file path. Defaults to ~/voice-memos/<timestamp>.mp3
+        voice: Optional voice ID override for Qwen3 provider.  Accepts preset
+               names (ryan, aiden, vivian, …), OpenAI aliases (alloy, echo, …),
+               or a custom clone ID returned by register_voice_clone
+               (e.g. ``vc_e87c8ed1``).  When omitted the user-configured
+               voice/language defaults apply.
 
     Returns:
         str: JSON result with success, file_path, and optionally MEDIA tag.
@@ -609,7 +624,7 @@ def text_to_speech_tool(
 
         elif provider == "qwen3":
             logger.info("Generating speech with Qwen3-TTS...")
-            _generate_qwen3_tts(text, file_str, tts_config)
+            _generate_qwen3_tts(text, file_str, tts_config, voice_override=voice)
 
         elif provider == "openai":
             try:
@@ -1219,6 +1234,137 @@ if __name__ == "__main__":
     print(f"  Configured provider: {provider}")
 
 
+# ===========================================================================
+# Voice clone registration (Qwen3-TTS /v1/voices)
+# ===========================================================================
+
+def register_voice_clone(
+    name: str,
+    audio_path: str,
+    ref_text: Optional[str] = None,
+    language: str = "English",
+) -> str:
+    """Register a new custom voice clone on the Qwen3-TTS server.
+
+    Uploads a reference audio clip (WAV, MP3, M4A, OGG, FLAC, Opus …) to
+    ``POST /v1/voices``.  The server extracts the speaker embedding; if
+    ``ref_text`` matches the spoken content it enables full ICL mode
+    (prosody-conditioned, closer clone).  Without ``ref_text`` the server
+    falls back to x-vector-only mode (still usable, slightly less expressive).
+
+    The returned voice ID (e.g. ``vc_e87c8ed1``) can be passed as ``voice``
+    to ``text_to_speech_tool`` or stored for later use.
+
+    Args:
+        name:       Human-friendly label for the voice (e.g. "Victor-Éliot").
+        audio_path: Local path to the reference audio file.  Accepts any
+                    format supported by the server (WAV, MP3, M4A, OGG, Opus,
+                    FLAC).  3–30 s of clean speech recommended.
+        ref_text:   Verbatim transcript of the reference clip.  Strongly
+                    recommended — enables full ICL mode.  If omitted and the
+                    server has an ASR sibling configured, it will
+                    auto-transcribe; otherwise x-vector-only mode is used.
+        language:   Spoken language in the clip (e.g. "English", "French").
+                    Used as a hint for auto-transcription and for voice
+                    selection when the returned ID is used with TTS.
+
+    Returns:
+        JSON string with ``id`` (voice ID), ``name``, ``kind``, and
+        ``instructions`` on how to use the voice.
+    """
+    import mimetypes
+    import uuid as _uuid
+    from urllib.request import Request, urlopen
+    from urllib.error import HTTPError
+
+    audio_path_obj = Path(audio_path).expanduser()
+    if not audio_path_obj.is_file():
+        return tool_error(f"Audio file not found: {audio_path}", success=False)
+
+    tts_config = _load_tts_config()
+    if _get_provider(tts_config) != "qwen3":
+        return tool_error(
+            "register_voice_clone requires the qwen3 TTS provider. "
+            f"Current provider: {_get_provider(tts_config)}",
+            success=False,
+        )
+
+    qwen_config = tts_config.get("qwen3", {})
+    base_url = qwen_config.get("base_url", "http://localhost:8001").rstrip("/")
+    timeout = int(qwen_config.get("timeout", 120))
+    api_key = os.getenv("QWEN_API_KEY", "")
+
+    # Build multipart/form-data body using stdlib only.
+    boundary = _uuid.uuid4().hex
+    CRLF = b"\r\n"
+
+    def _field(name_: str, value: str) -> bytes:
+        return (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="{name_}"\r\n\r\n'
+            f"{value}\r\n"
+        ).encode()
+
+    suffix = audio_path_obj.suffix.lower()
+    mime_type = mimetypes.guess_type(str(audio_path_obj))[0] or "application/octet-stream"
+    audio_data = audio_path_obj.read_bytes()
+    filename = audio_path_obj.name
+
+    body = b""
+    body += _field("name", name)
+    body += _field("language", language)
+    if ref_text and ref_text.strip():
+        body += _field("ref_text", ref_text.strip())
+    # File field
+    body += (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="audio"; filename="{filename}"\r\n'
+        f"Content-Type: {mime_type}\r\n\r\n"
+    ).encode()
+    body += audio_data + CRLF
+    body += f"--{boundary}--\r\n".encode()
+
+    headers = {
+        "Content-Type": f"multipart/form-data; boundary={boundary}",
+        "Content-Length": str(len(body)),
+    }
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    req = Request(f"{base_url}/v1/voices", data=body, headers=headers, method="POST")
+    try:
+        with urlopen(req, timeout=timeout) as resp:
+            result = json.loads(resp.read())
+    except HTTPError as exc:
+        body_text = exc.read().decode(errors="replace")[:500]
+        return tool_error(
+            f"Voice registration failed (HTTP {exc.code}): {body_text}", success=False
+        )
+    except Exception as exc:
+        return tool_error(f"Voice registration failed: {exc}", success=False)
+
+    voice_id = result.get("id", "unknown")
+    mode = result.get("clone_mode", "ref_audio" if result.get("ref_audio_path") else "safetensors")
+    transcribed = result.get("auto_transcribed", False)
+
+    logger.info("Registered voice clone %s (%s) id=%s", name, language, voice_id)
+    return json.dumps({
+        "success": True,
+        "id": voice_id,
+        "name": result.get("name", name),
+        "kind": result.get("kind", "custom"),
+        "language": language,
+        "ref_text_provided": bool(ref_text and ref_text.strip()),
+        "auto_transcribed": transcribed,
+        "clone_mode": mode,
+        "instructions": (
+            f"Voice '{name}' registered as {voice_id}. "
+            f"Use voice='{voice_id}' in text_to_speech_tool to speak in this voice. "
+            f"Language hint: {language}."
+        ),
+    }, ensure_ascii=False)
+
+
 # ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
@@ -1237,6 +1383,16 @@ TTS_SCHEMA = {
             "output_path": {
                 "type": "string",
                 "description": "Optional custom file path to save the audio. Defaults to ~/.hermes/audio_cache/<timestamp>.mp3"
+            },
+            "voice": {
+                "type": "string",
+                "description": (
+                    "Voice to use for synthesis (Qwen3 provider only). "
+                    "Accepts preset names (ryan, aiden, dylan, eric, vivian, serena, sohee, ono_anna, uncle_fu), "
+                    "OpenAI aliases (alloy, echo, fable, onyx, nova, shimmer), "
+                    "or a custom clone ID returned by register_voice_clone (e.g. vc_e87c8ed1). "
+                    "When omitted the user-configured voice default applies."
+                )
             }
         },
         "required": ["text"]
@@ -1249,7 +1405,61 @@ registry.register(
     schema=TTS_SCHEMA,
     handler=lambda args, **kw: text_to_speech_tool(
         text=args.get("text", ""),
-        output_path=args.get("output_path")),
+        output_path=args.get("output_path"),
+        voice=args.get("voice")),
     check_fn=check_tts_requirements,
     emoji="🔊",
+)
+
+REGISTER_VOICE_CLONE_SCHEMA = {
+    "name": "register_voice_clone",
+    "description": (
+        "Register a new custom voice clone on the Qwen3-TTS server from a reference audio file. "
+        "Uploads a 3–30 s clip of clean speech; returns a voice ID (e.g. vc_e87c8ed1) that can be "
+        "passed as the `voice` parameter to text_to_speech. "
+        "Providing ref_text (verbatim transcript of the clip) enables full ICL mode for much closer cloning. "
+        "Only available when the qwen3 TTS provider is configured."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "Human-friendly label for the voice (e.g. 'Victor-Éliot', 'Alice')."
+            },
+            "audio_path": {
+                "type": "string",
+                "description": (
+                    "Absolute path to the reference audio file on the local filesystem. "
+                    "Accepts WAV, MP3, M4A, OGG, Opus, FLAC. 3–30 s of clean speech recommended."
+                )
+            },
+            "ref_text": {
+                "type": "string",
+                "description": (
+                    "Verbatim transcript of the reference clip in the original language. "
+                    "Strongly recommended — enables full ICL (prosody-conditioned) mode. "
+                    "If omitted, the server falls back to x-vector-only mode."
+                )
+            },
+            "language": {
+                "type": "string",
+                "description": "Language spoken in the clip, e.g. 'English' or 'French'. Default: English."
+            }
+        },
+        "required": ["name", "audio_path"]
+    }
+}
+
+registry.register(
+    name="register_voice_clone",
+    toolset="tts",
+    schema=REGISTER_VOICE_CLONE_SCHEMA,
+    handler=lambda args, **kw: register_voice_clone(
+        name=args["name"],
+        audio_path=args["audio_path"],
+        ref_text=args.get("ref_text"),
+        language=args.get("language", "English")),
+    check_fn=check_tts_requirements,
+    emoji="🎙️",
 )
