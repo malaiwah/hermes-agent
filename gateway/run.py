@@ -5326,9 +5326,13 @@ class GatewayRunner:
             return "Not in a voice channel."
 
         # ---- Farewell agent turn ----------------------------------------
-        # Let the agent say a brief goodbye BEFORE disconnecting so the TTS
-        # still has an active voice channel to stream into.  Await with a
-        # generous timeout; if the agent is slow we still disconnect cleanly.
+        # handle_message() spawns a background task and returns immediately,
+        # so awaiting it directly would let leave_voice_channel() run before
+        # the farewell audio plays (same session key = queued + interrupt set).
+        # Mirror the join-greeting pattern: create_task so the farewell runs
+        # after _process_message_background for /voice leave completes and
+        # frees the session.  Disconnect + cleanup happen inside the task so
+        # the voice channel stays open until the farewell TTS finishes.
         from types import SimpleNamespace as _SNS
         _farewell_event = MessageEvent(
             source=event.source,
@@ -5336,32 +5340,38 @@ class GatewayRunner:
             message_type=MessageType.VOICE,
             raw_message=_SNS(guild_id=guild_id, guild=None),
         )
-        try:
-            await asyncio.wait_for(
-                adapter.handle_message(_farewell_event),
-                timeout=30.0,
-            )
-        except asyncio.TimeoutError:
-            logger.warning("Voice farewell timed out — disconnecting anyway")
-        except Exception as _e:
-            logger.warning("Voice farewell failed: %s", _e)
+        _chat_id = event.source.chat_id
 
-        try:
-            await adapter.leave_voice_channel(guild_id)
-        except Exception as e:
-            logger.warning("Error leaving voice channel: %s", e)
-        # Always clean up state even if leave raised an exception
-        self._voice_mode[event.source.chat_id] = "off"
-        self._save_voice_modes()
-        self._set_adapter_auto_tts_disabled(adapter, event.source.chat_id, disabled=True)
-        if hasattr(adapter, "_voice_input_callback"):
-            adapter._voice_input_callback = None
-        # Clear per-session voice state so next join starts fresh.
-        if hasattr(adapter, "_last_tts_voice"):
-            adapter._last_tts_voice.pop(event.source.chat_id, None)
-        if hasattr(adapter, "_voice_primer_shown"):
-            adapter._voice_primer_shown.discard(event.source.chat_id)
-        return "Left voice channel."
+        async def _do_farewell_and_leave():
+            try:
+                await asyncio.wait_for(
+                    adapter.handle_message(_farewell_event),
+                    timeout=30.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Voice farewell timed out — disconnecting anyway")
+            except Exception as _e:
+                logger.warning("Voice farewell failed: %s", _e)
+            # Disconnect only after farewell has played.
+            try:
+                await adapter.leave_voice_channel(guild_id)
+            except Exception as _le:
+                logger.warning("Error leaving voice channel: %s", _le)
+            # Clean up runner-side state.
+            self._voice_mode[_chat_id] = "off"
+            self._save_voice_modes()
+            self._set_adapter_auto_tts_disabled(adapter, _chat_id, disabled=True)
+            if hasattr(adapter, "_voice_input_callback"):
+                adapter._voice_input_callback = None
+            if hasattr(adapter, "_last_tts_voice"):
+                adapter._last_tts_voice.pop(_chat_id, None)
+            if hasattr(adapter, "_voice_primer_shown"):
+                adapter._voice_primer_shown.discard(_chat_id)
+
+        asyncio.create_task(_do_farewell_and_leave())
+        # Return nothing — the farewell task owns all communication and
+        # will disconnect when it's done.
+        return ""
 
     def _handle_voice_timeout_cleanup(self, chat_id: str) -> None:
         """Called by the adapter when a voice channel times out.
