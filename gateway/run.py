@@ -5287,10 +5287,11 @@ class GatewayRunner:
             self._voice_background_tasks.add(_greeting_task)
             _greeting_task.add_done_callback(self._voice_background_tasks.discard)
 
-            return (
-                f"Joined voice channel **{voice_channel.name}**.\n"
-                f"I'll speak my replies and listen to you. Use /voice leave to disconnect."
-            )
+            # Return nothing — the greeting agent turn (above) owns all
+            # communication (text + audio).  Returning text here would trigger
+            # a second auto-TTS stream that races with the greeting and causes
+            # barge-in truncation mid-sentence.
+            return ""
         # Join failed — clear callback
         adapter._voice_input_callback = None
         return "Failed to join voice channel. Check bot permissions (Connect + Speak)."
@@ -5305,6 +5306,27 @@ class GatewayRunner:
 
         if not hasattr(adapter, "is_in_voice_channel") or not adapter.is_in_voice_channel(guild_id):
             return "Not in a voice channel."
+
+        # ---- Farewell agent turn ----------------------------------------
+        # Let the agent say a brief goodbye BEFORE disconnecting so the TTS
+        # still has an active voice channel to stream into.  Await with a
+        # generous timeout; if the agent is slow we still disconnect cleanly.
+        from types import SimpleNamespace as _SNS
+        _farewell_event = MessageEvent(
+            source=event.source,
+            text="[Voice channel leaving. Say a brief, genuine farewell.]",
+            message_type=MessageType.VOICE,
+            raw_message=_SNS(guild_id=guild_id, guild=None),
+        )
+        try:
+            await asyncio.wait_for(
+                adapter.handle_message(_farewell_event),
+                timeout=30.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Voice farewell timed out — disconnecting anyway")
+        except Exception as _e:
+            logger.warning("Voice farewell failed: %s", _e)
 
         try:
             await adapter.leave_voice_channel(guild_id)
