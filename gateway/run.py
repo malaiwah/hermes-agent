@@ -5102,8 +5102,11 @@ class GatewayRunner:
                 "Auto-TTS enabled.\n"
                 "All replies will include a voice message."
             )
-        elif args in ("channel", "join"):
-            return await self._handle_voice_channel_join(event)
+        elif args in ("channel", "join") or args.startswith(("channel ", "join ")):
+            # Optional voice argument: /voice channel <vc_id_or_alias>
+            _vcj_parts = args.split(None, 1)
+            _vcj_hint = _vcj_parts[1].strip() if len(_vcj_parts) > 1 else None
+            return await self._handle_voice_channel_join(event, voice_hint=_vcj_hint)
         elif args == "leave":
             return await self._handle_voice_channel_leave(event)
         elif args == "status":
@@ -5145,8 +5148,113 @@ class GatewayRunner:
                     self._set_adapter_auto_tts_disabled(adapter, chat_id, disabled=True)
                 return "Voice mode disabled."
 
-    async def _handle_voice_channel_join(self, event: MessageEvent) -> str:
-        """Join the user's current Discord voice channel."""
+    async def _llm_greeting(self, prompt: str, fallback: str) -> str:
+        """Make a stateless, history-free LLM call to generate a voice greeting.
+
+        Uses the gateway's configured model and credentials.  The result is
+        NOT stored in any session — it's a pure one-shot completion that runs
+        in a background thread so it doesn't block the event loop.
+
+        Falls back to ``fallback`` on any error so the TTS pipeline always
+        has something to say.
+        """
+        try:
+            model = _resolve_gateway_model()
+            runtime = _resolve_runtime_agent_kwargs()
+            api_mode = runtime.get("api_mode", "chat_completions")
+
+            def _call() -> str:
+                messages = [{"role": "user", "content": prompt}]
+                if api_mode == "anthropic_messages":
+                    import anthropic as _ant
+                    client = _ant.Anthropic(
+                        api_key=runtime.get("api_key") or "sk-placeholder",
+                        **({"base_url": runtime["base_url"]} if runtime.get("base_url") else {}),
+                    )
+                    resp = client.messages.create(
+                        model=model, max_tokens=120, messages=messages,
+                    )
+                    return resp.content[0].text.strip()
+                else:
+                    # OpenAI-compatible (LiteLLM proxy, local vLLM, etc.)
+                    import openai as _oai
+                    client = _oai.OpenAI(
+                        api_key=runtime.get("api_key") or "sk-placeholder",
+                        base_url=runtime.get("base_url") or "http://hermes-litellm:4000/v1",
+                        timeout=12.0,
+                    )
+                    resp = client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        max_tokens=120,
+                        temperature=0.8,
+                    )
+                    return resp.choices[0].message.content.strip()
+
+            # Return raw text — the caller (_speak_greeting) preprocesses it
+            # with the correct detected language via _preprocess_tts_text.
+            return await asyncio.wait_for(
+                asyncio.to_thread(_call), timeout=15.0
+            ) or fallback
+        except Exception as _e:
+            logger.debug("_llm_greeting failed (%s); using fallback", _e)
+            return fallback
+
+    async def _resolve_voice_hint(self, hint: str) -> str | None:
+        """Resolve a /voice channel argument to a concrete voice clone ID.
+
+        Accepts:
+        - A bare ``vc_<hex>`` ID — returned as-is after format validation.
+        - A name or alias — looked up via the TTS server's GET /v1/voices.
+
+        Returns the resolved ``vc_`` ID, or ``None`` if unresolvable.
+        """
+        import re as _re
+
+        hint = hint.strip()
+        # Direct ID — validate format and return.
+        if _re.fullmatch(r"vc_[0-9a-f]{8,}", hint, flags=_re.IGNORECASE):
+            return hint.lower()
+
+        # Name/alias lookup — query the TTS server.
+        try:
+            from tools.tts_tool import list_voice_clones as _list_clones
+            import json as _json
+            raw = await asyncio.to_thread(_list_clones)
+            data = _json.loads(raw)
+            voices = data.get("voices", [])
+            hint_lower = hint.lower()
+            for v in voices:
+                # Match against name, alias, or label fields (server-dependent)
+                for field in ("name", "alias", "label", "display_name"):
+                    val = v.get(field)
+                    if val and val.lower() == hint_lower:
+                        return v.get("id")
+            # Partial match fallback (first-wins; logged so users can diagnose)
+            for v in voices:
+                for field in ("name", "alias", "label", "display_name"):
+                    val = v.get(field)
+                    if val and hint_lower in val.lower():
+                        _pid = v.get("id")
+                        logger.info(
+                            "Voice hint %r partial-matched %r -> %s",
+                            hint, val, _pid,
+                        )
+                        return _pid
+        except Exception as _e:
+            logger.debug("_resolve_voice_hint lookup failed: %s", _e)
+        return None
+
+    async def _handle_voice_channel_join(
+        self, event: MessageEvent, voice_hint: str = None
+    ) -> str:
+        """Join the user's current Discord voice channel.
+
+        ``voice_hint`` is an optional voice-clone selector from the command
+        args (e.g. ``/voice channel vc_e87c8ed1`` or ``/voice channel Alice``).
+        It can be a bare ``vc_<hex>`` ID or a name/alias; the latter is
+        resolved by querying the TTS server's voice list.
+        """
         adapter = self.adapters.get(event.source.platform)
         if not hasattr(adapter, "join_voice_channel"):
             return "Voice channels are not supported on this platform."
@@ -5154,6 +5262,16 @@ class GatewayRunner:
         guild_id = self._get_guild_id(event)
         if not guild_id:
             return "This command only works in a Discord server."
+
+        # Resolve voice_hint → concrete clone ID and pre-set it so the
+        # greeting and all subsequent auto-TTS use it immediately.
+        if voice_hint and hasattr(adapter, "_last_tts_voice"):
+            _resolved_id = await self._resolve_voice_hint(voice_hint)
+            if _resolved_id:
+                adapter._last_tts_voice[event.source.chat_id] = _resolved_id
+                logger.info("Voice join: pre-set clone %s for chat %s", _resolved_id, event.source.chat_id)
+            else:
+                logger.warning("Voice join: could not resolve voice hint %r", voice_hint)
 
         voice_channel = await adapter.get_user_voice_channel(
             guild_id, event.source.user_id
@@ -5213,7 +5331,7 @@ class GatewayRunner:
             # This also fills the 3s VoiceReceiver grace period with useful
             # audio instead of silence.  Runs in the background.
             async def _speak_greeting():
-                # ---- Build a contextual greeting -------------------------
+                # ---- Gather context for LLM greeting ---------------------
                 # Bot identity (Discord display name; falls back to "the assistant")
                 _bot_name = "the assistant"
                 try:
@@ -5246,20 +5364,59 @@ class GatewayRunner:
                     or "you"
                 )
 
-                # Compose a friendly, informative one-liner.  Keep it short
-                # — the audio plays before the user's first utterance, so
-                # latency matters more than verbosity.
+                # Who else is already in the voice channel
                 _vc_name = getattr(voice_channel, "name", "the voice channel")
-                if _src_name:
-                    _greeting = (
-                        f"Voice is live. I am {_bot_name}, joining {_vc_name}, "
-                        f"invited by {_summoner} from the {_src_name} {_src_kind}."
-                    )
-                else:
-                    _greeting = (
-                        f"Voice is live. I am {_bot_name}, joining {_vc_name}, "
-                        f"invited by {_summoner}."
-                    )
+                _vc_members: list[str] = []
+                try:
+                    for _m in getattr(voice_channel, "members", []):
+                        _mn = (
+                            getattr(_m, "display_name", None)
+                            or getattr(_m, "name", None)
+                        )
+                        if _mn:
+                            _vc_members.append(_mn)
+                except Exception:
+                    pass
+
+                # Static fallback — used if LLM call fails or times out.
+                _vc_fallback = (
+                    f"Voice is live. I'm {_bot_name}, joining {_vc_name}"
+                    + (f" from the {_src_name} {_src_kind}" if _src_name else "")
+                    + "."
+                )
+
+                # ---- LLM-generated greeting (hidden, stateless turn) ------
+                # Build a context-rich prompt, then do a minimal single-turn
+                # completion. This is NOT recorded in session history.
+                _member_line = (
+                    f" People already in the channel: {', '.join(_vc_members)}."
+                    if _vc_members else ""
+                )
+                _active_clone = getattr(adapter, "_last_tts_voice", {}).get(
+                    str(event.source.chat_id)
+                )
+                _clone_line = (
+                    f" You will speak using voice clone {_active_clone}."
+                    if _active_clone else ""
+                )
+                _lang_hint_line = ""
+                _det_lang = getattr(adapter, "_voice_last_language", {}).get(
+                    str(event.source.chat_id)
+                )
+                if _det_lang and _det_lang.lower() not in ("english", "en"):
+                    _lang_hint_line = f" Respond in {_det_lang}."
+
+                _greeting_prompt = (
+                    f"You are {_bot_name}, a voice-enabled AI assistant. "
+                    f"You just joined Discord voice channel '{_vc_name}'"
+                    + (f" invited by {_summoner} from the #{_src_name} {_src_kind}" if _src_name else f" invited by {_summoner}")
+                    + f".{_member_line}{_clone_line}{_lang_hint_line} "
+                    "Generate a short, natural spoken greeting (1–2 sentences). "
+                    "No markdown, no emojis, no special characters. "
+                    "Be warm and conversational. Do not repeat 'Voice is live' or similar meta-phrases."
+                )
+
+                _greeting = await self._llm_greeting(_greeting_prompt, _vc_fallback)
 
                 try:
                     from tools.tts_tool import (

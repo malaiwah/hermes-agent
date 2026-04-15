@@ -44,8 +44,8 @@ _HERMES_CORE_TOOLS = [
     "browser_type", "browser_scroll", "browser_back",
     "browser_press", "browser_get_images",
     "browser_vision", "browser_console",
-    # Text-to-speech + voice clone registration
-    "text_to_speech", "register_voice_clone",
+    # Text-to-speech + voice clone management
+    "text_to_speech", "register_voice_clone", "list_voice_clones",
     # Planning & memory
     "todo", "memory",
     # Session history search
@@ -155,8 +155,8 @@ TOOLSETS = {
     },
     
     "tts": {
-        "description": "Text-to-speech and voice clone registration",
-        "tools": ["text_to_speech", "register_voice_clone"],
+        "description": "Text-to-speech and voice clone management",
+        "tools": ["text_to_speech", "register_voice_clone", "list_voice_clones"],
         "includes": []
     },
     

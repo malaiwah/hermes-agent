@@ -1401,7 +1401,9 @@ def register_voice_clone(
         "clone_mode": mode,
         "instructions": (
             f"Voice '{name}' registered as {voice_id}. "
-            f"Use voice='{voice_id}' in text_to_speech_tool to speak in this voice. "
+            f"To use it: (1) text_to_speech with voice='{voice_id}', or "
+            f"(2) in voice-channel mode emit [voice: {voice_id}] at the start "
+            f"of your reply to activate it for all subsequent auto-TTS. "
             f"Language hint: {language}."
         ),
     }, ensure_ascii=False)
@@ -1519,4 +1521,93 @@ registry.register(
         language=args.get("language", "English")),
     check_fn=check_tts_requirements,
     emoji="🎙️",
+)
+
+
+# ---------------------------------------------------------------------------
+# list_voice_clones
+# ---------------------------------------------------------------------------
+
+def list_voice_clones() -> str:
+    """List all voice clones registered on the Qwen3-TTS server.
+
+    Queries ``GET /v1/voices`` and returns every registered clone with its
+    opaque ID, human-readable name/alias, language, and kind (``custom`` vs
+    ``builtin``).
+
+    Use the returned ``id`` value (e.g. ``vc_e87c8ed1``) as the ``voice``
+    parameter in ``text_to_speech``, or emit ``[voice: vc_XXXX]`` to make
+    it the active auto-TTS voice for the current voice-channel session.
+
+    Returns:
+        JSON string with ``voices`` array and usage instructions.
+    """
+    from urllib.request import Request, urlopen
+    from urllib.error import HTTPError
+
+    tts_config = _load_tts_config()
+    if _get_provider(tts_config) != "qwen3":
+        return tool_error("list_voice_clones requires the qwen3 TTS provider.", success=False)
+
+    qwen_config = _resolve_qwen3_config(tts_config)
+    base_url = qwen_config.get("base_url", "http://localhost:8001")
+    api_key = qwen_config.get("api_key") or tts_config.get("api_key")
+
+    headers = {}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    req = Request(f"{base_url}/v1/voices", headers=headers, method="GET")
+    try:
+        with urlopen(req, timeout=10) as resp:
+            raw = json.loads(resp.read().decode())
+    except HTTPError as exc:
+        body = exc.read().decode(errors="replace")[:300]
+        return tool_error(f"TTS server error (HTTP {exc.code}): {body}", success=False)
+    except Exception as exc:
+        return tool_error(f"Failed to list voice clones: {exc}", success=False)
+
+    # Server may return a bare list or {"voices": [...]} / {"data": [...]}
+    if isinstance(raw, list):
+        voices = raw
+    elif isinstance(raw, dict):
+        voices = raw.get("voices") or raw.get("data") or []
+    else:
+        voices = []
+
+    return json.dumps({
+        "success": True,
+        "count": len(voices),
+        "voices": voices,
+        "instructions": (
+            "Use the 'id' field (e.g. 'vc_e87c8ed1') as the voice= parameter in "
+            "text_to_speech, or emit [voice: <id>] in a voice-channel reply to "
+            "activate it for all subsequent auto-TTS in the session."
+        ),
+    }, ensure_ascii=False, indent=2)
+
+
+LIST_VOICE_CLONES_SCHEMA = {
+    "name": "list_voice_clones",
+    "description": (
+        "List all custom voice clones registered on the TTS server. "
+        "Returns each clone's opaque ID (e.g. 'vc_e87c8ed1'), human-readable "
+        "name/alias, language, and kind. Use before selecting a voice for "
+        "text_to_speech or activating one with [voice: vc_XXXX] in voice-channel "
+        "mode. Only available when the qwen3 TTS provider is configured."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+    },
+}
+
+registry.register(
+    name="list_voice_clones",
+    toolset="tts",
+    schema=LIST_VOICE_CLONES_SCHEMA,
+    handler=lambda args, **kw: list_voice_clones(),
+    check_fn=check_tts_requirements,
+    emoji="🎤",
 )
