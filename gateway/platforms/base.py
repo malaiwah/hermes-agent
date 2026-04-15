@@ -645,6 +645,11 @@ class BasePlatformAdapter(ABC):
         # Per-chat last TTS instruct — carried forward to next turn so tone
         # transitions naturally instead of resetting to the config default.
         self._last_tts_instruct: Dict[str, str] = {}
+        # Per-chat active voice clone ID — set via [voice: vc_XXXX] tag in the
+        # LLM response after register_voice_clone; persists across turns so the
+        # cloned voice carries forward without the agent repeating the tag.
+        # Cleared on /voice leave.  Empty string = use config default.
+        self._last_tts_voice: Dict[str, str] = {}
         # Per-chat last detected ASR language (e.g. "English", "French")
         # — used to pick matching TTS voice/config so replies match input.
         self._voice_last_language: Dict[str, str] = {}
@@ -1480,6 +1485,34 @@ class BasePlatformAdapter(ABC):
                             flags=_tts_strip_re.IGNORECASE,
                         ).strip()
 
+                    # Strip [voice: vc_XXXX] tags and persist the clone ID.
+                    # The LLM emits this after register_voice_clone to switch
+                    # the active voice for subsequent auto-TTS turns.
+                    _voice_tag = _tts_strip_re.search(
+                        r'\[voice:\s*(\S+?)\]', text_content,
+                        flags=_tts_strip_re.IGNORECASE,
+                    )
+                    if _voice_tag:
+                        _extracted_voice_id = _voice_tag.group(1).strip()
+                        # Validate format — only persist well-formed clone IDs
+                        # (vc_ prefix + at least 8 hex chars) to prevent prompt-
+                        # injection via ASR transcripts activating arbitrary IDs.
+                        if _tts_strip_re.fullmatch(r'vc_[0-9a-f]{8,}', _extracted_voice_id):
+                            self._last_tts_voice[event.source.chat_id] = _extracted_voice_id
+                            logger.info(
+                                "[%s] Active TTS voice set to %s for chat %s",
+                                self.name, _extracted_voice_id, event.source.chat_id,
+                            )
+                        else:
+                            logger.warning(
+                                "[%s] Ignored malformed [voice:] tag value: %r",
+                                self.name, _extracted_voice_id,
+                            )
+                        text_content = _tts_strip_re.sub(
+                            r'\[voice:\s*\S+?\]\s*', '', text_content,
+                            flags=_tts_strip_re.IGNORECASE,
+                        ).strip()
+
                 # Multi-modal TTS: also fire auto-TTS for TEXT messages when the
                 # bot is connected to a voice channel bound to this chat (e.g.
                 # user sends an image mid-voice-conversation — agent replies
@@ -1532,7 +1565,12 @@ class BasePlatformAdapter(ABC):
                                 from tools.tts_tool import _resolve_qwen3_config as _rqc
                                 _qwen_cfg = _rqc(_tts_cfg, _det_lang)
                                 _base_url = _qwen_cfg.get("base_url", "http://localhost:8001")
-                                _voice = _qwen_cfg.get("voice", "ryan")
+                                # Active clone (set via [voice: vc_XXXX] tag) takes
+                                # priority over the config default voice.
+                                _voice = (
+                                    self._last_tts_voice.get(event.source.chat_id)
+                                    or _qwen_cfg.get("voice", "ryan")
+                                )
                                 _instruct = _effective_instruct or _qwen_cfg.get("instruct", "")
                                 _tts_language = _det_lang or _qwen_cfg.get("language", "English")
 
@@ -1577,14 +1615,15 @@ class BasePlatformAdapter(ABC):
                                     except Exception as _e:
                                         logger.info("[%s] PCM stream failed: %s", self.name, _e)
 
-                                # Fallback: file-based TTS
+                                # Fallback: file-based TTS (also passes voice clone override)
                                 if not _pcm_ok:
                                     from tools.tts_tool import _generate_qwen3_tts
                                     import tempfile as _tf
                                     _tts_dir = _tf.mkdtemp(prefix="tts_fb_")
                                     _chunk_path = os.path.join(_tts_dir, "tts.ogg")
                                     await asyncio.to_thread(
-                                        _generate_qwen3_tts, speech_text, _chunk_path, _tts_cfg, _tts_language
+                                        _generate_qwen3_tts, speech_text, _chunk_path, _tts_cfg,
+                                        _tts_language, _voice,  # voice_override (positional)
                                     )
                                     if Path(_chunk_path).exists():
                                         try:

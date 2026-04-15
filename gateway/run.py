@@ -3470,6 +3470,12 @@ class GatewayRunner:
                         "[tts: <brief description of tone and pace>]\n"
                         "Then your response on the next line. Omit the tag to "
                         "keep the current voice.\n"
+                        "VOICE CLONES: After register_voice_clone succeeds, emit a "
+                        "[voice: vc_XXXX] tag (replace vc_XXXX with the returned ID) "
+                        "ONCE in your response to activate it for all subsequent "
+                        "auto-TTS in this session. The tag is stripped before display. "
+                        "Example: '[voice: vc_e87c8ed1]\\nGreat, I'll speak in your "
+                        "cloned voice from now on.'\n"
                         "VOICE FEEDBACK: When using tools, call send_user_message "
                         "in PARALLEL with your first tool call to acknowledge the "
                         "user. Speak in FIRST PERSON, natural conversational tone "
@@ -5267,7 +5273,11 @@ class GatewayRunner:
                     _det_lang = getattr(adapter, "_voice_last_language", {}).get(str(event.source.chat_id))
                     _qc = _resolve_qwen3_config(_cfg, _det_lang)
                     _base = _qc.get("base_url", "http://localhost:8001")
-                    _voice = _qc.get("voice", "ryan")
+                    # Use active clone if one was registered in a prior voice session.
+                    _voice = (
+                        getattr(adapter, "_last_tts_voice", {}).get(str(event.source.chat_id))
+                        or _qc.get("voice", "ryan")
+                    )
                     _instruct = _qc.get("instruct", "")
 
                     # Sanitize the greeting through the standard TTS
@@ -5348,6 +5358,11 @@ class GatewayRunner:
         self._set_adapter_auto_tts_disabled(adapter, event.source.chat_id, disabled=True)
         if hasattr(adapter, "_voice_input_callback"):
             adapter._voice_input_callback = None
+        # Clear per-session voice state so next join starts fresh.
+        if hasattr(adapter, "_last_tts_voice"):
+            adapter._last_tts_voice.pop(event.source.chat_id, None)
+        if hasattr(adapter, "_voice_primer_shown"):
+            adapter._voice_primer_shown.discard(event.source.chat_id)
         return "Left voice channel."
 
     def _handle_voice_timeout_cleanup(self, chat_id: str) -> None:
@@ -5359,6 +5374,11 @@ class GatewayRunner:
         self._save_voice_modes()
         adapter = self.adapters.get(Platform.DISCORD)
         self._set_adapter_auto_tts_disabled(adapter, chat_id, disabled=True)
+        # Clear per-session voice state (mirrors /voice leave cleanup).
+        if adapter and hasattr(adapter, "_last_tts_voice"):
+            adapter._last_tts_voice.pop(chat_id, None)
+        if adapter and hasattr(adapter, "_voice_primer_shown"):
+            adapter._voice_primer_shown.discard(chat_id)
 
     async def _handle_voice_channel_input(
         self, guild_id: int, user_id: int, transcript: str, language: str = None
@@ -7250,11 +7270,20 @@ class GatewayRunner:
                 result = await asyncio.to_thread(transcribe_audio, path, model=stt_model)
                 if result["success"]:
                     transcript = result["transcript"]
+                    # Extract opaque audio_id from the cached filename so the
+                    # agent can pass it to register_voice_clone without ever
+                    # seeing a filesystem path.
+                    import re as _re
+                    _stem = Path(path).stem          # e.g. "audio_abc123def456"
+                    _m = _re.match(r"audio_([0-9a-f]+)$", _stem)
+                    _audio_id = _m.group(1) if _m else _stem
                     enriched_parts.append(
-                        f'[The user sent a voice message (audio file: {path})~ '
+                        f'[The user sent a voice message or audio file '
+                        f'(audio_id: {_audio_id})~ '
                         f'Here\'s what they said: "{transcript}". '
-                        f'The audio_path can be passed to register_voice_clone with '
-                        f'ref_text="{transcript}" to create a voice clone.]'
+                        f'To register a voice clone from this recording call '
+                        f'register_voice_clone with audio_id="{_audio_id}" and '
+                        f'ref_text="{transcript}".]'
                     )
                     # Propagate detected language to the adapter so the
                     # TTS reply uses the matching voice/config (e.g.
@@ -7863,7 +7892,12 @@ class GatewayRunner:
                             _det_lang = getattr(_status_adapter, "_voice_last_language", {}).get(_status_chat_id)
                             _qc = _resolve_qwen3_config(_cfg, _det_lang)
                             _base = _qc.get("base_url", "http://localhost:8001")
-                            _voice = _qc.get("voice", "ryan")
+                            # Active clone ([voice: vc_XXXX]) takes priority over
+                            # config default — carry-forward matches main reply path.
+                            _voice = (
+                                getattr(_status_adapter, "_last_tts_voice", {}).get(_status_chat_id)
+                                or _qc.get("voice", "ryan")
+                            )
                             # Carry-forward priority matches main reply path:
                             # last LLM [tts:] tag > config default.
                             _instruct = (

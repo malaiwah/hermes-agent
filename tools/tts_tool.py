@@ -1253,46 +1253,75 @@ if __name__ == "__main__":
 
 def register_voice_clone(
     name: str,
-    audio_path: str,
+    audio_id: str,
     ref_text: Optional[str] = None,
     language: str = "English",
 ) -> str:
     """Register a new custom voice clone on the Qwen3-TTS server.
 
-    Uploads a reference audio clip (WAV, MP3, M4A, OGG, FLAC, Opus …) to
-    ``POST /v1/voices``.  The server extracts the speaker embedding; if
-    ``ref_text`` matches the spoken content it enables full ICL mode
-    (prosody-conditioned, closer clone).  Without ``ref_text`` the server
-    falls back to x-vector-only mode (still usable, slightly less expressive).
+    Uploads a reference audio clip received as a voice message or audio
+    attachment to ``POST /v1/voices``.  The server extracts the speaker
+    embedding; if ``ref_text`` matches the spoken content it enables full
+    ICL mode (prosody-conditioned, closer clone).  Without ``ref_text`` the
+    server falls back to x-vector-only mode.
+
+    ``audio_id`` is the opaque ID shown in the enriched message when the user
+    sends a voice note or audio file attachment.  The gateway resolves it to
+    the actual file — the agent never handles filesystem paths.
 
     The returned voice ID (e.g. ``vc_e87c8ed1``) can be passed as ``voice``
-    to ``text_to_speech_tool`` or stored for later use.
+    to ``text_to_speech`` or stored for later use.
 
     Args:
-        name:       Human-friendly label for the voice (e.g. "Victor-Éliot").
-        audio_path: Local path to the reference audio file.  Accepts any
-                    format supported by the server (WAV, MP3, M4A, OGG, Opus,
-                    FLAC).  3–30 s of clean speech recommended.
-        ref_text:   Verbatim transcript of the reference clip.  Strongly
-                    recommended — enables full ICL mode.  If omitted and the
-                    server has an ASR sibling configured, it will
-                    auto-transcribe; otherwise x-vector-only mode is used.
-        language:   Spoken language in the clip (e.g. "English", "French").
-                    Used as a hint for auto-transcription and for voice
-                    selection when the returned ID is used with TTS.
+        name:      Human-friendly label for the voice (e.g. "Victor-Éliot").
+        audio_id:  Opaque ID from the incoming voice message context
+                   (shown as ``audio_id: abc123def456`` in the message).
+                   Must be exactly 12 lowercase hex characters.
+        ref_text:  Verbatim transcript of the reference clip.  Strongly
+                   recommended — enables full ICL mode.  When the gateway
+                   transcribed the audio this is already provided in the
+                   enriched message.  If omitted the server will auto-
+                   transcribe (if ASR is configured) or use x-vector-only mode.
+        language:  Spoken language in the clip (e.g. "English", "French").
 
     Returns:
-        JSON string with ``id`` (voice ID), ``name``, ``kind``, and
-        ``instructions`` on how to use the voice.
+        JSON string with ``id`` (voice ID), ``name``, and usage instructions.
     """
     import mimetypes
+    import re as _re
     import uuid as _uuid
     from urllib.request import Request, urlopen
     from urllib.error import HTTPError
+    from hermes_constants import get_hermes_dir
 
-    audio_path_obj = Path(audio_path).expanduser()
-    if not audio_path_obj.is_file():
-        return tool_error(f"Audio file not found: {audio_path}", success=False)
+    # -----------------------------------------------------------------------
+    # Validate audio_id — must be exactly 12 lowercase hex chars.
+    # This prevents path traversal: we construct the path ourselves from
+    # the controlled cache directory, the agent never provides a file path.
+    # -----------------------------------------------------------------------
+    if not _re.fullmatch(r"[0-9a-f]{12}", audio_id):
+        return tool_error(
+            f"Invalid audio_id '{audio_id}'. "
+            "Expected exactly 12 lowercase hex characters as shown in the "
+            "voice message context (e.g. 'abc123def456').",
+            success=False,
+        )
+
+    audio_cache = get_hermes_dir("cache/audio", "audio_cache").resolve()
+    # Find the cached file — extension may be .ogg, .mp3, .m4a, etc.
+    candidates = list(audio_cache.glob(f"audio_{audio_id}.*"))
+    if not candidates:
+        return tool_error(
+            f"No cached audio found for audio_id '{audio_id}'. "
+            "The ID must come from a voice message or audio attachment sent "
+            "in this session.",
+            success=False,
+        )
+    audio_path_obj = candidates[0].resolve()
+
+    # Final safety check: resolved path must still be inside the audio cache.
+    if not str(audio_path_obj).startswith(str(audio_cache) + "/"):
+        return tool_error("Audio path escaped cache directory.", success=False)
 
     tts_config = _load_tts_config()
     if _get_provider(tts_config) != "qwen3":
@@ -1451,11 +1480,13 @@ REGISTER_VOICE_CLONE_SCHEMA = {
                 "type": "string",
                 "description": "Human-friendly label for the voice (e.g. 'Victor-Éliot', 'Alice')."
             },
-            "audio_path": {
+            "audio_id": {
                 "type": "string",
                 "description": (
-                    "Absolute path to the reference audio file on the local filesystem. "
-                    "Accepts WAV, MP3, M4A, OGG, Opus, FLAC. 3–30 s of clean speech recommended."
+                    "Opaque 12-character hex ID from the incoming voice message or audio "
+                    "attachment context (shown as 'audio_id: abc123def456'). "
+                    "The gateway resolves this to the cached audio file — do not "
+                    "construct or guess IDs; use the exact value from the message context."
                 )
             },
             "ref_text": {
@@ -1463,7 +1494,9 @@ REGISTER_VOICE_CLONE_SCHEMA = {
                 "description": (
                     "Verbatim transcript of the reference clip in the original language. "
                     "Strongly recommended — enables full ICL (prosody-conditioned) mode. "
-                    "If omitted, the server falls back to x-vector-only mode."
+                    "When the gateway transcribed the audio, this is already provided in "
+                    "the message context. If omitted, the server auto-transcribes via ASR "
+                    "if configured, otherwise falls back to x-vector-only mode."
                 )
             },
             "language": {
@@ -1471,7 +1504,7 @@ REGISTER_VOICE_CLONE_SCHEMA = {
                 "description": "Language spoken in the clip, e.g. 'English' or 'French'. Default: English."
             }
         },
-        "required": ["name", "audio_path"]
+        "required": ["name", "audio_id"]
     }
 }
 
@@ -1481,7 +1514,7 @@ registry.register(
     schema=REGISTER_VOICE_CLONE_SCHEMA,
     handler=lambda args, **kw: register_voice_clone(
         name=args["name"],
-        audio_path=args["audio_path"],
+        audio_id=args["audio_id"],
         ref_text=args.get("ref_text"),
         language=args.get("language", "English")),
     check_fn=check_tts_requirements,
