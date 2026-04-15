@@ -326,14 +326,26 @@ def _generate_qwen3_tts(
     params = urlencode(params_dict)
     url = f"{base_url.rstrip('/')}/v1/audio/speech?{params}"
 
+    from urllib.error import HTTPError as _HTTPError
+
     req = Request(url, method="POST", headers={"Content-Length": "0"})
-    with urlopen(req, timeout=timeout) as resp:
-        with open(output_path, "wb") as f:
-            while True:
-                chunk = resp.read(8192)
-                if not chunk:
-                    break
-                f.write(chunk)
+    try:
+        with urlopen(req, timeout=timeout) as resp:
+            with open(output_path, "wb") as f:
+                while True:
+                    chunk = resp.read(8192)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+    except _HTTPError as exc:
+        body = exc.read().decode(errors="replace")
+        if exc.code == 400 and "unknown voice" in body.lower():
+            raise ValueError(
+                f"Unknown voice '{voice}'. "
+                "The voice ID is not registered on the TTS server. "
+                "Use register_voice_clone to register it first, then retry."
+            ) from exc
+        raise
 
     return output_path
 
