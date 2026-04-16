@@ -506,6 +506,18 @@ class VoiceReceiver:
             return
         self._buffer_active_pcm(ssrc, pcm, frame_time, rms)
 
+    def _reset_ssrc_state(self, ssrc: int, *, drop_mapping: bool = False) -> None:
+        """Clear decoder and buffered state for one SSRC after stream corruption."""
+        self._decoders.pop(ssrc, None)
+        self._buffers.pop(ssrc, None)
+        self._last_packet_time.pop(ssrc, None)
+        self._first_packet_time.pop(ssrc, None)
+        self._rms_sum.pop(ssrc, None)
+        self._rms_count.pop(ssrc, None)
+        self._vad_states.pop(ssrc, None)
+        if drop_mapping:
+            self._ssrc_to_user.pop(ssrc, None)
+
     def pause(self):
         """Fully pause — no packets processed at all."""
         self._paused = True
@@ -730,6 +742,8 @@ class VoiceReceiver:
                 self._handle_vad_frame(ssrc, pcm, rms, time.monotonic())
         except Exception as e:
             logger.debug("Opus decode error for SSRC %s: %s", ssrc, e)
+            with self._lock:
+                self._reset_ssrc_state(ssrc)
             return
 
     # ------------------------------------------------------------------

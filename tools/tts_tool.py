@@ -779,6 +779,12 @@ def check_tts_requirements() -> bool:
         bool: True if at least one provider can work.
     """
     try:
+        _tts_cfg = _load_tts_config()
+        if _get_provider(_tts_cfg) == "qwen3":
+            return True
+    except Exception:
+        pass
+    try:
         _import_edge_tts()
         return True
     except ImportError:

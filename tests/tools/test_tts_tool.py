@@ -177,6 +177,18 @@ class TestGenerateQwen3TTS:
 
 
 class TestTextToSpeechTool:
+    def test_check_tts_requirements_accepts_qwen3_provider(self):
+        """qwen3 should count as an available TTS backend without edge/openai extras."""
+        from tools.tts_tool import check_tts_requirements
+
+        with patch("tools.tts_tool._load_tts_config", return_value={"provider": "qwen3"}), \
+             patch("tools.tts_tool._import_edge_tts", side_effect=ImportError), \
+             patch("tools.tts_tool._import_elevenlabs", side_effect=ImportError), \
+             patch("tools.tts_tool._import_openai_client", side_effect=ImportError), \
+             patch("tools.tts_tool._check_neutts_available", return_value=False), \
+             patch.dict(os.environ, {}, clear=True):
+            assert check_tts_requirements() is True
+
     def test_qwen3_direct_ogg_marks_voice_compatible(self, tmp_path, monkeypatch):
         """Direct qwen3 .ogg output should keep the native-voice marker."""
         from tools.tts_tool import text_to_speech_tool

@@ -5697,6 +5697,14 @@ class GatewayRunner:
         except Exception as _e:
             logger.warning("Voice farewell failed: %s", _e)
 
+        if getattr(_farewell_event, "_auto_tts_expected", False) and not getattr(
+            _farewell_event, "_auto_tts_played", False
+        ):
+            logger.warning(
+                "Voice farewell did not produce audio before disconnect (reason=%s)",
+                getattr(_farewell_event, "_auto_tts_reason", "") or "unknown",
+            )
+
         # Disconnect only after farewell has played.
         try:
             await adapter.leave_voice_channel(guild_id)

@@ -732,6 +732,53 @@ class TestVoiceReceiver:
         receiver._on_packet(bytes(data))
         assert len(receiver._buffers) == 0
 
+    def test_on_packet_decode_error_resets_decoder_state(self, monkeypatch):
+        """A corrupted packet should clear SSRC state so the next clean packet can recover."""
+        import struct
+        import types
+
+        receiver = self._make_receiver()
+        receiver.start()
+        receiver._start_time = 0.0
+        receiver._grace_ended = True
+        receiver.map_ssrc(100, 42)
+        receiver._buffers[100] = bytearray(b"\x01" * 100)
+        receiver._last_packet_time[100] = time.monotonic()
+        receiver._first_packet_time[100] = time.monotonic()
+        receiver._rms_sum[100] = 123.0
+        receiver._rms_count[100] = 2
+        receiver._vad_states[100] = MagicMock()
+
+        bad_decoder = MagicMock()
+        bad_decoder.decode.side_effect = RuntimeError("corrupted stream")
+        good_decoder = MagicMock()
+        good_decoder.decode.return_value = struct.pack("<1920h", *([1000] * 1920))
+        monkeypatch.setattr(
+            "gateway.platforms.discord.discord.opus.Decoder",
+            MagicMock(side_effect=[bad_decoder, good_decoder]),
+            raising=False,
+        )
+
+        fake_box = MagicMock()
+        fake_box.decrypt.return_value = b"\xf8\xff\xfe"
+        fake_secret = types.SimpleNamespace(Aead=MagicMock(return_value=fake_box))
+        monkeypatch.setitem(sys.modules, "nacl", types.SimpleNamespace(secret=fake_secret))
+        monkeypatch.setitem(sys.modules, "nacl.secret", fake_secret)
+
+        packet = struct.pack(">BBHII", 0x80, 0x78, 1, 960, 100) + (b"\x00" * 20) + b"\x00\x00\x00\x01"
+        receiver._on_packet(packet)
+
+        assert 100 not in receiver._decoders
+        assert len(receiver._buffers.get(100, b"")) == 0
+        assert receiver._rms_count.get(100, 0) == 0
+
+        packet2 = struct.pack(">BBHII", 0x80, 0x78, 2, 1920, 100) + (b"\x00" * 20) + b"\x00\x00\x00\x01"
+        receiver._on_packet(packet2)
+
+        assert 100 in receiver._decoders
+        assert 100 in receiver._buffers
+        assert len(receiver._buffers[100]) > 0
+
 
 # =====================================================================
 # Gateway voice channel commands (join / leave / input)
@@ -1441,6 +1488,30 @@ class TestLeaveExceptionHandling:
 
         await runner._handle_voice_channel_leave(event)
         assert mock_adapter._voice_input_callback is None
+
+    @pytest.mark.asyncio
+    async def test_leave_logs_when_farewell_audio_did_not_play(self, runner, caplog):
+        """Leave should warn when the farewell turn expected voice output but produced no audio."""
+        mock_adapter = AsyncMock()
+        mock_adapter.is_in_voice_channel = MagicMock(return_value=True)
+        mock_adapter.leave_voice_channel = AsyncMock()
+
+        async def _fake_process_message_background(event, session_key):
+            event._auto_tts_expected = True
+            event._auto_tts_played = False
+            event._auto_tts_reason = "requirements_unavailable"
+
+        mock_adapter._process_message_background = _fake_process_message_background
+
+        event = _make_event("/voice leave")
+        event.raw_message = SimpleNamespace(guild_id=111, guild=None)
+        runner.adapters[event.source.platform] = mock_adapter
+
+        with caplog.at_level(logging.WARNING):
+            result = await runner._handle_voice_channel_leave(event)
+
+        assert result == ""
+        assert "Voice farewell did not produce audio before disconnect" in caplog.text
 
 
 # =====================================================================
@@ -2558,6 +2629,36 @@ class TestVoiceReception:
 
         assert 100 in receiver._buffers
         assert 200 in receiver._buffers
+
+    def test_on_packet_decode_error_resets_ssrc_and_recovers(self):
+        """A corrupted Opus packet should reset SSRC state so the next packet can recover."""
+        receiver = self._make_receiver_with_nacl(dave_session=None, mapped_ssrcs={100: 42})
+        receiver._start_time = 0.0
+        receiver._grace_ended = True
+        receiver._buffers[100] = bytearray(b"\x01" * 100)
+        receiver._last_packet_time[100] = time.monotonic()
+        receiver._first_packet_time[100] = time.monotonic()
+        receiver._rms_sum[100] = 123.0
+        receiver._rms_count[100] = 2
+        receiver._vad_states[100] = MagicMock()
+
+        bad_decoder = MagicMock()
+        bad_decoder.decode.side_effect = RuntimeError("corrupted stream")
+        good_decoder = MagicMock()
+        good_decoder.decode.return_value = b"\x00" * 3840
+
+        with patch("gateway.platforms.discord.discord.opus.Decoder", side_effect=[bad_decoder, good_decoder]), \
+             patch("nacl.secret.Aead") as mock_aead:
+            mock_aead.return_value.decrypt.return_value = b"\xf8\xff\xfe"
+            receiver._on_packet(self._build_rtp_packet(ssrc=100))
+            assert 100 not in receiver._decoders
+            assert len(receiver._buffers.get(100, b"")) == 0
+            assert receiver._rms_count.get(100, 0) == 0
+            receiver._on_packet(self._build_rtp_packet(ssrc=100, seq=2, timestamp=1920))
+
+        assert 100 in receiver._decoders
+        assert 100 in receiver._buffers
+        assert len(receiver._buffers[100]) > 0
 
 
 class TestVoiceTTSPlayback:

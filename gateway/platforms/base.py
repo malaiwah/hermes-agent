@@ -1478,6 +1478,8 @@ class BasePlatformAdapter(ABC):
                 # TTS generates sentence N+1 while Discord plays sentence N.
                 # Skipped when the chat has voice mode disabled (/voice off)
                 _tts_played = False
+                _auto_tts_expected = False
+                _auto_tts_reason = ""
 
                 # Always strip [tts: ...] tags from text before display,
                 # regardless of whether streaming TTS handled audio.
@@ -1549,6 +1551,7 @@ class BasePlatformAdapter(ABC):
                         and text_content
                         and not media_files
                         and event.source.chat_id not in self._auto_tts_disabled_chats):
+                    _auto_tts_expected = True
                     try:
                         from tools.tts_tool import check_tts_requirements, _preprocess_tts_text, _load_tts_config, _get_provider
                         if check_tts_requirements():
@@ -1662,6 +1665,7 @@ class BasePlatformAdapter(ABC):
                                             try:
                                                 _play_ok = await self.play_pcm_stream_in_voice_channel(_gid, _src)
                                                 if not _play_ok:
+                                                    _auto_tts_reason = "pcm_playback_unavailable"
                                                     _src.cancel()  # stop the feed reader
                                             finally:
                                                 try:
@@ -1670,8 +1674,11 @@ class BasePlatformAdapter(ABC):
                                                     logger.debug("Feed task error: %s", _fe)
                                             _pcm_ok = True
                                             _tts_played = _play_ok
+                                            if _tts_played and not _auto_tts_reason:
+                                                _auto_tts_reason = "pcm_stream"
                                     except Exception as _e:
                                         logger.info("[%s] PCM stream failed: %s", self.name, _e)
+                                        _auto_tts_reason = f"pcm_stream_failed:{type(_e).__name__}"
 
                                 # Fallback: file-based TTS (also passes voice clone override)
                                 if not _pcm_ok:
@@ -1691,6 +1698,7 @@ class BasePlatformAdapter(ABC):
                                                 metadata=_thread_metadata,
                                             )
                                             _tts_played = True
+                                            _auto_tts_reason = "file_fallback"
                                         finally:
                                             try:
                                                 os.remove(_chunk_path)
@@ -1714,13 +1722,26 @@ class BasePlatformAdapter(ABC):
                                             metadata=_thread_metadata,
                                         )
                                         _tts_played = True
+                                        _auto_tts_reason = "provider_fallback"
                                     finally:
                                         try:
                                             os.remove(_tts_path)
                                         except OSError:
                                             pass
+                        else:
+                            _auto_tts_reason = "requirements_unavailable"
+                            logger.warning(
+                                "[%s] Auto-TTS skipped: requirements unavailable for provider=%s",
+                                self.name,
+                                _get_provider(_load_tts_config()),
+                            )
                     except Exception as tts_err:
+                        _auto_tts_reason = f"exception:{type(tts_err).__name__}"
                         logger.warning("[%s] Auto-TTS failed: %s", self.name, tts_err)
+
+                setattr(event, "_auto_tts_expected", _auto_tts_expected)
+                setattr(event, "_auto_tts_played", _tts_played)
+                setattr(event, "_auto_tts_reason", _auto_tts_reason)
 
                 # Record assistant response for STT context priming
                 if event.message_type == MessageType.VOICE and text_content:
