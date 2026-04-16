@@ -146,7 +146,8 @@ def _create_test_db(db_path, session_id, messages):
             finish_reason TEXT,
             reasoning TEXT,
             reasoning_details TEXT,
-            codex_reasoning_items TEXT
+            codex_reasoning_items TEXT,
+            timing_metadata TEXT
         )
     """)
     conn.execute(

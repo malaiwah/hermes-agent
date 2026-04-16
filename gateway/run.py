@@ -382,6 +382,7 @@ def _extract_voice_reply_directives(
 _SELF_NUDGE_MAX_DELAY_SECONDS = 86400
 _INTERACTIVE_TIMING_HISTORY_LIMIT = 6
 _SLOW_TOOL_SECONDS = 1.5
+_TIMING_METADATA_VERSION = 1
 _INTERACTIVE_TIMING_PLATFORMS = {
     "acp",
     "bluebubbles",
@@ -881,25 +882,192 @@ class GatewayRunner:
             return "n/a"
         return f"{value:.1f}s"
 
+    @staticmethod
+    def _normalize_turn_timing_metadata(metadata: Dict[str, Any] | None) -> Dict[str, Any] | None:
+        if not isinstance(metadata, dict):
+            return None
+        if metadata.get("type") != "interactive_turn_timing":
+            return None
+
+        def _float_or_none(value):
+            if value is None:
+                return None
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        normalized = {
+            "turn_id": str(metadata.get("turn_id") or ""),
+            "platform": str(metadata.get("platform") or ""),
+            "chat_id": str(metadata.get("chat_id") or ""),
+            "message_type": str(metadata.get("message_type") or ""),
+            "is_voice": bool(metadata.get("is_voice")),
+            "asr_seconds": _float_or_none(metadata.get("asr_seconds")),
+            "since_last_turn_seconds": _float_or_none(metadata.get("since_last_turn_seconds")),
+            "first_visible_output_seconds": _float_or_none(metadata.get("first_visible_output_seconds")),
+            "first_visible_output_kind": str(metadata.get("first_visible_output_kind") or ""),
+            "first_audible_output_seconds": _float_or_none(metadata.get("first_audible_output_seconds")),
+            "first_audible_output_kind": str(metadata.get("first_audible_output_kind") or ""),
+            "response_ready_seconds": _float_or_none(metadata.get("response_ready_seconds")),
+            "final_turn_seconds": _float_or_none(metadata.get("final_turn_seconds")),
+            "sideband_updates": int(metadata.get("sideband_updates") or 0),
+            "tool_timings": [],
+            "slow_tools": [],
+            "delivery_attempted": bool(metadata.get("delivery_attempted")),
+            "delivery_succeeded": bool(metadata.get("delivery_succeeded")),
+        }
+
+        for key in ("tool_timings", "slow_tools"):
+            entries = metadata.get(key) or []
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                name = str(entry.get("name") or "").strip()
+                seconds = _float_or_none(entry.get("seconds"))
+                if not name or seconds is None:
+                    continue
+                normalized[key].append({"name": name, "seconds": seconds})
+
+        return normalized
+
+    @staticmethod
+    def _serialize_turn_timing_metadata(turn: Dict[str, Any] | None) -> Dict[str, Any] | None:
+        if not isinstance(turn, dict):
+            return None
+
+        def _rounded(value):
+            if value is None:
+                return None
+            try:
+                return round(float(value), 3)
+            except (TypeError, ValueError):
+                return None
+
+        return {
+            "type": "interactive_turn_timing",
+            "version": _TIMING_METADATA_VERSION,
+            "turn_id": str(turn.get("turn_id") or ""),
+            "platform": str(turn.get("platform") or ""),
+            "chat_id": str(turn.get("chat_id") or ""),
+            "message_type": str(turn.get("message_type") or ""),
+            "is_voice": bool(turn.get("is_voice")),
+            "asr_seconds": _rounded(turn.get("asr_seconds")),
+            "since_last_turn_seconds": _rounded(turn.get("since_last_turn_seconds")),
+            "first_visible_output_seconds": _rounded(turn.get("first_visible_output_seconds")),
+            "first_visible_output_kind": str(turn.get("first_visible_output_kind") or ""),
+            "first_audible_output_seconds": _rounded(turn.get("first_audible_output_seconds")),
+            "first_audible_output_kind": str(turn.get("first_audible_output_kind") or ""),
+            "response_ready_seconds": _rounded(turn.get("response_ready_seconds")),
+            "final_turn_seconds": _rounded(turn.get("final_turn_seconds")),
+            "sideband_updates": int(turn.get("sideband_updates") or 0),
+            "tool_timings": [
+                {
+                    "name": str(entry.get("name") or ""),
+                    "seconds": _rounded(entry.get("seconds")),
+                }
+                for entry in (turn.get("tool_timings") or [])
+                if isinstance(entry, dict) and entry.get("name")
+            ],
+            "slow_tools": [
+                {
+                    "name": str(entry.get("name") or ""),
+                    "seconds": _rounded(entry.get("seconds")),
+                }
+                for entry in (turn.get("slow_tools") or [])
+                if isinstance(entry, dict) and entry.get("name")
+            ],
+            "delivery_attempted": bool(turn.get("delivery_attempted")),
+            "delivery_succeeded": bool(turn.get("delivery_succeeded")),
+        }
+
+    def _prime_interactive_timing_bucket_from_history(
+        self,
+        session_key: str,
+        history: List[Dict[str, Any]] | None,
+    ) -> None:
+        if not history:
+            return
+        bucket = self._get_interactive_timing_bucket(session_key)
+        if bucket.get("recent_turns"):
+            return
+
+        restored = []
+        for msg in history:
+            normalized = self._normalize_turn_timing_metadata(msg.get("timing_metadata"))
+            if normalized:
+                restored.append(normalized)
+        if not restored:
+            return
+
+        bucket["recent_turns"] = deque(
+            restored[-_INTERACTIVE_TIMING_HISTORY_LIMIT:],
+            maxlen=_INTERACTIVE_TIMING_HISTORY_LIMIT,
+        )
+
+    def _persist_interactive_turn_metadata(
+        self,
+        session_id: str | None,
+        history_offset: int | None,
+        turn: Dict[str, Any] | None,
+    ) -> None:
+        if not session_id or history_offset is None or not turn:
+            return
+        metadata = self._serialize_turn_timing_metadata(turn)
+        if not metadata:
+            return
+
+        try:
+            transcript = self.session_store.load_transcript(session_id)
+        except Exception as e:
+            logger.debug("Failed to load transcript for timing metadata patch: %s", e)
+            return
+        if not transcript:
+            return
+
+        start_idx = min(max(int(history_offset), 0), len(transcript))
+        target_idx = None
+        for idx in range(len(transcript) - 1, start_idx - 1, -1):
+            if transcript[idx].get("role") == "assistant":
+                target_idx = idx
+                break
+        if target_idx is None:
+            for idx in range(len(transcript) - 1, start_idx - 1, -1):
+                if transcript[idx].get("role") in {"user", "tool"}:
+                    target_idx = idx
+                    break
+        if target_idx is None:
+            return
+
+        if transcript[target_idx].get("timing_metadata") == metadata:
+            return
+        transcript[target_idx]["timing_metadata"] = metadata
+
+        try:
+            self.session_store.rewrite_transcript(session_id, transcript)
+        except Exception as e:
+            logger.debug("Failed to persist timing metadata to transcript: %s", e)
+
     def _build_interactive_timing_guidance(
         self,
         session_key: str,
         *,
         platform_name: str,
         is_voice: bool,
+        history: List[Dict[str, Any]] | None = None,
     ) -> str:
         if platform_name not in _INTERACTIVE_TIMING_PLATFORMS:
             return ""
 
+        if history:
+            self._prime_interactive_timing_bucket_from_history(session_key, history)
         bucket = self._get_interactive_timing_bucket(session_key)
         recent_turns = list(bucket.get("recent_turns") or [])
-        generic = (
-            "Responsiveness goal: keep the UX reactive. If a turn is getting slow because of tools, "
-            "multiple model calls, or long reasoning, use send_user_message once with a brief first-person "
-            "progress update instead of going silent."
-        )
+        generic = "goal=reactive; if_slow=send_user_message_once"
         if not recent_turns:
-            return f"[{generic}]"
+            return f"[Timing: {generic}]"
 
         last_turn = recent_turns[-1]
         if is_voice:
@@ -912,20 +1080,17 @@ class GatewayRunner:
         ) / max(1, len(recent_turns))
         parts = [
             generic,
-            (
-                "Recent timing: "
-                f"previous first visible output {self._format_timing_value(last_turn.get('first_visible_output_seconds'))}; "
-                f"previous final turn {self._format_timing_value(last_turn.get('final_turn_seconds'))}; "
-                f"rolling average {self._format_timing_value(avg_turn)}; "
-                f"time since last turn {self._format_timing_value(last_turn.get('since_last_turn_seconds'))}."
-            ),
+            f"prev_visible={self._format_timing_value(last_turn.get('first_visible_output_seconds'))}",
+            f"prev_final={self._format_timing_value(last_turn.get('final_turn_seconds'))}",
+            f"avg_final={self._format_timing_value(avg_turn)}",
+            f"since_last={self._format_timing_value(last_turn.get('since_last_turn_seconds'))}",
         ]
         if last_turn.get("slow_tools"):
-            slow_text = ", ".join(
-                f"{entry['name']} {entry['seconds']:.1f}s"
+            slow_text = ",".join(
+                f"{entry['name']}:{entry['seconds']:.1f}s"
                 for entry in last_turn["slow_tools"]
             )
-            parts.append(f"Last slower tools: {slow_text}.")
+            parts.append(f"slow={slow_text}")
         if is_voice:
             voice_gaps = [
                 float(t.get("since_last_turn_seconds") or 0.0)
@@ -937,14 +1102,13 @@ class GatewayRunner:
                 if voice_gaps
                 else None
             )
-            parts.append(
-                "Live voice timing: "
-                f"previous ASR {self._format_timing_value(last_turn.get('asr_seconds'))}; "
-                f"previous first audible output {self._format_timing_value(last_turn.get('first_audible_output_seconds'))}; "
-                f"average between recent turns {self._format_timing_value(avg_gap)}. "
-                "In live voice, send_user_message becomes a quick spoken acknowledgement while you continue working."
-            )
-        return "[" + " ".join(parts) + "]"
+            parts.extend([
+                f"voice_prev_asr={self._format_timing_value(last_turn.get('asr_seconds'))}",
+                f"voice_prev_audible={self._format_timing_value(last_turn.get('first_audible_output_seconds'))}",
+                f"voice_avg_gap={self._format_timing_value(avg_gap)}",
+                "live_voice_ack=spoken",
+            ])
+        return "[Timing: " + "; ".join(parts) + "]"
 
     # -----------------------------------------------------------------
 
@@ -3701,6 +3865,10 @@ class GatewayRunner:
                 is_voice=_is_voice_input,
                 asr_seconds=_voice_stt_seconds,
             )
+            _turn_persist_ref = {
+                "session_id": session_entry.session_id,
+                "history_offset": len(history),
+            }
 
             def _on_first_visible(kind: str = "sideband_text") -> None:
                 self._mark_turn_first_visible_output(_turn_state, kind)
@@ -3714,6 +3882,11 @@ class GatewayRunner:
                     _turn_state,
                     delivery_attempted=delivery_attempted,
                     delivery_succeeded=delivery_succeeded,
+                )
+                self._persist_interactive_turn_metadata(
+                    _turn_persist_ref.get("session_id"),
+                    _turn_persist_ref.get("history_offset"),
+                    _turn_state,
                 )
 
             setattr(
@@ -3731,6 +3904,7 @@ class GatewayRunner:
                 session_key,
                 platform_name=_platform_config_key(source.platform),
                 is_voice=_is_voice_input,
+                history=history,
             )
             if _timing_guidance:
                 message_text = f"{_timing_guidance}\n\n{message_text}"
@@ -3927,6 +4101,7 @@ class GatewayRunner:
             # session_entry so transcript writes below go to the right session.
             if agent_result.get("session_id") and agent_result["session_id"] != session_entry.session_id:
                 session_entry.session_id = agent_result["session_id"]
+            _turn_persist_ref["session_id"] = session_entry.session_id
 
             # Prepend reasoning/thinking if display is enabled
             if getattr(self, "_show_reasoning", False) and response:
@@ -4009,6 +4184,7 @@ class GatewayRunner:
             # entries that were stripped before the agent saw them.
             if not agent_failed_early:
                 history_len = agent_result.get("history_offset", len(history))
+                _turn_persist_ref["history_offset"] = history_len
                 new_messages = agent_messages[history_len:] if len(agent_messages) > history_len else []
                 
                 # If no new messages found (edge case), fall back to simple user/assistant
@@ -6905,6 +7081,7 @@ class GatewayRunner:
                     tool_calls=msg.get("tool_calls"),
                     tool_call_id=msg.get("tool_call_id"),
                     reasoning=msg.get("reasoning"),
+                    timing_metadata=msg.get("timing_metadata"),
                 )
             except Exception:
                 pass  # Best-effort copy
@@ -8152,11 +8329,21 @@ class GatewayRunner:
             if not adapter:
                 return
 
+            # Discord notifications are easier to miss when multiple tool
+            # starts are collapsed into one edited message, and the aggregate
+            # content is preview-truncated by the client. Keep Discord tool
+            # progress as short discrete notices so parallel batches remain
+            # legible to the user.
+            _use_discrete_progress_messages = source.platform == Platform.DISCORD
+
             # Skip tool progress for platforms that don't support message
             # editing (e.g. iMessage/BlueBubbles) — each progress update
             # would become a separate message bubble, which is noisy.
             from gateway.platforms.base import BasePlatformAdapter as _BaseAdapter
-            if type(adapter).edit_message is _BaseAdapter.edit_message:
+            if (
+                not _use_discrete_progress_messages
+                and type(adapter).edit_message is _BaseAdapter.edit_message
+            ):
                 while not progress_queue.empty():
                     try:
                         progress_queue.get_nowait()
@@ -8176,13 +8363,26 @@ class GatewayRunner:
 
                     # Handle dedup messages: update last line with repeat counter
                     if isinstance(raw, tuple) and len(raw) == 3 and raw[0] == "__dedup__":
+                        if _use_discrete_progress_messages:
+                            continue
                         _, base_msg, count = raw
                         if progress_lines:
                             progress_lines[-1] = f"{base_msg} (×{count + 1})"
                         msg = progress_lines[-1] if progress_lines else base_msg
                     else:
                         msg = raw
-                        progress_lines.append(msg)
+                        if not _use_discrete_progress_messages:
+                            progress_lines.append(msg)
+
+                    if _use_discrete_progress_messages:
+                        await adapter.send(
+                            chat_id=source.chat_id,
+                            content=msg,
+                            metadata=_progress_metadata,
+                        )
+                        await asyncio.sleep(0.3)
+                        await adapter.send_typing(source.chat_id, metadata=_progress_metadata)
+                        continue
 
                     # Throttle edits: batch rapid tool updates into fewer
                     # API calls to avoid hitting Telegram flood control.

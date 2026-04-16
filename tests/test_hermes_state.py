@@ -286,6 +286,28 @@ class TestMessageStorage:
         assert conv[0]["codex_reasoning_items"] == codex_items
         assert conv[0]["codex_reasoning_items"][0]["encrypted_content"] == "enc_blob_123"
 
+    def test_timing_metadata_persisted_and_restored(self, db):
+        """timing_metadata is round-tripped so gateway timing hints survive reloads."""
+        db.create_session(session_id="s1", source="cli")
+        timing_metadata = {
+            "type": "interactive_turn_timing",
+            "version": 1,
+            "turn_id": "turn_abc123",
+            "final_turn_seconds": 6.432,
+            "first_visible_output_seconds": 0.812,
+            "slow_tools": [{"name": "browser_navigate", "seconds": 2.3}],
+        }
+        db.append_message(
+            "s1",
+            role="assistant",
+            content="Done",
+            timing_metadata=timing_metadata,
+        )
+
+        conv = db.get_messages_as_conversation("s1")
+        assert len(conv) == 1
+        assert conv[0]["timing_metadata"] == timing_metadata
+
 
 # =========================================================================
 # FTS5 search
@@ -959,7 +981,7 @@ class TestSchemaInit:
     def test_schema_version(self, db):
         cursor = db._conn.execute("SELECT version FROM schema_version")
         version = cursor.fetchone()[0]
-        assert version == 6
+        assert version == 7
 
     def test_title_column_exists(self, db):
         """Verify the title column was created in the sessions table."""
@@ -1015,12 +1037,12 @@ class TestSchemaInit:
         conn.commit()
         conn.close()
 
-        # Open with SessionDB — should migrate to v6
+        # Open with SessionDB — should migrate to the latest schema
         migrated_db = SessionDB(db_path=db_path)
 
         # Verify migration
         cursor = migrated_db._conn.execute("SELECT version FROM schema_version")
-        assert cursor.fetchone()[0] == 6
+        assert cursor.fetchone()[0] == 7
 
         # Verify title column exists and is NULL for existing sessions
         session = migrated_db.get_session("existing")

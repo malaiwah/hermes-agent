@@ -31,7 +31,7 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -81,7 +81,8 @@ CREATE TABLE IF NOT EXISTS messages (
     finish_reason TEXT,
     reasoning TEXT,
     reasoning_details TEXT,
-    codex_reasoning_items TEXT
+    codex_reasoning_items TEXT,
+    timing_metadata TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
@@ -329,6 +330,17 @@ class SessionDB:
                     except sqlite3.OperationalError:
                         pass  # Column already exists
                 cursor.execute("UPDATE schema_version SET version = 6")
+            if current_version < 7:
+                # v7: add timing_metadata to messages so gateway turns can
+                # persist compact structured latency info for later analysis
+                # and prompt rehydration after restarts.
+                try:
+                    cursor.execute(
+                        'ALTER TABLE messages ADD COLUMN "timing_metadata" TEXT'
+                    )
+                except sqlite3.OperationalError:
+                    pass
+                cursor.execute("UPDATE schema_version SET version = 7")
 
         # Unique title index — always ensure it exists (safe to run after migrations
         # since the title column is guaranteed to exist at this point)
@@ -924,6 +936,7 @@ class SessionDB:
         reasoning: str = None,
         reasoning_details: Any = None,
         codex_reasoning_items: Any = None,
+        timing_metadata: Any = None,
     ) -> int:
         """
         Append a message to a session. Returns the message row ID.
@@ -940,6 +953,10 @@ class SessionDB:
             json.dumps(codex_reasoning_items)
             if codex_reasoning_items else None
         )
+        timing_metadata_json = (
+            json.dumps(timing_metadata)
+            if timing_metadata is not None else None
+        )
         tool_calls_json = json.dumps(tool_calls) if tool_calls else None
 
         # Pre-compute tool call count
@@ -951,8 +968,9 @@ class SessionDB:
             cursor = conn.execute(
                 """INSERT INTO messages (session_id, role, content, tool_call_id,
                    tool_calls, tool_name, timestamp, token_count, finish_reason,
-                   reasoning, reasoning_details, codex_reasoning_items)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   reasoning, reasoning_details, codex_reasoning_items,
+                   timing_metadata)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session_id,
                     role,
@@ -966,6 +984,7 @@ class SessionDB:
                     reasoning,
                     reasoning_details_json,
                     codex_items_json,
+                    timing_metadata_json,
                 ),
             )
             msg_id = cursor.lastrowid
@@ -1003,6 +1022,12 @@ class SessionDB:
                 except (json.JSONDecodeError, TypeError):
                     logger.warning("Failed to deserialize tool_calls in get_messages, falling back to []")
                     msg["tool_calls"] = []
+            if msg.get("timing_metadata"):
+                try:
+                    msg["timing_metadata"] = json.loads(msg["timing_metadata"])
+                except (json.JSONDecodeError, TypeError):
+                    logger.warning("Failed to deserialize timing_metadata in get_messages, falling back to None")
+                    msg["timing_metadata"] = None
             result.append(msg)
         return result
 
@@ -1014,7 +1039,8 @@ class SessionDB:
         with self._lock:
             cursor = self._conn.execute(
                 "SELECT role, content, tool_call_id, tool_calls, tool_name, "
-                "reasoning, reasoning_details, codex_reasoning_items "
+                "reasoning, reasoning_details, codex_reasoning_items, "
+                "timing_metadata "
                 "FROM messages WHERE session_id = ? ORDER BY timestamp, id",
                 (session_id,),
             )
@@ -1050,6 +1076,12 @@ class SessionDB:
                     except (json.JSONDecodeError, TypeError):
                         logger.warning("Failed to deserialize codex_reasoning_items, falling back to None")
                         msg["codex_reasoning_items"] = None
+            if row["timing_metadata"]:
+                try:
+                    msg["timing_metadata"] = json.loads(row["timing_metadata"])
+                except (json.JSONDecodeError, TypeError):
+                    logger.warning("Failed to deserialize timing_metadata, falling back to None")
+                    msg["timing_metadata"] = None
             messages.append(msg)
         return messages
 

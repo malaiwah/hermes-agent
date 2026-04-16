@@ -2213,6 +2213,7 @@ class AIAgent:
                     reasoning=msg.get("reasoning") if role == "assistant" else None,
                     reasoning_details=msg.get("reasoning_details") if role == "assistant" else None,
                     codex_reasoning_items=msg.get("codex_reasoning_items") if role == "assistant" else None,
+                    timing_metadata=msg.get("timing_metadata"),
                 )
             self._last_flushed_db_idx = len(messages)
         except Exception as e:

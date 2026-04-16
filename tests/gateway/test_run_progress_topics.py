@@ -263,7 +263,6 @@ async def test_run_agent_progress_does_not_use_event_message_id_for_telegram_dm(
 
 
 def test_build_interactive_timing_guidance_mentions_recent_slow_tools():
-    gateway_run = importlib.import_module("gateway.run")
     runner = _make_runner(ProgressCaptureAdapter())
 
     turn = runner._start_interactive_turn(
@@ -290,10 +289,11 @@ def test_build_interactive_timing_guidance_mentions_recent_slow_tools():
         is_voice=False,
     )
 
-    assert "Responsiveness goal" in guidance
-    assert "previous first visible output" in guidance
-    assert "web_search 2.3s" in guidance
-    assert "send_user_message" in guidance
+    assert guidance.startswith("[Timing: ")
+    assert "goal=reactive" in guidance
+    assert "prev_visible=" in guidance
+    assert "slow=web_search:2.3s" in guidance
+    assert "if_slow=send_user_message_once" in guidance
 
 
 def test_build_interactive_timing_guidance_mentions_voice_metrics():
@@ -322,10 +322,52 @@ def test_build_interactive_timing_guidance_mentions_voice_metrics():
         is_voice=True,
     )
 
-    assert "Live voice timing" in guidance
-    assert "previous ASR 0.4s" in guidance
-    assert "previous first audible output" in guidance
-    assert "quick spoken acknowledgement" in guidance
+    assert "voice_prev_asr=0.4s" in guidance
+    assert "voice_prev_audible=" in guidance
+    assert "live_voice_ack=spoken" in guidance
+
+
+def test_build_interactive_timing_guidance_hydrates_from_persisted_history():
+    runner = _make_runner(ProgressCaptureAdapter(platform=Platform.DISCORD))
+    history = [
+        {
+            "role": "assistant",
+            "content": "Done",
+            "timing_metadata": {
+                "type": "interactive_turn_timing",
+                "version": 1,
+                "turn_id": "turn_hist_1",
+                "platform": "discord",
+                "chat_id": "123",
+                "message_type": "voice",
+                "is_voice": True,
+                "asr_seconds": 0.31,
+                "since_last_turn_seconds": 5.2,
+                "first_visible_output_seconds": 1.1,
+                "first_visible_output_kind": "sideband_text",
+                "first_audible_output_seconds": 2.4,
+                "first_audible_output_kind": "ack_voice",
+                "response_ready_seconds": 6.0,
+                "final_turn_seconds": 7.3,
+                "sideband_updates": 1,
+                "tool_timings": [{"name": "browser_navigate", "seconds": 2.2}],
+                "slow_tools": [{"name": "browser_navigate", "seconds": 2.2}],
+                "delivery_attempted": True,
+                "delivery_succeeded": True,
+            },
+        }
+    ]
+
+    guidance = runner._build_interactive_timing_guidance(
+        "voice-sess-history",
+        platform_name="discord",
+        is_voice=True,
+        history=history,
+    )
+
+    assert "prev_final=7.3s" in guidance
+    assert "voice_prev_asr=0.3s" in guidance
+    assert "slow=browser_navigate:2.2s" in guidance
 
 
 @pytest.mark.asyncio
@@ -368,6 +410,48 @@ async def test_run_agent_progress_uses_event_message_id_for_slack_dm(monkeypatch
     assert adapter.sent
     assert adapter.sent[0]["metadata"] == {"thread_id": "1234567890.000001"}
     assert all(call["metadata"] == {"thread_id": "1234567890.000001"} for call in adapter.typing)
+
+
+@pytest.mark.asyncio
+async def test_run_agent_progress_uses_discrete_messages_for_discord(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_TOOL_PROGRESS_MODE", "all")
+
+    fake_dotenv = types.ModuleType("dotenv")
+    fake_dotenv.load_dotenv = lambda *args, **kwargs: None
+    monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
+
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = FakeAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+
+    adapter = ProgressCaptureAdapter(platform=Platform.DISCORD)
+    runner = _make_runner(adapter)
+    gateway_run = importlib.import_module("gateway.run")
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"})
+
+    source = SessionSource(
+        platform=Platform.DISCORD,
+        chat_id="discord-chan",
+        chat_type="group",
+        thread_id=None,
+    )
+
+    result = await runner._run_agent(
+        message="hello",
+        context_prompt="",
+        history=[],
+        source=source,
+        session_id="sess-discord-progress",
+        session_key="agent:main:discord:group:discord-chan",
+    )
+
+    assert result["final_response"] == "done"
+    assert [call["content"] for call in adapter.sent] == [
+        '💻 terminal: "pwd"',
+        '⚙️ browser_navigate: "https://example.com"',
+    ]
+    assert adapter.edits == []
 
 
 @pytest.mark.asyncio
