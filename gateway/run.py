@@ -5430,7 +5430,8 @@ class GatewayRunner:
 
     async def _handle_voice_command(self, event: MessageEvent) -> str:
         """Handle /voice [on|off|tts|channel|leave|status] command."""
-        args = event.get_command_args().strip().lower()
+        raw_args = event.get_command_args().strip()
+        args = raw_args.lower()
         chat_id = event.source.chat_id
 
         adapter = self.adapters.get(event.source.platform)
@@ -5463,11 +5464,13 @@ class GatewayRunner:
         elif args in ("channel", "join") or args.startswith(("channel ", "join ")):
             # Text after the subcommand becomes the first message to the agent.
             # e.g. "/voice channel speak as Victor" → agent greets AND picks voice.
-            _vcj_parts = args.split(None, 1)
+            _vcj_parts = raw_args.split(None, 1)
             _vcj_prompt = _vcj_parts[1].strip() if len(_vcj_parts) > 1 else None
             return await self._handle_voice_channel_join(event, voice_prompt=_vcj_prompt)
-        elif args == "leave":
-            return await self._handle_voice_channel_leave(event)
+        elif args == "leave" or args.startswith("leave "):
+            _vcl_parts = raw_args.split(None, 1)
+            _vcl_prompt = _vcl_parts[1].strip() if len(_vcl_parts) > 1 else None
+            return await self._handle_voice_channel_leave(event, farewell_prompt=_vcl_prompt)
         elif args == "status":
             mode = self._voice_mode.get(chat_id, "off")
             labels = {
@@ -5654,7 +5657,9 @@ class GatewayRunner:
         adapter._voice_input_callback = None
         return "Failed to join voice channel. Check bot permissions (Connect + Speak)."
 
-    async def _handle_voice_channel_leave(self, event: MessageEvent) -> str:
+    async def _handle_voice_channel_leave(
+        self, event: MessageEvent, farewell_prompt: str = None
+    ) -> str:
         """Leave the Discord voice channel."""
         adapter = self.adapters.get(event.source.platform)
         guild_id = self._get_guild_id(event)
@@ -5681,7 +5686,11 @@ class GatewayRunner:
         from types import SimpleNamespace as _SNS
         _farewell_event = MessageEvent(
             source=event.source,
-            text="[Voice channel leaving. Say a brief, genuine farewell.]",
+            text=(
+                farewell_prompt
+                if farewell_prompt
+                else "[Voice channel leaving. Say a brief, genuine farewell.]"
+            ),
             message_type=MessageType.VOICE,
             raw_message=_SNS(guild_id=guild_id, guild=None),
         )

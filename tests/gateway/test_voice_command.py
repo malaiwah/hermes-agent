@@ -859,6 +859,28 @@ class TestVoiceChannelCommands:
         assert runner._voice_mode["123"] == "all"
 
     @pytest.mark.asyncio
+    async def test_join_with_prompt_preserves_original_casing(self, runner):
+        """Join prompt text should pass through without being lowercased."""
+        mock_channel = MagicMock()
+        mock_channel.name = "General"
+        mock_adapter = MagicMock()
+        mock_adapter.join_voice_channel = AsyncMock(return_value=True)
+        mock_adapter.get_user_voice_channel = AsyncMock(return_value=mock_channel)
+        mock_adapter.handle_message = AsyncMock(return_value=None)
+        mock_adapter._voice_text_channels = {}
+        mock_adapter._voice_input_callback = None
+
+        event = self._make_discord_event("/voice join Speak As Victor-Éliot")
+        runner.adapters[event.source.platform] = mock_adapter
+
+        result = await runner._handle_voice_command(event)
+        await asyncio.sleep(0)
+
+        assert result == ""
+        greeting_event = mock_adapter.handle_message.await_args.args[0]
+        assert greeting_event.text == "Speak As Victor-Éliot"
+
+    @pytest.mark.asyncio
     async def test_join_failure(self, runner):
         """Failed join returns permissions error."""
         mock_channel = MagicMock()
@@ -1512,6 +1534,32 @@ class TestLeaveExceptionHandling:
 
         assert result == ""
         assert "Voice farewell did not produce audio before disconnect" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_leave_with_prompt_uses_custom_farewell_hint(self, runner):
+        """Leave prompt text should override the default farewell marker."""
+        mock_adapter = AsyncMock()
+        mock_adapter.is_in_voice_channel = MagicMock(return_value=True)
+        mock_adapter.leave_voice_channel = AsyncMock()
+
+        seen = {}
+
+        async def _fake_process_message_background(event, session_key):
+            seen["text"] = event.text
+            event._auto_tts_expected = False
+            event._auto_tts_played = False
+            event._auto_tts_reason = ""
+
+        mock_adapter._process_message_background = _fake_process_message_background
+
+        event = _make_event("/voice leave Sign off like a sleepy late-night radio host")
+        event.raw_message = SimpleNamespace(guild_id=111, guild=None)
+        runner.adapters[event.source.platform] = mock_adapter
+
+        result = await runner._handle_voice_command(event)
+
+        assert result == ""
+        assert seen["text"] == "Sign off like a sleepy late-night radio host"
 
 
 # =====================================================================
