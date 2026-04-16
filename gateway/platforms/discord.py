@@ -602,9 +602,8 @@ class VoiceReceiver:
         """Filter known non-audio / filler payloads before Opus decode."""
         if not payload:
             return True
-        # Seen in live traces when the stream is present but not actual audio.
-        if payload == b"\xf8\xff\xfe":
-            return True
+        # Discord and libdave both treat exact 0xF8FFFE as a legitimate Opus
+        # silence packet, so do not discard it here.
         # Repeated filler bytes (notably 0xff*255) should not poison Opus state.
         if len(payload) >= 32 and len(set(payload)) == 1:
             return True

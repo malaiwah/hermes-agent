@@ -2635,8 +2635,8 @@ class TestVoiceReception:
         assert 100 not in receiver._buffers
         assert 100 not in receiver._decoders
 
-    def test_on_packet_dave_sentinel_payload_dropped_before_opus(self):
-        """Known non-audio DAVE sentinel payloads should not poison the Opus decoder."""
+    def test_on_packet_dave_silence_payload_reaches_opus(self):
+        """The documented Discord Opus silence packet should be decoded, not dropped."""
         dave = MagicMock()
         dave.decrypt.return_value = b"\xf8\xff\xfe"
         receiver = self._make_receiver_with_nacl(
@@ -2645,11 +2645,13 @@ class TestVoiceReception:
 
         with patch("gateway.platforms.discord.discord.opus.Decoder") as decoder_ctor, \
              patch("nacl.secret.Aead") as mock_aead:
+            decoder_ctor.return_value.decode.return_value = b"\x00" * 3840
             mock_aead.return_value.decrypt.return_value = b"\x01" * 32
             receiver._on_packet(self._build_rtp_packet(ssrc=100))
 
         dave.decrypt.assert_called_once()
-        decoder_ctor.assert_not_called()
+        decoder_ctor.assert_called_once()
+        decoder_ctor.return_value.decode.assert_called_once_with(b"\xf8\xff\xfe")
         assert 100 not in receiver._buffers
 
     def test_on_packet_dave_repeated_fill_payload_dropped_before_opus(self):
