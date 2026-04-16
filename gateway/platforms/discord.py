@@ -810,6 +810,7 @@ class VoiceReceiver:
         # Calculate dynamic RTP header size (RFC 9335 / rtpsize mode)
         cc = first_byte & 0x0F  # CSRC count
         has_extension = bool(first_byte & 0x10)  # extension bit
+        has_padding = bool(first_byte & 0x20)  # padding bit
         header_size = 12 + (4 * cc) + (4 if has_extension else 0)
 
         if len(data) < header_size + 4:  # need at least header + nonce
@@ -852,6 +853,25 @@ class VoiceReceiver:
         # Skip encrypted extension data to get the actual opus payload
         if ext_data_len and len(decrypted) > ext_data_len:
             decrypted = decrypted[ext_data_len:]
+
+        # Discord sets the RTP padding bit on some inbound audio packets. The
+        # final decrypted byte is then the padding count per RFC 3550, and the
+        # trailing bytes are not part of the Opus or DAVE frame.
+        if has_padding and decrypted:
+            pad_len = decrypted[-1]
+            if 0 < pad_len <= len(decrypted):
+                decrypted = decrypted[:-pad_len]
+            else:
+                if self._packet_debug_count <= 20:
+                    logger.warning(
+                        "Invalid RTP padding: guild=%s ssrc=%s seq=%s pad_len=%s payload_len=%s",
+                        getattr(getattr(self._vc, "guild", None), "id", "-"),
+                        ssrc,
+                        seq,
+                        pad_len,
+                        len(decrypted),
+                    )
+                return
 
         with self._lock:
             user_id_snapshot = self._ssrc_to_user.get(ssrc, 0)

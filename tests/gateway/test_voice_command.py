@@ -2555,6 +2555,7 @@ class TestVoiceReception:
         vc.channel.members = []
         receiver = VoiceReceiver(vc)
         receiver.start()
+        receiver._start_time = 0.0
         # Pre-map SSRCs if provided
         if mapped_ssrcs:
             for ssrc, uid in mapped_ssrcs.items():
@@ -2562,7 +2563,7 @@ class TestVoiceReception:
         return receiver
 
     @staticmethod
-    def _build_rtp_packet(ssrc=100, seq=1, timestamp=960):
+    def _build_rtp_packet(ssrc=100, seq=1, timestamp=960, first_byte=0x80):
         """Build a minimal valid RTP packet for _on_packet.
 
         We need: RTP header (12 bytes) + encrypted payload + 4-byte nonce.
@@ -2570,7 +2571,7 @@ class TestVoiceReception:
         """
         import struct
         # RTP header: version=2, payload_type=0x78, no extension, no CSRC
-        header = struct.pack(">BBHII", 0x80, 0x78, seq, timestamp, ssrc)
+        header = struct.pack(">BBHII", first_byte, 0x78, seq, timestamp, ssrc)
         # Fake encrypted payload (NaCl will be mocked) + 4 byte nonce
         payload = b"\x00" * 20 + b"\x00\x00\x00\x01"
         return header + payload
@@ -2625,8 +2626,9 @@ class TestVoiceReception:
         dave = MagicMock()
         receiver = self._make_receiver_with_nacl(dave_session=dave)
 
-        with patch("gateway.platforms.discord.discord.opus.Decoder") as decoder_ctor, \
-             patch("nacl.secret.Aead") as mock_aead:
+        with patch("gateway.platforms.discord.discord.opus.Decoder", create=True) as decoder_ctor, \
+             patch("nacl.secret.Aead") as mock_aead, \
+             patch.dict(sys.modules, {"davey": SimpleNamespace(MediaType=SimpleNamespace(audio="audio"))}):
             mock_aead.return_value.decrypt.return_value = b"\x01" * 32
             receiver._on_packet(self._build_rtp_packet(ssrc=100))
 
@@ -2643,8 +2645,9 @@ class TestVoiceReception:
             dave_session=dave, mapped_ssrcs={100: 42}
         )
 
-        with patch("gateway.platforms.discord.discord.opus.Decoder") as decoder_ctor, \
-             patch("nacl.secret.Aead") as mock_aead:
+        with patch("gateway.platforms.discord.discord.opus.Decoder", create=True) as decoder_ctor, \
+             patch("nacl.secret.Aead") as mock_aead, \
+             patch.dict(sys.modules, {"davey": SimpleNamespace(MediaType=SimpleNamespace(audio="audio"))}):
             decoder_ctor.return_value.decode.return_value = b"\x00" * 3840
             mock_aead.return_value.decrypt.return_value = b"\x01" * 32
             receiver._on_packet(self._build_rtp_packet(ssrc=100))
@@ -2662,14 +2665,34 @@ class TestVoiceReception:
             dave_session=dave, mapped_ssrcs={100: 42}
         )
 
-        with patch("gateway.platforms.discord.discord.opus.Decoder") as decoder_ctor, \
-             patch("nacl.secret.Aead") as mock_aead:
+        with patch("gateway.platforms.discord.discord.opus.Decoder", create=True) as decoder_ctor, \
+             patch("nacl.secret.Aead") as mock_aead, \
+             patch.dict(sys.modules, {"davey": SimpleNamespace(MediaType=SimpleNamespace(audio="audio"))}):
             mock_aead.return_value.decrypt.return_value = b"\x01" * 32
             receiver._on_packet(self._build_rtp_packet(ssrc=100))
 
         dave.decrypt.assert_called_once()
         decoder_ctor.assert_not_called()
         assert 100 not in receiver._buffers
+
+    def test_on_packet_strips_rtp_padding_before_dave(self):
+        """RTP padding bytes should be removed before DAVE decrypt sees the frame."""
+        dave = MagicMock()
+        dave.decrypt.return_value = b"\xf8\xff\xfe"
+        receiver = self._make_receiver_with_nacl(
+            dave_session=dave, mapped_ssrcs={100: 42}
+        )
+
+        with patch("gateway.platforms.discord.discord.opus.Decoder", create=True) as decoder_ctor, \
+             patch("nacl.secret.Aead") as mock_aead, \
+             patch.dict(sys.modules, {"davey": SimpleNamespace(MediaType=SimpleNamespace(audio="audio"))}):
+            decoder_ctor.return_value.decode.return_value = b"\x00" * 3840
+            mock_aead.return_value.decrypt.return_value = b"abc" + b"\x03\x03\x03"
+            receiver._on_packet(self._build_rtp_packet(ssrc=100, first_byte=0xA0))
+
+        dave.decrypt.assert_called_once()
+        assert dave.decrypt.call_args.args[2] == b"abc"
+        decoder_ctor.return_value.decode.assert_called_once_with(b"\xf8\xff\xfe")
 
     def test_on_packet_dave_unencrypted_error_passthrough(self):
         """DAVE decrypt 'Unencrypted' error → use data as-is, don't drop."""
