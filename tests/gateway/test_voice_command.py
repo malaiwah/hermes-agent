@@ -2635,6 +2635,40 @@ class TestVoiceReception:
         assert 100 not in receiver._buffers
         assert 100 not in receiver._decoders
 
+    def test_on_packet_dave_sentinel_payload_dropped_before_opus(self):
+        """Known non-audio DAVE sentinel payloads should not poison the Opus decoder."""
+        dave = MagicMock()
+        dave.decrypt.return_value = b"\xf8\xff\xfe"
+        receiver = self._make_receiver_with_nacl(
+            dave_session=dave, mapped_ssrcs={100: 42}
+        )
+
+        with patch("gateway.platforms.discord.discord.opus.Decoder") as decoder_ctor, \
+             patch("nacl.secret.Aead") as mock_aead:
+            mock_aead.return_value.decrypt.return_value = b"\x01" * 32
+            receiver._on_packet(self._build_rtp_packet(ssrc=100))
+
+        dave.decrypt.assert_called_once()
+        decoder_ctor.assert_not_called()
+        assert 100 not in receiver._buffers
+
+    def test_on_packet_dave_repeated_fill_payload_dropped_before_opus(self):
+        """Repeated filler bytes from DAVE should be discarded before decoder state is touched."""
+        dave = MagicMock()
+        dave.decrypt.return_value = b"\xff" * 255
+        receiver = self._make_receiver_with_nacl(
+            dave_session=dave, mapped_ssrcs={100: 42}
+        )
+
+        with patch("gateway.platforms.discord.discord.opus.Decoder") as decoder_ctor, \
+             patch("nacl.secret.Aead") as mock_aead:
+            mock_aead.return_value.decrypt.return_value = b"\x01" * 32
+            receiver._on_packet(self._build_rtp_packet(ssrc=100))
+
+        dave.decrypt.assert_called_once()
+        decoder_ctor.assert_not_called()
+        assert 100 not in receiver._buffers
+
     def test_on_packet_dave_unencrypted_error_passthrough(self):
         """DAVE decrypt 'Unencrypted' error → use data as-is, don't drop."""
         dave = MagicMock()

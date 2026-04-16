@@ -597,6 +597,19 @@ class VoiceReceiver:
 
         self._decode_error_stats[ssrc] = state
 
+    @staticmethod
+    def _is_non_audio_dave_payload(payload: bytes) -> bool:
+        """Filter known non-audio / filler payloads before Opus decode."""
+        if not payload:
+            return True
+        # Seen in live traces when the stream is present but not actual audio.
+        if payload == b"\xf8\xff\xfe":
+            return True
+        # Repeated filler bytes (notably 0xff*255) should not poison Opus state.
+        if len(payload) >= 32 and len(set(payload)) == 1:
+            return True
+        return False
+
     def _handle_vad_frame(self, ssrc: int, pcm: bytes, rms: int, frame_time: float):
         state = self._get_vad_state(ssrc)
         if state is None:
@@ -882,6 +895,20 @@ class VoiceReceiver:
                             self._remember_packet_sample(ssrc, sample)
                             self._append_packet_trace(ssrc, sample)
                         return
+                if self._is_non_audio_dave_payload(decrypted):
+                    if self._packet_debug_count <= 20:
+                        logger.info(
+                            "Dropping non-audio DAVE payload: guild=%s ssrc=%s user=%s seq=%s len=%s",
+                            getattr(getattr(self._vc, "guild", None), "id", "-"),
+                            ssrc,
+                            user_id,
+                            seq,
+                            len(decrypted),
+                        )
+                    with self._lock:
+                        self._remember_packet_sample(ssrc, sample)
+                        self._append_packet_trace(ssrc, sample)
+                    return
             else:
                 # With DAVE enabled, an unmapped SSRC means the inner media
                 # payload is still encrypted. Do not feed it to Opus yet.
