@@ -53,7 +53,7 @@ _HERMES_CORE_TOOLS = [
     # Clarifying questions
     "clarify",
     # Natural-language progress updates to the current user
-    "send_user_message",
+    "send_user_message", "send_tts_message",
     # One-shot hidden follow-up timer for gateway sessions
     "self_nudge",
     # Code execution + delegation
@@ -186,7 +186,7 @@ TOOLSETS = {
 
     "user_updates": {
         "description": "Send short progress updates to the current user and arm one-shot hidden follow-up nudges",
-        "tools": ["send_user_message", "self_nudge"],
+        "tools": ["send_user_message", "send_tts_message", "self_nudge"],
         "includes": []
     },
     

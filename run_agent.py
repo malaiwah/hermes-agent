@@ -213,7 +213,7 @@ class IterationBudget:
 
 # Tools that must never run concurrently (interactive / user-facing).
 # When any of these appear in a batch, we fall back to sequential execution.
-_NEVER_PARALLEL_TOOLS = frozenset({"clarify", "self_nudge"})
+_NEVER_PARALLEL_TOOLS = frozenset({"clarify", "send_tts_message", "self_nudge"})
 
 # Read-only tools with no shared mutable session state.
 _PARALLEL_SAFE_TOOLS = frozenset({
@@ -1614,6 +1614,97 @@ class AIAgent:
             {"error": "send_user_message is not available in this execution context."},
             ensure_ascii=False,
         )
+
+    def _emit_tts_message(
+        self,
+        text: str,
+        voice: str = "",
+        instruct: str = "",
+        message: str = "",
+    ) -> str:
+        """Generate TTS audio and deliver it immediately to the current user."""
+        speech_text = str(text or "").strip()
+        sideband_text = str(message or "").strip()
+        if not speech_text:
+            return json.dumps({"error": "Text is required."}, ensure_ascii=False)
+
+        media_callback = getattr(self, "media_message_callback", None)
+        if not media_callback:
+            return json.dumps(
+                {"error": "send_tts_message is not available in this execution context."},
+                ensure_ascii=False,
+            )
+
+        try:
+            from tools.tts_tool import text_to_speech_tool
+
+            result_json = text_to_speech_tool(
+                text=speech_text,
+                voice=(str(voice).strip() or None),
+                instruct=(str(instruct).strip() or None),
+            )
+            result = json.loads(result_json) if isinstance(result_json, str) else {}
+        except Exception as exc:
+            return json.dumps(
+                {"error": f"Failed to generate TTS message: {exc}"},
+                ensure_ascii=False,
+            )
+
+        if not result.get("success"):
+            return json.dumps(
+                {"error": result.get("error", "TTS generation failed.")},
+                ensure_ascii=False,
+            )
+
+        media_tag = result.get("media_tag") or ""
+        try:
+            from gateway.platforms.base import BasePlatformAdapter
+
+            media_files, _ = BasePlatformAdapter.extract_media(media_tag)
+        except Exception as exc:
+            return json.dumps(
+                {"error": f"Failed to prepare TTS media for delivery: {exc}"},
+                ensure_ascii=False,
+            )
+
+        if not media_files:
+            return json.dumps(
+                {"error": "TTS generation succeeded but no deliverable audio was produced."},
+                ensure_ascii=False,
+            )
+
+        try:
+            media_callback(media_files)
+            message_sent = False
+            if sideband_text:
+                if self.message_callback:
+                    self.message_callback(sideband_text)
+                    message_sent = True
+                elif self.status_callback:
+                    self.status_callback("agent_message", sideband_text)
+                    message_sent = True
+            return json.dumps(
+                {
+                    "sent": True,
+                    "message": sideband_text,
+                    "message_sent": message_sent if sideband_text else True,
+                    "media": len(media_files),
+                    "file_path": result.get("file_path"),
+                    "provider": result.get("provider"),
+                    "voice_compatible": result.get("voice_compatible"),
+                    "warning": (
+                        "Audio delivered, but the optional text message could not be sent in this execution context."
+                        if sideband_text and not message_sent
+                        else ""
+                    ),
+                },
+                ensure_ascii=False,
+            )
+        except Exception as exc:
+            return json.dumps(
+                {"error": f"Failed to send TTS message: {exc}"},
+                ensure_ascii=False,
+            )
 
     def _emit_self_nudge(self, delay_seconds: int, note: str = "") -> str:
         """Arm a one-shot hidden follow-up timer for the current session."""
@@ -6417,6 +6508,13 @@ class AIAgent:
             )
         elif function_name == "send_user_message":
             return self._emit_user_message(function_args.get("message", ""))
+        elif function_name == "send_tts_message":
+            return self._emit_tts_message(
+                function_args.get("text", ""),
+                voice=function_args.get("voice", ""),
+                instruct=function_args.get("instruct", ""),
+                message=function_args.get("message", ""),
+            )
         elif function_name == "self_nudge":
             return self._emit_self_nudge(
                 function_args.get("delay_seconds", 0),
@@ -6525,7 +6623,7 @@ class AIAgent:
                     print(f"  📞 Tool {i}: {name}({list(args.keys())}) - {args_preview}")
 
         for tc, name, args in parsed_calls:
-            if self.tool_progress_callback and name != "send_user_message":
+            if self.tool_progress_callback and name not in {"send_user_message", "send_tts_message"}:
                 try:
                     preview = _build_tool_preview(name, args)
                     self.tool_progress_callback("tool.started", name, preview, args)
@@ -6597,7 +6695,7 @@ class AIAgent:
                     result_preview = function_result[:200] if len(function_result) > 200 else function_result
                     logger.warning("Tool %s returned error (%.2fs): %s", function_name, tool_duration, result_preview)
 
-                if self.tool_progress_callback:
+                if self.tool_progress_callback and function_name not in {"send_user_message", "send_tts_message"}:
                     try:
                         self.tool_progress_callback(
                             "tool.completed", function_name, None, None,
@@ -6721,7 +6819,7 @@ class AIAgent:
             self._current_tool = function_name
             self._touch_activity(f"executing tool: {function_name}")
 
-            if self.tool_progress_callback and function_name != "send_user_message":
+            if self.tool_progress_callback and function_name not in {"send_user_message", "send_tts_message"}:
                 try:
                     preview = _build_tool_preview(function_name, function_args)
                     self.tool_progress_callback("tool.started", function_name, preview, function_args)
@@ -6815,6 +6913,16 @@ class AIAgent:
                 tool_duration = time.time() - tool_start_time
                 if self.quiet_mode:
                     self._vprint(f"  {_get_cute_tool_message_impl('send_user_message', function_args, tool_duration, result=function_result)}")
+            elif function_name == "send_tts_message":
+                function_result = self._emit_tts_message(
+                    function_args.get("text", ""),
+                    voice=function_args.get("voice", ""),
+                    instruct=function_args.get("instruct", ""),
+                    message=function_args.get("message", ""),
+                )
+                tool_duration = time.time() - tool_start_time
+                if self.quiet_mode:
+                    self._vprint(f"  {_get_cute_tool_message_impl('send_tts_message', function_args, tool_duration, result=function_result)}")
             elif function_name == "self_nudge":
                 function_result = self._emit_self_nudge(
                     function_args.get("delay_seconds", 0),
@@ -6944,7 +7052,7 @@ class AIAgent:
             else:
                 logger.info("tool %s completed (%.2fs, %d chars)", function_name, tool_duration, len(function_result))
 
-            if self.tool_progress_callback:
+            if self.tool_progress_callback and function_name not in {"send_user_message", "send_tts_message"}:
                 try:
                     self.tool_progress_callback(
                         "tool.completed", function_name, None, None,

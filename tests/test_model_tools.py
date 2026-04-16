@@ -88,6 +88,7 @@ class TestAgentLoopTools:
         assert "session_search" in _AGENT_LOOP_TOOLS
         assert "delegate_task" in _AGENT_LOOP_TOOLS
         assert "send_user_message" in _AGENT_LOOP_TOOLS
+        assert "send_tts_message" in _AGENT_LOOP_TOOLS
         assert "self_nudge" in _AGENT_LOOP_TOOLS
 
     def test_no_regular_tools_in_set(self):
@@ -140,6 +141,11 @@ class TestAgentLoopTools:
             quiet_mode=True,
             platform="telegram",
         )
+        bluebubbles_tools = get_tool_definitions(
+            enabled_toolsets=["user_updates"],
+            quiet_mode=True,
+            platform="bluebubbles",
+        )
         cli_tools = get_tool_definitions(
             enabled_toolsets=["user_updates"],
             quiet_mode=True,
@@ -152,10 +158,29 @@ class TestAgentLoopTools:
         )
 
         telegram_names = [t["function"]["name"] for t in telegram_tools]
+        bluebubbles_names = [t["function"]["name"] for t in bluebubbles_tools]
         assert "send_user_message" in telegram_names
+        assert "send_tts_message" in telegram_names
         assert "self_nudge" in telegram_names
+        assert "send_user_message" in bluebubbles_names
+        assert "send_tts_message" in bluebubbles_names
+        assert "self_nudge" in bluebubbles_names
         assert [t["function"]["name"] for t in cli_tools] == ["send_user_message"]
         assert api_tools == []
+
+    def test_send_tts_message_hidden_when_tts_unavailable(self, monkeypatch):
+        monkeypatch.setattr("tools.tts_tool.check_tts_requirements", lambda: False)
+
+        tools = get_tool_definitions(
+            enabled_toolsets=["user_updates"],
+            quiet_mode=True,
+            platform="telegram",
+        )
+
+        tool_names = [t["function"]["name"] for t in tools]
+        assert "send_user_message" in tool_names
+        assert "send_tts_message" not in tool_names
+        assert "self_nudge" in tool_names
 
     def test_terminal_gateway_local_param_hidden_when_unavailable(self, monkeypatch):
         monkeypatch.setattr(terminal_tool_module, "can_offer_gateway_local", lambda config=None: False)

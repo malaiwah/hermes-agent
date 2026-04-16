@@ -153,6 +153,7 @@ def _discover_tools():
         "tools.session_search_tool",
         "tools.clarify_tool",
         "tools.send_user_message_tool",
+        "tools.send_tts_message_tool",
         "tools.self_nudge_tool",
         "tools.code_execution_tool",
         "tools.delegate_tool",
@@ -316,12 +317,13 @@ def get_tool_definitions(
             if td.get("function", {}).get("name") != "clarify"
         ]
 
-    # Interactive in-session messaging is only meaningful when Hermes has a
+    # Interactive in-session text messaging is only meaningful when Hermes has a
     # live session surface that can route updates back to the current user.
     # Keep it out of non-interactive/default contexts so the model does not
     # waste turns on a tool that will deterministically fail at runtime.
     interactive_message_platforms = {
         "acp",
+        "bluebubbles",
         "cli",
         "discord",
         "dingtalk",
@@ -342,7 +344,32 @@ def get_tool_definitions(
             if td.get("function", {}).get("name") != "send_user_message"
         ]
 
+    # Side-effecting TTS delivery needs the gateway media callback. Keep it out
+    # of CLI/ACP/default contexts where Hermes can generate audio but cannot
+    # immediately deliver it back to the active session.
+    gateway_media_message_platforms = {
+        "bluebubbles",
+        "discord",
+        "dingtalk",
+        "email",
+        "feishu",
+        "homeassistant",
+        "matrix",
+        "mattermost",
+        "signal",
+        "slack",
+        "telegram",
+        "wecom",
+        "whatsapp",
+    }
+    if platform not in gateway_media_message_platforms:
+        filtered_tools = [
+            td for td in filtered_tools
+            if td.get("function", {}).get("name") != "send_tts_message"
+        ]
+
     gateway_self_nudge_platforms = {
+        "bluebubbles",
         "discord",
         "dingtalk",
         "email",
@@ -442,7 +469,7 @@ def get_tool_definitions(
 # because they need agent-level state (TodoStore, MemoryStore, etc.).
 # The registry still holds their schemas; dispatch just returns a stub error
 # so if something slips through, the LLM sees a sensible message.
-_AGENT_LOOP_TOOLS = {"todo", "memory", "session_search", "delegate_task", "list_models", "send_user_message", "self_nudge"}
+_AGENT_LOOP_TOOLS = {"todo", "memory", "session_search", "delegate_task", "list_models", "send_user_message", "send_tts_message", "self_nudge"}
 _READ_SEARCH_TOOLS = {"read_file", "search_files"}
 
 

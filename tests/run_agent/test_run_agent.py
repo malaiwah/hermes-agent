@@ -1187,6 +1187,21 @@ class TestConcurrentToolExecution:
                 mock_seq.assert_called_once()
                 mock_con.assert_not_called()
 
+    def test_send_tts_message_forces_sequential(self, agent):
+        tc1 = _mock_tool_call(name="web_search", arguments='{}', call_id="c1")
+        tc2 = _mock_tool_call(
+            name="send_tts_message",
+            arguments='{"text":"On it..."}',
+            call_id="c2",
+        )
+        mock_msg = _mock_assistant_msg(content="", tool_calls=[tc1, tc2])
+        messages = []
+        with patch.object(agent, "_execute_tool_calls_sequential") as mock_seq:
+            with patch.object(agent, "_execute_tool_calls_concurrent") as mock_con:
+                agent._execute_tool_calls(mock_msg, messages, "task-1")
+                mock_seq.assert_called_once()
+                mock_con.assert_not_called()
+
     def test_self_nudge_forces_sequential(self, agent):
         tc1 = _mock_tool_call(name="web_search", arguments='{}', call_id="c1")
         tc2 = _mock_tool_call(
@@ -1513,6 +1528,78 @@ class TestConcurrentToolExecution:
         assert "error" in result
         assert "not available" in result["error"].lower()
 
+    def test_invoke_tool_send_tts_message_uses_media_callback(self, agent):
+        media_cb = MagicMock()
+        message_cb = MagicMock()
+        agent.media_message_callback = media_cb
+        agent.message_callback = message_cb
+
+        tts_result = json.dumps({
+            "success": True,
+            "file_path": "/tmp/reply.ogg",
+            "media_tag": "[[audio_as_voice]]\nMEDIA:/tmp/reply.ogg",
+            "provider": "qwen3",
+            "voice_compatible": True,
+        })
+
+        with patch("tools.tts_tool.text_to_speech_tool", return_value=tts_result):
+            result = json.loads(
+                agent._invoke_tool(
+                    "send_tts_message",
+                    {"text": "Hello there", "message": "Sent now."},
+                    "task-1",
+                )
+            )
+
+        media_cb.assert_called_once_with([("/tmp/reply.ogg", True)])
+        message_cb.assert_called_once_with("Sent now.")
+        assert result["sent"] is True
+        assert result["message_sent"] is True
+        assert result["provider"] == "qwen3"
+        assert result["voice_compatible"] is True
+
+    def test_invoke_tool_send_tts_message_errors_without_media_callback(self, agent):
+        agent.media_message_callback = None
+
+        result = json.loads(
+            agent._invoke_tool(
+                "send_tts_message",
+                {"text": "No route available."},
+                "task-1",
+            )
+        )
+
+        assert "error" in result
+        assert "not available" in result["error"].lower()
+
+    def test_invoke_tool_send_tts_message_reports_undelivered_sideband_text(self, agent):
+        media_cb = MagicMock()
+        agent.media_message_callback = media_cb
+        agent.message_callback = None
+        agent.status_callback = None
+
+        tts_result = json.dumps({
+            "success": True,
+            "file_path": "/tmp/reply.ogg",
+            "media_tag": "[[audio_as_voice]]\nMEDIA:/tmp/reply.ogg",
+            "provider": "qwen3",
+            "voice_compatible": True,
+        })
+
+        with patch("tools.tts_tool.text_to_speech_tool", return_value=tts_result):
+            result = json.loads(
+                agent._invoke_tool(
+                    "send_tts_message",
+                    {"text": "Hello there", "message": "Sent now."},
+                    "task-1",
+                )
+            )
+
+        media_cb.assert_called_once_with([("/tmp/reply.ogg", True)])
+        assert result["sent"] is True
+        assert result["message_sent"] is False
+        assert "could not be sent" in result["warning"]
+
     def test_invoke_tool_self_nudge_uses_callback(self, agent):
         cb = MagicMock(return_value={"armed": True, "delay_seconds": 300})
         agent.self_nudge_callback = cb
@@ -1560,6 +1647,36 @@ class TestConcurrentToolExecution:
 
         progress_cb.assert_not_called()
         message_cb.assert_called_once_with("I am updating the config now.")
+        assert len(messages) == 1
+        payload = json.loads(messages[0]["content"])
+        assert payload["sent"] is True
+
+    def test_send_tts_message_skips_generic_tool_progress_callback(self, agent):
+        tc = _mock_tool_call(
+            name="send_tts_message",
+            arguments='{"text":"Voice update."}',
+            call_id="c1",
+        )
+        mock_msg = _mock_assistant_msg(content="", tool_calls=[tc])
+        messages = []
+        progress_cb = MagicMock()
+        media_cb = MagicMock()
+        agent.tool_progress_callback = progress_cb
+        agent.media_message_callback = media_cb
+
+        tts_result = json.dumps({
+            "success": True,
+            "file_path": "/tmp/reply.ogg",
+            "media_tag": "[[audio_as_voice]]\nMEDIA:/tmp/reply.ogg",
+            "provider": "qwen3",
+            "voice_compatible": True,
+        })
+
+        with patch("tools.tts_tool.text_to_speech_tool", return_value=tts_result):
+            agent._execute_tool_calls_sequential(mock_msg, messages, "task-1")
+
+        progress_cb.assert_not_called()
+        media_cb.assert_called_once_with([("/tmp/reply.ogg", True)])
         assert len(messages) == 1
         payload = json.loads(messages[0]["content"])
         assert payload["sent"] is True
