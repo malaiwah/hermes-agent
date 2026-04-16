@@ -25,6 +25,7 @@ import signal
 import tempfile
 import threading
 import time
+from collections import deque
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Any, List
@@ -379,6 +380,25 @@ def _extract_voice_reply_directives(
 
     return cleaned, extracted_instruct, extracted_voice
 _SELF_NUDGE_MAX_DELAY_SECONDS = 86400
+_INTERACTIVE_TIMING_HISTORY_LIMIT = 6
+_SLOW_TOOL_SECONDS = 1.5
+_INTERACTIVE_TIMING_PLATFORMS = {
+    "acp",
+    "bluebubbles",
+    "cli",
+    "discord",
+    "dingtalk",
+    "email",
+    "feishu",
+    "homeassistant",
+    "matrix",
+    "mattermost",
+    "signal",
+    "slack",
+    "telegram",
+    "wecom",
+    "whatsapp",
+}
 
 
 def _resolve_runtime_agent_kwargs() -> dict:
@@ -668,6 +688,11 @@ class GatewayRunner:
         # Track background tasks to prevent garbage collection mid-execution
         self._background_tasks: set = set()
 
+        # Interactive responsiveness feedback — compact per-session timing
+        # history surfaced back into future turns so the agent can decide
+        # when a progress update is warranted.
+        self._interactive_timing_state: Dict[str, Dict[str, Any]] = {}
+
 
 
 
@@ -729,6 +754,197 @@ class GatewayRunner:
         disabled_chats.update(
             chat_id for chat_id, mode in self._voice_mode.items() if mode == "off"
         )
+
+    # -- Interactive timing feedback -----------------------------------
+
+    def _get_interactive_timing_bucket(self, session_key: str) -> Dict[str, Any]:
+        bucket = self._interactive_timing_state.get(session_key)
+        if bucket is None:
+            bucket = {
+                "recent_turns": deque(maxlen=_INTERACTIVE_TIMING_HISTORY_LIMIT),
+                "last_turn_completed_at": None,
+            }
+            self._interactive_timing_state[session_key] = bucket
+        return bucket
+
+    def _start_interactive_turn(
+        self,
+        session_key: str,
+        *,
+        platform_name: str,
+        chat_id: str,
+        message_type: str,
+        is_voice: bool,
+        asr_seconds: float | None = None,
+    ) -> Dict[str, Any]:
+        bucket = self._get_interactive_timing_bucket(session_key)
+        started_at = time.perf_counter()
+        last_completed_at = bucket.get("last_turn_completed_at")
+        since_last_turn = (
+            max(0.0, started_at - float(last_completed_at))
+            if last_completed_at is not None
+            else None
+        )
+        turn = {
+            "turn_id": f"turn_{uuid.uuid4().hex[:10]}",
+            "platform": platform_name,
+            "chat_id": str(chat_id),
+            "message_type": message_type,
+            "is_voice": bool(is_voice),
+            "started_at": started_at,
+            "asr_seconds": asr_seconds,
+            "since_last_turn_seconds": since_last_turn,
+            "first_visible_output_seconds": None,
+            "first_visible_output_kind": "",
+            "first_audible_output_seconds": None,
+            "first_audible_output_kind": "",
+            "response_ready_seconds": None,
+            "final_turn_seconds": None,
+            "sideband_updates": 0,
+            "tool_timings": [],
+            "slow_tools": [],
+            "delivery_attempted": False,
+            "delivery_succeeded": False,
+        }
+        bucket["active_turn"] = turn
+        return turn
+
+    @staticmethod
+    def _mark_turn_first_visible_output(turn: Dict[str, Any], kind: str) -> None:
+        if turn.get("first_visible_output_seconds") is not None:
+            return
+        turn["first_visible_output_seconds"] = max(
+            0.0, time.perf_counter() - float(turn["started_at"])
+        )
+        turn["first_visible_output_kind"] = kind
+
+    @staticmethod
+    def _mark_turn_first_audible_output(turn: Dict[str, Any], kind: str) -> None:
+        if turn.get("first_audible_output_seconds") is not None:
+            return
+        turn["first_audible_output_seconds"] = max(
+            0.0, time.perf_counter() - float(turn["started_at"])
+        )
+        turn["first_audible_output_kind"] = kind
+
+    @staticmethod
+    def _mark_turn_response_ready(turn: Dict[str, Any], elapsed_seconds: float) -> None:
+        turn["response_ready_seconds"] = max(0.0, float(elapsed_seconds))
+
+    @staticmethod
+    def _record_turn_tool_timing(turn: Dict[str, Any], name: str, duration_seconds: float) -> None:
+        duration = max(0.0, float(duration_seconds))
+        turn.setdefault("tool_timings", []).append({
+            "name": name,
+            "seconds": duration,
+        })
+        if duration >= _SLOW_TOOL_SECONDS and name not in {
+            "send_user_message",
+            "send_tts_message",
+            "self_nudge",
+        }:
+            turn.setdefault("slow_tools", []).append({
+                "name": name,
+                "seconds": duration,
+            })
+
+    def _finalize_interactive_turn(
+        self,
+        session_key: str,
+        turn: Dict[str, Any] | None,
+        *,
+        delivery_attempted: bool,
+        delivery_succeeded: bool,
+    ) -> None:
+        if not turn:
+            return
+        bucket = self._get_interactive_timing_bucket(session_key)
+        if bucket.get("active_turn") is turn:
+            bucket.pop("active_turn", None)
+        completed_at = time.perf_counter()
+        turn["delivery_attempted"] = bool(delivery_attempted)
+        turn["delivery_succeeded"] = bool(delivery_succeeded)
+        turn["final_turn_seconds"] = max(0.0, completed_at - float(turn["started_at"]))
+        if turn.get("slow_tools"):
+            slowest = sorted(
+                turn["slow_tools"],
+                key=lambda entry: entry.get("seconds", 0.0),
+                reverse=True,
+            )
+            turn["slow_tools"] = slowest[:3]
+        bucket["recent_turns"].append(turn)
+        bucket["last_turn_completed_at"] = completed_at
+
+    @staticmethod
+    def _format_timing_value(value: float | None) -> str:
+        if value is None:
+            return "n/a"
+        return f"{value:.1f}s"
+
+    def _build_interactive_timing_guidance(
+        self,
+        session_key: str,
+        *,
+        platform_name: str,
+        is_voice: bool,
+    ) -> str:
+        if platform_name not in _INTERACTIVE_TIMING_PLATFORMS:
+            return ""
+
+        bucket = self._get_interactive_timing_bucket(session_key)
+        recent_turns = list(bucket.get("recent_turns") or [])
+        generic = (
+            "Responsiveness goal: keep the UX reactive. If a turn is getting slow because of tools, "
+            "multiple model calls, or long reasoning, use send_user_message once with a brief first-person "
+            "progress update instead of going silent."
+        )
+        if not recent_turns:
+            return f"[{generic}]"
+
+        last_turn = recent_turns[-1]
+        if is_voice:
+            for candidate in reversed(recent_turns):
+                if candidate.get("is_voice"):
+                    last_turn = candidate
+                    break
+        avg_turn = sum(
+            float(t.get("final_turn_seconds") or 0.0) for t in recent_turns
+        ) / max(1, len(recent_turns))
+        parts = [
+            generic,
+            (
+                "Recent timing: "
+                f"previous first visible output {self._format_timing_value(last_turn.get('first_visible_output_seconds'))}; "
+                f"previous final turn {self._format_timing_value(last_turn.get('final_turn_seconds'))}; "
+                f"rolling average {self._format_timing_value(avg_turn)}; "
+                f"time since last turn {self._format_timing_value(last_turn.get('since_last_turn_seconds'))}."
+            ),
+        ]
+        if last_turn.get("slow_tools"):
+            slow_text = ", ".join(
+                f"{entry['name']} {entry['seconds']:.1f}s"
+                for entry in last_turn["slow_tools"]
+            )
+            parts.append(f"Last slower tools: {slow_text}.")
+        if is_voice:
+            voice_gaps = [
+                float(t.get("since_last_turn_seconds") or 0.0)
+                for t in recent_turns
+                if t.get("is_voice") and t.get("since_last_turn_seconds") is not None
+            ]
+            avg_gap = (
+                sum(voice_gaps) / len(voice_gaps)
+                if voice_gaps
+                else None
+            )
+            parts.append(
+                "Live voice timing: "
+                f"previous ASR {self._format_timing_value(last_turn.get('asr_seconds'))}; "
+                f"previous first audible output {self._format_timing_value(last_turn.get('first_audible_output_seconds'))}; "
+                f"average between recent turns {self._format_timing_value(avg_gap)}. "
+                "In live voice, send_user_message becomes a quick spoken acknowledgement while you continue working."
+            )
+        return "[" + " ".join(parts) + "]"
 
     # -----------------------------------------------------------------
 
@@ -3471,6 +3687,54 @@ class GatewayRunner:
                 except Exception as exc:
                     logger.debug("@ context reference expansion failed: %s", exc)
 
+            _is_voice_input = event.message_type in (MessageType.VOICE, MessageType.AUDIO)
+            _voice_stt_seconds = None
+            try:
+                _voice_stt_seconds = float(getattr(event, "_voice_turn_stt_ms", 0.0)) / 1000.0
+            except (TypeError, ValueError):
+                _voice_stt_seconds = None
+            _turn_state = self._start_interactive_turn(
+                session_key,
+                platform_name=_platform_name,
+                chat_id=source.chat_id or "",
+                message_type=getattr(event.message_type, "value", str(event.message_type)),
+                is_voice=_is_voice_input,
+                asr_seconds=_voice_stt_seconds,
+            )
+
+            def _on_first_visible(kind: str = "sideband_text") -> None:
+                self._mark_turn_first_visible_output(_turn_state, kind)
+
+            def _on_first_audible(kind: str = "voice_playback") -> None:
+                self._mark_turn_first_audible_output(_turn_state, kind)
+
+            def _on_finalize(delivery_attempted: bool, delivery_succeeded: bool) -> None:
+                self._finalize_interactive_turn(
+                    session_key,
+                    _turn_state,
+                    delivery_attempted=delivery_attempted,
+                    delivery_succeeded=delivery_succeeded,
+                )
+
+            setattr(
+                event,
+                "_responsiveness_callbacks",
+                {
+                    "first_visible_output": _on_first_visible,
+                    "first_audible_output": _on_first_audible,
+                    "finalize_turn": _on_finalize,
+                    "turn_id": _turn_state["turn_id"],
+                },
+            )
+
+            _timing_guidance = self._build_interactive_timing_guidance(
+                session_key,
+                platform_name=_platform_config_key(source.platform),
+                is_voice=_is_voice_input,
+            )
+            if _timing_guidance:
+                message_text = f"{_timing_guidance}\n\n{message_text}"
+
             # Voice-mode guidance: when the user is speaking via voice,
             # instruct the model to be concise and avoid emojis/special chars
             # because the response will be converted to live speech.
@@ -3481,7 +3745,6 @@ class GatewayRunner:
             # Voice-mode coverage: VOICE (voice channel input) OR AUDIO
             # (Discord voice message attachment, Telegram voice note, etc.)
             # — both are spoken input and deserve the voice prompt block.
-            _is_voice_input = event.message_type in (MessageType.VOICE, MessageType.AUDIO)
             if _is_voice_input:
                 # Get the current/last TTS instruct for context
                 _adapter_for_instruct = self.adapters.get(event.source.platform)
@@ -3528,6 +3791,8 @@ class GatewayRunner:
                         "Avoid markdown formatting, code blocks, and tables.\n"
                         f"{_lang_hint}"
                         f"Current voice direction: {_last_instruct}\n"
+                        "Keep the same voice and emotional direction between any quick spoken acknowledgement "
+                        "and your final spoken answer unless the conversation meaningfully changes.\n"
                         "Start your reply with a TTS voice direction tag on its "
                         "own line BEFORE your response (only if the tone should "
                         "change from the current direction):\n"
@@ -3547,10 +3812,12 @@ class GatewayRunner:
                         "Call list_voice_clones to see all available voices with gender info.\n"
                         "VOICE FEEDBACK: When using tools, call send_user_message "
                         "in PARALLEL with your first tool call to acknowledge the "
-                        "user. Speak in FIRST PERSON, natural conversational tone "
+                        "user. In a live Discord voice channel this becomes a quick spoken acknowledgement "
+                        "while you keep working in the background. Speak in FIRST PERSON, natural conversational tone "
                         "('I', 'Let me', 'On it' — never 'Searching for X'). Keep "
                         "to 5-12 words. END progress updates with '...' (trailing "
                         "intonation); only the FINAL answer uses period/exclamation. "
+                        "If the acknowledgement already handled the visible response for this turn, finish with exact [SILENT]. "
                         "Vary phrasing, match tone to task complexity:\n"
                         "  Quick:   'One sec...'  /  'On it...'\n"
                         "  Medium:  'Let me check that...'  /  'Looking into it...'\n"
@@ -3569,7 +3836,8 @@ class GatewayRunner:
                     message_text = (
                         "[Voice mode. "
                         f"{_lang_hint}"
-                        f"Current voice direction: {_last_instruct}]\n\n"
+                        f"Current voice direction: {_last_instruct}. "
+                        "Keep quick acknowledgements and final spoken answers tonally continuous unless the situation changes.]\n\n"
                         + message_text
                     )
 
@@ -3585,6 +3853,7 @@ class GatewayRunner:
                 source=source,
                 session_id=session_entry.session_id,
                 session_key=session_key,
+                turn_state=_turn_state,
                 event_message_id=event.message_id,
                 persist_user_message=getattr(event, "persist_user_message", None),
             )
@@ -3624,6 +3893,7 @@ class GatewayRunner:
                 _platform_name, source.chat_id or "unknown",
                 _response_time, _api_calls, _resp_len,
             )
+            self._mark_turn_response_ready(_turn_state, _response_time)
 
             # Surface error details when the agent failed silently (final_response=None)
             if not response and agent_result.get("failed"):
@@ -5465,7 +5735,13 @@ class GatewayRunner:
                 _voice_primer_shown.discard(chat_id)
 
     async def _handle_voice_channel_input(
-        self, guild_id: int, user_id: int, transcript: str, language: str = None
+        self,
+        guild_id: int,
+        user_id: int,
+        transcript: str,
+        language: str = None,
+        trace_id: str = "",
+        stt_ms: float | None = None,
     ):
         """Handle transcribed voice from a user in a voice channel.
 
@@ -5546,6 +5822,10 @@ class GatewayRunner:
         # Attach detected language so downstream handlers can use it
         if language:
             event._voice_language = language
+        if trace_id:
+            event._voice_trace_id = trace_id
+        if stt_ms is not None:
+            event._voice_turn_stt_ms = float(stt_ms)
 
         await adapter.handle_message(event)
 
@@ -7705,6 +7985,7 @@ class GatewayRunner:
         source: SessionSource,
         session_id: str,
         session_key: str = None,
+        turn_state: Optional[Dict[str, Any]] = None,
         _interrupt_depth: int = 0,
         event_message_id: Optional[str] = None,
         persist_user_message: Optional[str] = None,
@@ -7972,6 +8253,7 @@ class GatewayRunner:
         result_holder = [None]  # Mutable container for the result
         tools_holder = [None]   # Mutable container for the tool definitions
         stream_consumer_holder = [None]  # Mutable container for stream consumer
+        _tool_started_at: Dict[str, float] = {}
         
         # Bridge sync step_callback → async hooks.emit for agent:step events
         _loop_for_step = asyncio.get_event_loop()
@@ -8001,6 +8283,24 @@ class GatewayRunner:
                 )
             except Exception as _e:
                 logger.debug("agent:step hook error: %s", _e)
+
+        def _tool_start_callback_sync(tool_call_id: str, function_name: str, _function_args: dict) -> None:
+            _tool_started_at[tool_call_id] = time.perf_counter()
+
+        def _tool_complete_callback_sync(
+            tool_call_id: str,
+            function_name: str,
+            _function_args: dict,
+            _function_result: str,
+        ) -> None:
+            started_at = _tool_started_at.pop(tool_call_id, None)
+            if started_at is None or turn_state is None:
+                return
+            self._record_turn_tool_timing(
+                turn_state,
+                function_name,
+                time.perf_counter() - started_at,
+            )
 
         # Bridge sync status_callback → async adapter.send for context pressure
         _status_adapter = self.adapters.get(source.platform)
@@ -8051,6 +8351,9 @@ class GatewayRunner:
                     ),
                     _loop_for_step,
                 )
+                if turn_state is not None:
+                    turn_state["sideband_updates"] = int(turn_state.get("sideband_updates", 0)) + 1
+                    self._mark_turn_first_visible_output(turn_state, "sideband_text")
 
                 if _gid:
                     async def _play_voice_update():
@@ -8094,7 +8397,35 @@ class GatewayRunner:
                             from gateway.platforms.discord import (
                                 StreamingPCMAudioSource, feed_pcm_stream_sync,
                             )
-                            _src = StreamingPCMAudioSource()
+                            _trace_id = (
+                                f"{turn_state['turn_id']}_ack"
+                                if turn_state is not None
+                                else f"ack_{int(time.time() * 1000)}"
+                            )
+                            logger.info(
+                                "voice pipeline: vc_ack_request_start trace_id=%s guild=%s chat=%s "
+                                "chars=%d voice=%s instruct=%r",
+                                _trace_id,
+                                _gid,
+                                _status_chat_id,
+                                len(_clean),
+                                _voice,
+                                (_instruct or "")[:80],
+                            )
+                            _src = StreamingPCMAudioSource(
+                                trace_id=_trace_id,
+                                trace_meta={
+                                    "guild_id": _gid,
+                                    "chat_id": _status_chat_id,
+                                    "turn_kind": "ack",
+                                    "turn_id": turn_state["turn_id"] if turn_state is not None else "",
+                                    "on_playback_begin": (
+                                        (lambda: self._mark_turn_first_audible_output(turn_state, "ack_voice"))
+                                        if turn_state is not None
+                                        else None
+                                    ),
+                                },
+                            )
                             _feed_fut = _loop_for_step.run_in_executor(
                                 None, feed_pcm_stream_sync, _url, _src, 60.0,
                             )
@@ -8335,6 +8666,8 @@ class GatewayRunner:
             # turn and must not be baked into the cached agent constructor.
             agent.tool_progress_callback = progress_callback if tool_progress_enabled else None
             agent.step_callback = _step_callback_sync if _hooks_ref.loaded_hooks else None
+            agent.tool_start_callback = _tool_start_callback_sync
+            agent.tool_complete_callback = _tool_complete_callback_sync
             agent.stream_delta_callback = _stream_delta_cb
             agent.message_callback = _message_callback_sync
             agent.media_message_callback = _media_message_callback_sync

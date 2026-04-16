@@ -1678,11 +1678,18 @@ class DiscordAdapter(BasePlatformAdapter):
                 receiver.start_playback()
 
             logger.info(
-                "voice pipeline: vc_playback_begin trace_id=%s guild=%s chat=%s",
+                "voice pipeline: vc_playback_begin trace_id=%s guild=%s chat=%s turn_kind=%s",
                 getattr(pcm_source, "_trace_id", "") or "-",
                 guild_id,
                 getattr(pcm_source, "_trace_meta", {}).get("chat_id", "-"),
+                getattr(pcm_source, "_trace_meta", {}).get("turn_kind", "-"),
             )
+            _begin_cb = getattr(pcm_source, "_trace_meta", {}).get("on_playback_begin")
+            if callable(_begin_cb):
+                try:
+                    _begin_cb()
+                except Exception:
+                    logger.debug("voice pipeline playback-begin callback failed", exc_info=True)
             vc.play(pcm_source, after=_after)
             try:
                 await asyncio.wait_for(done.wait(), timeout=self.PLAYBACK_TIMEOUT)
@@ -1692,13 +1699,20 @@ class DiscordAdapter(BasePlatformAdapter):
             self._reset_voice_timeout(guild_id)
             logger.info(
                 "voice pipeline: vc_playback_complete trace_id=%s guild=%s chat=%s "
-                "elapsed_ms=%.1f barge_in=%s",
+                "turn_kind=%s elapsed_ms=%.1f barge_in=%s",
                 getattr(pcm_source, "_trace_id", "") or "-",
                 guild_id,
                 getattr(pcm_source, "_trace_meta", {}).get("chat_id", "-"),
+                getattr(pcm_source, "_trace_meta", {}).get("turn_kind", "-"),
                 (time.perf_counter() - _play_t0) * 1000.0,
                 _barge_in_event.is_set(),
             )
+            _complete_cb = getattr(pcm_source, "_trace_meta", {}).get("on_playback_complete")
+            if callable(_complete_cb):
+                try:
+                    _complete_cb(not _barge_in_event.is_set())
+                except Exception:
+                    logger.debug("voice pipeline playback-complete callback failed", exc_info=True)
             return not _barge_in_event.is_set()
         finally:
             if receiver:
@@ -2055,6 +2069,8 @@ class DiscordAdapter(BasePlatformAdapter):
                     user_id=user_id,
                     transcript=transcript,
                     language=language,
+                    trace_id=trace_id,
+                    stt_ms=_prep_elapsed_ms + _stt_elapsed_ms,
                 )
         except Exception as e:
             logger.warning("Voice input processing failed: %s", e, exc_info=True)

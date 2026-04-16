@@ -111,6 +111,7 @@ class TestBasePlatformTopicSessions:
     async def test_process_message_background_replies_in_same_topic(self):
         adapter = DummyTelegramAdapter()
         typing_calls = []
+        callbacks = []
 
         async def handler(_event):
             await asyncio.sleep(0)
@@ -124,6 +125,10 @@ class TestBasePlatformTopicSessions:
         adapter._keep_typing = hold_typing
 
         event = _make_event("-1001", "17585")
+        event._responsiveness_callbacks = {
+            "first_visible_output": lambda kind: callbacks.append(("visible", kind)),
+            "finalize_turn": lambda attempted, succeeded: callbacks.append(("finalize", attempted, succeeded)),
+        }
         await adapter._process_message_background(event, build_session_key(event.source))
 
         assert adapter.sent == [
@@ -143,6 +148,10 @@ class TestBasePlatformTopicSessions:
         assert adapter.processing_hooks == [
             ("start", "1"),
             ("complete", "1", True),
+        ]
+        assert callbacks == [
+            ("visible", "final_text"),
+            ("finalize", True, True),
         ]
 
     @pytest.mark.asyncio

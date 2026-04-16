@@ -84,6 +84,7 @@ def _make_runner(tmp_path):
     runner._VOICE_MODE_PATH = tmp_path / "gateway_voice_mode.json"
     runner._session_db = None
     runner.session_store = MagicMock()
+    runner._interactive_timing_state = {}
     runner._is_user_authorized = lambda source: True
     return runner
 
@@ -1132,7 +1133,13 @@ class TestDiscordVoiceChannelMethods:
              caplog.at_level(logging.INFO):
             await adapter._process_voice_input(111, 42, pcm_data, trace_id="vc_test_1")
 
-        callback.assert_called_once_with(guild_id=111, user_id=42, transcript="Hello", language=None)
+        callback.assert_called_once()
+        assert callback.call_args.kwargs["guild_id"] == 111
+        assert callback.call_args.kwargs["user_id"] == 42
+        assert callback.call_args.kwargs["transcript"] == "Hello"
+        assert callback.call_args.kwargs["language"] is None
+        assert callback.call_args.kwargs["trace_id"] == "vc_test_1"
+        assert callback.call_args.kwargs["stt_ms"] >= 0.0
         assert "voice pipeline: vc_stt_complete" in caplog.text
         assert "vc_test_1" in caplog.text
 

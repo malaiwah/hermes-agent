@@ -1422,6 +1422,17 @@ class BasePlatformAdapter(ABC):
             if getattr(result, "success", False):
                 delivery_succeeded = True
 
+        _resp_callbacks = getattr(event, "_responsiveness_callbacks", {}) or {}
+
+        def _emit_responsiveness(name: str, *args) -> None:
+            cb = _resp_callbacks.get(name)
+            if not callable(cb):
+                return
+            try:
+                cb(*args)
+            except Exception:
+                logger.debug("[%s] responsiveness callback %s failed", self.name, name, exc_info=True)
+
         # Reuse the interrupt event set by handle_message() (which marks
         # the session active before spawning this task to prevent races).
         # Fall back to a new Event only if the entry was removed externally.
@@ -1617,21 +1628,31 @@ class BasePlatformAdapter(ABC):
                                             _trace_id = f"vcplay_{_gid}_{int(time.time() * 1000)}"
                                             logger.info(
                                                 "[%s] voice pipeline: vc_tts_request_start trace_id=%s guild=%s "
-                                                "chat=%s chars=%d voice=%s language=%s has_instruct=%s",
+                                                "chat=%s turn_kind=%s chars=%d voice=%s language=%s has_instruct=%s instruct=%r",
                                                 self.name,
                                                 _trace_id,
                                                 _gid,
                                                 event.source.chat_id,
+                                                "final",
                                                 len(speech_text),
                                                 _voice,
                                                 _tts_language or "unknown",
                                                 bool(_instruct),
+                                                (_instruct or "")[:80],
                                             )
                                             _src = StreamingPCMAudioSource(
                                                 trace_id=_trace_id,
                                                 trace_meta={
                                                     "guild_id": _gid,
                                                     "chat_id": event.source.chat_id,
+                                                    "turn_kind": "final",
+                                                    "turn_id": _resp_callbacks.get("turn_id", ""),
+                                                    "on_playback_begin": (
+                                                        lambda: _emit_responsiveness(
+                                                            "first_audible_output",
+                                                            "final_voice",
+                                                        )
+                                                    ),
                                                 },
                                             )
                                             _loop = asyncio.get_running_loop()
@@ -1715,6 +1736,8 @@ class BasePlatformAdapter(ABC):
                         metadata=_thread_metadata,
                     )
                     _record_delivery(result)
+                    if getattr(result, "success", False):
+                        _emit_responsiveness("first_visible_output", "final_text")
 
                 # Human-like pacing delay between text and media
                 human_delay = self._get_human_delay()
@@ -1871,6 +1894,11 @@ class BasePlatformAdapter(ABC):
             except Exception:
                 pass  # Last resort — don't let error reporting crash the handler
         finally:
+            _emit_responsiveness(
+                "finalize_turn",
+                delivery_attempted,
+                delivery_succeeded,
+            )
             # Stop typing indicator
             typing_task.cancel()
             try:

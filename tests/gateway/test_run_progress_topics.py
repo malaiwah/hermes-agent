@@ -117,6 +117,7 @@ def _make_runner(adapter):
     runner._session_db = None
     runner._running_agents = {}
     runner._pending_hidden_turns = {}
+    runner._interactive_timing_state = {}
     runner.hooks = SimpleNamespace(loaded_hooks=False)
     return runner
 
@@ -216,6 +217,72 @@ async def test_run_agent_progress_does_not_use_event_message_id_for_telegram_dm(
     assert adapter.sent
     assert adapter.sent[0]["metadata"] is None
     assert all(call["metadata"] is None for call in adapter.typing)
+
+
+def test_build_interactive_timing_guidance_mentions_recent_slow_tools():
+    gateway_run = importlib.import_module("gateway.run")
+    runner = _make_runner(ProgressCaptureAdapter())
+
+    turn = runner._start_interactive_turn(
+        "sess-key",
+        platform_name="telegram",
+        chat_id="123",
+        message_type="text",
+        is_voice=False,
+    )
+    runner._mark_turn_first_visible_output(turn, "sideband_text")
+    runner._mark_turn_response_ready(turn, 4.2)
+    runner._record_turn_tool_timing(turn, "web_search", 2.3)
+    runner._record_turn_tool_timing(turn, "send_user_message", 0.1)
+    runner._finalize_interactive_turn(
+        "sess-key",
+        turn,
+        delivery_attempted=True,
+        delivery_succeeded=True,
+    )
+
+    guidance = runner._build_interactive_timing_guidance(
+        "sess-key",
+        platform_name="telegram",
+        is_voice=False,
+    )
+
+    assert "Responsiveness goal" in guidance
+    assert "previous first visible output" in guidance
+    assert "web_search 2.3s" in guidance
+    assert "send_user_message" in guidance
+
+
+def test_build_interactive_timing_guidance_mentions_voice_metrics():
+    runner = _make_runner(ProgressCaptureAdapter(platform=Platform.DISCORD))
+
+    turn = runner._start_interactive_turn(
+        "voice-sess",
+        platform_name="discord",
+        chat_id="123",
+        message_type="voice",
+        is_voice=True,
+        asr_seconds=0.4,
+    )
+    runner._mark_turn_first_audible_output(turn, "final_voice")
+    runner._mark_turn_response_ready(turn, 6.8)
+    runner._finalize_interactive_turn(
+        "voice-sess",
+        turn,
+        delivery_attempted=False,
+        delivery_succeeded=False,
+    )
+
+    guidance = runner._build_interactive_timing_guidance(
+        "voice-sess",
+        platform_name="discord",
+        is_voice=True,
+    )
+
+    assert "Live voice timing" in guidance
+    assert "previous ASR 0.4s" in guidance
+    assert "previous first audible output" in guidance
+    assert "quick spoken acknowledgement" in guidance
 
 
 @pytest.mark.asyncio
