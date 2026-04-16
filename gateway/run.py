@@ -314,6 +314,34 @@ logger = logging.getLogger(__name__)
 # between the guard check and actual agent creation.
 _AGENT_PENDING_SENTINEL = object()
 _SELF_NUDGE_NO_REPLY = "NO_REPLY"
+_GATEWAY_SILENT_MARKER = "[SILENT]"
+
+
+def _is_gateway_silent_response(content: str) -> bool:
+    """Return True when the content is an exact [SILENT] sentinel.
+
+    Mirrors the Discord bot-chain terminator normalization so the model can use
+    the same token to suppress normal interactive final delivery.
+    """
+    if not isinstance(content, str):
+        return False
+    cleaned = re.sub(r"<@!?\d+>", "", content).strip().strip("`").strip("*").strip("_").strip()
+    return cleaned.upper() == _GATEWAY_SILENT_MARKER
+
+
+def _strip_gateway_silent_response(
+    response: str,
+    messages: list | None,
+) -> tuple[str, bool]:
+    """Convert a final [SILENT] response into an empty delivery payload."""
+    if not _is_gateway_silent_response(response):
+        return response, False
+
+    if messages and messages[-1].get("role") == "assistant":
+        last_content = str(messages[-1].get("content") or "")
+        if _is_gateway_silent_response(last_content):
+            messages.pop()
+    return "", True
 _SELF_NUDGE_MAX_DELAY_SECONDS = 86400
 
 
@@ -3535,14 +3563,6 @@ class GatewayRunner:
 
             response = agent_result.get("final_response") or ""
             agent_messages = agent_result.get("messages", [])
-            _response_time = time.time() - _msg_start_time
-            _api_calls = agent_result.get("api_calls", 0)
-            _resp_len = len(response)
-            logger.info(
-                "response ready: platform=%s chat=%s time=%.1fs api_calls=%d response=%d chars",
-                _platform_name, source.chat_id or "unknown",
-                _response_time, _api_calls, _resp_len,
-            )
 
             if (
                 agent_result.get("self_nudge_armed")
@@ -3554,6 +3574,20 @@ class GatewayRunner:
                     _last_content = str(agent_messages[-1].get("content") or "").strip().upper()
                     if _last_content == _SELF_NUDGE_NO_REPLY:
                         agent_messages.pop()
+
+            response, _ = _strip_gateway_silent_response(
+                response,
+                agent_messages,
+            )
+
+            _response_time = time.time() - _msg_start_time
+            _api_calls = agent_result.get("api_calls", 0)
+            _resp_len = len(response)
+            logger.info(
+                "response ready: platform=%s chat=%s time=%.1fs api_calls=%d response=%d chars",
+                _platform_name, source.chat_id or "unknown",
+                _response_time, _api_calls, _resp_len,
+            )
 
             # Surface error details when the agent failed silently (final_response=None)
             if not response and agent_result.get("failed"):
@@ -8470,7 +8504,12 @@ class GatewayRunner:
                     if _last_content == _SELF_NUDGE_NO_REPLY:
                         _msgs.pop()
 
-            if not final_response:
+            final_response, _silent_suppressed = _strip_gateway_silent_response(
+                final_response or "",
+                result.get("messages") or [],
+            )
+
+            if not final_response and not _silent_suppressed:
                 error_msg = f"⚠️ {result['error']}" if result.get("error") else "(No response generated)"
                 return {
                     "final_response": error_msg,

@@ -89,6 +89,19 @@ class LongPreviewAgent:
         }
 
 
+class SilentFinalAgent:
+    def __init__(self, **kwargs):
+        self.tool_progress_callback = kwargs.get("tool_progress_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        return {
+            "final_response": "[SILENT]",
+            "messages": [{"role": "assistant", "content": "[SILENT]"}],
+            "api_calls": 1,
+        }
+
+
 def _make_runner(adapter):
     gateway_run = importlib.import_module("gateway.run")
     GatewayRunner = gateway_run.GatewayRunner
@@ -103,8 +116,18 @@ def _make_runner(adapter):
     runner._fallback_model = None
     runner._session_db = None
     runner._running_agents = {}
+    runner._pending_hidden_turns = {}
     runner.hooks = SimpleNamespace(loaded_hooks=False)
     return runner
+
+
+def test_gateway_silent_marker_normalization():
+    gateway_run = importlib.import_module("gateway.run")
+
+    assert gateway_run._is_gateway_silent_response("[SILENT]") is True
+    assert gateway_run._is_gateway_silent_response("  `[SILENT]`  ") is True
+    assert gateway_run._is_gateway_silent_response("**[SILENT]**") is True
+    assert gateway_run._is_gateway_silent_response("[SILENT] thanks") is False
 
 
 @pytest.mark.asyncio
@@ -235,6 +258,42 @@ async def test_run_agent_progress_uses_event_message_id_for_slack_dm(monkeypatch
     assert adapter.sent
     assert adapter.sent[0]["metadata"] == {"thread_id": "1234567890.000001"}
     assert all(call["metadata"] == {"thread_id": "1234567890.000001"} for call in adapter.typing)
+
+
+@pytest.mark.asyncio
+async def test_run_agent_silent_marker_returns_empty_final_response(monkeypatch, tmp_path):
+    fake_dotenv = types.ModuleType("dotenv")
+    fake_dotenv.load_dotenv = lambda *args, **kwargs: None
+    monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
+
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = SilentFinalAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+
+    adapter = ProgressCaptureAdapter(platform=Platform.DISCORD)
+    runner = _make_runner(adapter)
+    gateway_run = importlib.import_module("gateway.run")
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"})
+
+    source = SessionSource(
+        platform=Platform.DISCORD,
+        chat_id="1493945387470422257",
+        chat_type="group",
+        thread_id=None,
+    )
+
+    result = await runner._run_agent(
+        message="test silent",
+        context_prompt="",
+        history=[],
+        source=source,
+        session_id="sess-silent",
+        session_key="agent:main:discord:group:1493945387470422257",
+    )
+
+    assert result["final_response"] == ""
+    assert result["messages"] == []
 
 
 # ---------------------------------------------------------------------------
