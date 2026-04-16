@@ -10,6 +10,7 @@ Uses discord.py library for:
 """
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -19,6 +20,7 @@ import tempfile
 import threading
 import time
 from collections import defaultdict
+from collections import deque
 from pathlib import Path
 from typing import Callable, Dict, Optional, Any
 
@@ -61,6 +63,7 @@ from gateway.platforms.discord_vad import (
     SileroOnnxVAD,
 )
 from tools.url_safety import is_safe_url
+from hermes_constants import get_hermes_home
 
 
 def _clean_discord_id(entry: str) -> str:
@@ -348,6 +351,16 @@ class VoiceReceiver:
         self._vad_model: Optional[SileroOnnxVAD] = None
         self._vad_enabled = False
         self._vad_fallback_reason: Optional[str] = None
+        self._decode_error_stats: Dict[int, Dict[str, Any]] = {}
+        self._recent_packet_samples: Dict[int, deque] = {}
+        self._decode_error_threshold = 8
+        self._decode_error_window_seconds = 2.0
+        self._decode_quarantine_seconds = 2.0
+        self._recent_packet_sample_limit = 64
+        self._packet_dump_dir = get_hermes_home() / "logs" / "voice-packets"
+        self._packet_dump_mode = str(
+            os.getenv("HERMES_DISCORD_VOICE_PACKET_DUMP", "errors") or "errors"
+        ).strip().lower()
 
         # Opus decoder per SSRC (each user needs own decoder state)
         self._decoders: Dict[int, object] = {}
@@ -394,6 +407,18 @@ class VoiceReceiver:
         conn.add_socket_listener(self._on_packet)
         self._init_vad()
         self._running = True
+        if self._packet_dump_mode not in {"off", "errors", "all"}:
+            logger.warning(
+                "Unknown HERMES_DISCORD_VOICE_PACKET_DUMP=%s, falling back to errors",
+                self._packet_dump_mode,
+            )
+            self._packet_dump_mode = "errors"
+        if self._packet_dump_mode != "off":
+            logger.info(
+                "VoiceReceiver packet dump enabled: mode=%s dir=%s",
+                self._packet_dump_mode,
+                self._packet_dump_dir,
+            )
         logger.info("VoiceReceiver started (bot_ssrc=%d)", self._bot_ssrc)
 
     def stop(self):
@@ -410,6 +435,8 @@ class VoiceReceiver:
             self._decoders.clear()
             self._ssrc_to_user.clear()
             self._vad_states.clear()
+            self._decode_error_stats.clear()
+            self._recent_packet_samples.clear()
         logger.info("VoiceReceiver stopped")
 
     def _log_vad_fallback(self, reason: str):
@@ -456,6 +483,119 @@ class VoiceReceiver:
         self._last_packet_time[ssrc] = frame_time
         self._rms_sum[ssrc] += rms
         self._rms_count[ssrc] += 1
+
+    def _get_packet_sample_buffer(self, ssrc: int) -> deque:
+        samples = self._recent_packet_samples.get(ssrc)
+        if samples is None:
+            samples = deque(maxlen=self._recent_packet_sample_limit)
+            self._recent_packet_samples[ssrc] = samples
+        return samples
+
+    def _remember_packet_sample(self, ssrc: int, sample: Dict[str, Any]) -> None:
+        self._get_packet_sample_buffer(ssrc).append(sample)
+
+    def _append_packet_trace(self, ssrc: int, sample: Dict[str, Any]) -> Optional[str]:
+        if self._packet_dump_mode != "all":
+            return None
+        self._packet_dump_dir.mkdir(parents=True, exist_ok=True)
+        guild_id = getattr(getattr(self._vc, "guild", None), "id", "noguild")
+        trace_path = self._packet_dump_dir / f"discord-vc-{guild_id}-ssrc-{ssrc}.jsonl"
+        with trace_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(sample, ensure_ascii=False))
+            fh.write("\n")
+        return str(trace_path)
+
+    def _clear_decode_error_state(self, ssrc: int) -> None:
+        self._decode_error_stats.pop(ssrc, None)
+
+    def _write_decode_packet_dump(
+        self,
+        ssrc: int,
+        *,
+        error: str,
+        state: Dict[str, Any],
+        sample: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        self._packet_dump_dir.mkdir(parents=True, exist_ok=True)
+        guild_id = getattr(getattr(self._vc, "guild", None), "id", "noguild")
+        mapped_user = self._ssrc_to_user.get(ssrc)
+        payload = {
+            "type": "discord_voice_decode_error_dump",
+            "version": 1,
+            "captured_at": time.time(),
+            "guild_id": guild_id,
+            "voice_channel_id": getattr(getattr(self._vc, "channel", None), "id", None),
+            "ssrc": ssrc,
+            "mapped_user_id": mapped_user,
+            "allowed_user_ids": sorted(str(uid) for uid in self._allowed_user_ids),
+            "error": error,
+            "decode_error_state": {
+                "error_count": state.get("error_count", 0),
+                "first_error_at": state.get("first_error_at"),
+                "last_error_at": state.get("last_error_at"),
+                "quarantine_until": state.get("quarantine_until"),
+                "quarantine_count": state.get("quarantine_count", 0),
+            },
+            "latest_sample": sample,
+            "recent_samples": list(self._recent_packet_samples.get(ssrc, ())),
+        }
+        dump_name = f"discord-vc-{guild_id}-ssrc-{ssrc}-{int(time.time() * 1000)}.json"
+        dump_path = self._packet_dump_dir / dump_name
+        dump_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        return str(dump_path)
+
+    def _handle_decode_error(
+        self,
+        ssrc: int,
+        error: Exception,
+        *,
+        sample: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        now = time.monotonic()
+        state = self._decode_error_stats.get(ssrc)
+        if state is None or (now - float(state.get("first_error_at") or now)) > self._decode_error_window_seconds:
+            state = {
+                "error_count": 0,
+                "first_error_at": now,
+                "last_error_at": now,
+                "quarantine_until": 0.0,
+                "quarantine_count": 0,
+            }
+        state["error_count"] = int(state.get("error_count", 0)) + 1
+        state["last_error_at"] = now
+
+        breaker_triggered = state["error_count"] >= self._decode_error_threshold
+        dump_path = ""
+        if breaker_triggered:
+            state["quarantine_until"] = now + self._decode_quarantine_seconds
+            state["quarantine_count"] = int(state.get("quarantine_count", 0)) + 1
+            try:
+                dump_path = self._write_decode_packet_dump(
+                    ssrc,
+                    error=str(error),
+                    state=state,
+                    sample=sample,
+                )
+            except Exception as dump_error:
+                logger.warning("Failed to write voice packet dump for SSRC %s: %s", ssrc, dump_error)
+            logger.warning(
+                "Voice decode circuit breaker: guild=%s ssrc=%s user=%s errors=%d window_s=%.1f "
+                "quarantine_s=%.1f dump=%s",
+                getattr(getattr(self._vc, "guild", None), "id", "-"),
+                ssrc,
+                self._ssrc_to_user.get(ssrc, 0),
+                state["error_count"],
+                self._decode_error_window_seconds,
+                self._decode_quarantine_seconds,
+                dump_path or "-",
+            )
+            self._reset_ssrc_state(ssrc, drop_mapping=True)
+            state["error_count"] = 0
+            state["first_error_at"] = now
+        else:
+            self._reset_ssrc_state(ssrc)
+
+        self._decode_error_stats[ssrc] = state
 
     def _handle_vad_frame(self, ssrc: int, pcm: bytes, rms: int, frame_time: float):
         state = self._get_vad_state(ssrc)
@@ -609,6 +749,8 @@ class VoiceReceiver:
                     self._rms_sum.clear()
                     self._rms_count.clear()
                     self._vad_states.clear()
+                    self._decode_error_stats.clear()
+                    self._recent_packet_samples.clear()
                 self._grace_ended = True
                 logger.info("Voice: startup grace period ended, decoders reset")
 
@@ -641,6 +783,17 @@ class VoiceReceiver:
         # Skip bot's own audio
         if ssrc == self._bot_ssrc:
             return
+
+        with self._lock:
+            _decode_state = self._decode_error_stats.get(ssrc)
+            if _decode_state and float(_decode_state.get("quarantine_until") or 0.0) > time.monotonic():
+                if self._packet_debug_count <= 20:
+                    logger.debug(
+                        "Dropping packet for quarantined SSRC %s until %.3f",
+                        ssrc,
+                        float(_decode_state.get("quarantine_until") or 0.0),
+                    )
+                return
 
         # Calculate dynamic RTP header size (RFC 9335 / rtpsize mode)
         cc = first_byte & 0x0F  # CSRC count
@@ -708,6 +861,25 @@ class VoiceReceiver:
             # Opus decode directly — audio may be in passthrough mode.
             # Buffer will get a user_id when SPEAKING event arrives later.
 
+        with self._lock:
+            user_id_snapshot = self._ssrc_to_user.get(ssrc, 0)
+            sample = {
+                "captured_at": time.time(),
+                "seq": seq,
+                "timestamp": timestamp,
+                "ssrc": ssrc,
+                "mapped_user_id": user_id_snapshot,
+                "raw_packet_b64": base64.b64encode(data).decode("ascii"),
+                "rtp_header_b64": base64.b64encode(header).decode("ascii"),
+                "encrypted_payload_b64": base64.b64encode(payload_with_nonce).decode("ascii"),
+                "decoded_payload_b64": base64.b64encode(decrypted).decode("ascii"),
+                "header_size": header_size,
+                "ext_data_len": ext_data_len,
+                "has_dave_session": bool(self._dave_session),
+            }
+            self._remember_packet_sample(ssrc, sample)
+            self._append_packet_trace(ssrc, sample)
+
         # --- Opus decode -> PCM ---
         try:
             if ssrc not in self._decoders:
@@ -739,11 +911,14 @@ class VoiceReceiver:
                 # Fall through to buffer this packet normally
 
             with self._lock:
+                self._clear_decode_error_state(ssrc)
                 self._handle_vad_frame(ssrc, pcm, rms, time.monotonic())
         except Exception as e:
             logger.debug("Opus decode error for SSRC %s: %s", ssrc, e)
             with self._lock:
-                self._reset_ssrc_state(ssrc)
+                sample = self._recent_packet_samples.get(ssrc, deque())
+                latest_sample = sample[-1] if sample else None
+                self._handle_decode_error(ssrc, e, sample=latest_sample)
             return
 
     # ------------------------------------------------------------------

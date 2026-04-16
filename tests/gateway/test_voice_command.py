@@ -2708,6 +2708,82 @@ class TestVoiceReception:
         assert 100 in receiver._buffers
         assert len(receiver._buffers[100]) > 0
 
+    def test_on_packet_decode_error_triggers_quarantine_and_dump(self, tmp_path):
+        """Repeated decode errors should write a dump and quarantine the SSRC."""
+        receiver = self._make_receiver_with_nacl(dave_session=None, mapped_ssrcs={100: 42})
+        receiver._start_time = 0.0
+        receiver._grace_ended = True
+        receiver._packet_dump_dir = tmp_path
+        receiver._packet_dump_mode = "errors"
+        receiver._decode_error_threshold = 2
+
+        bad_decoder_1 = MagicMock()
+        bad_decoder_1.decode.side_effect = RuntimeError("corrupted stream")
+        bad_decoder_2 = MagicMock()
+        bad_decoder_2.decode.side_effect = RuntimeError("corrupted stream")
+
+        with patch("gateway.platforms.discord.discord.opus.Decoder", side_effect=[bad_decoder_1, bad_decoder_2]), \
+             patch("nacl.secret.Aead") as mock_aead:
+            mock_aead.return_value.decrypt.return_value = b"\xf8\xff\xfe"
+            receiver._on_packet(self._build_rtp_packet(ssrc=100))
+            receiver._on_packet(self._build_rtp_packet(ssrc=100, seq=2, timestamp=1920))
+
+        dumps = list(tmp_path.glob("discord-vc-*-ssrc-100-*.json"))
+        assert len(dumps) == 1
+        payload = json.loads(dumps[0].read_text(encoding="utf-8"))
+        assert payload["ssrc"] == 100
+        assert payload["mapped_user_id"] == 42
+        assert payload["decode_error_state"]["quarantine_count"] == 1
+        assert payload["latest_sample"]["seq"] == 2
+        assert 100 not in receiver._ssrc_to_user
+        assert receiver._decode_error_stats[100]["quarantine_until"] > time.monotonic()
+
+    def test_on_packet_quarantine_drops_follow_up_packets(self, tmp_path):
+        """Packets arriving during quarantine should be ignored before decoder creation."""
+        receiver = self._make_receiver_with_nacl(dave_session=None, mapped_ssrcs={100: 42})
+        receiver._start_time = 0.0
+        receiver._grace_ended = True
+        receiver._packet_dump_dir = tmp_path
+        receiver._packet_dump_mode = "errors"
+        receiver._decode_error_threshold = 1
+
+        bad_decoder = MagicMock()
+        bad_decoder.decode.side_effect = RuntimeError("corrupted stream")
+
+        with patch("gateway.platforms.discord.discord.opus.Decoder", side_effect=[bad_decoder]) as decoder_ctor, \
+             patch("nacl.secret.Aead") as mock_aead:
+            mock_aead.return_value.decrypt.return_value = b"\xf8\xff\xfe"
+            receiver._on_packet(self._build_rtp_packet(ssrc=100))
+            receiver._on_packet(self._build_rtp_packet(ssrc=100, seq=2, timestamp=1920))
+
+        assert decoder_ctor.call_count == 1
+        assert 100 not in receiver._decoders
+        assert 100 not in receiver._buffers
+
+    def test_on_packet_dump_all_packets_to_jsonl(self, tmp_path):
+        """All-packets mode should persist packet traces for offline analysis."""
+        receiver = self._make_receiver_with_nacl(dave_session=None, mapped_ssrcs={100: 42})
+        receiver._start_time = 0.0
+        receiver._grace_ended = True
+        receiver._packet_dump_dir = tmp_path
+        receiver._packet_dump_mode = "all"
+        self._inject_mock_decoder(receiver, 100)
+
+        with patch("nacl.secret.Aead") as mock_aead:
+            mock_aead.return_value.decrypt.return_value = b"\xf8\xff\xfe"
+            receiver._on_packet(self._build_rtp_packet(ssrc=100, seq=7, timestamp=6720))
+
+        traces = list(tmp_path.glob("discord-vc-*-ssrc-100.jsonl"))
+        assert len(traces) == 1
+        lines = traces[0].read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 1
+        payload = json.loads(lines[0])
+        assert payload["ssrc"] == 100
+        assert payload["seq"] == 7
+        assert payload["mapped_user_id"] == 42
+        assert payload["raw_packet_b64"]
+        assert payload["decoded_payload_b64"]
+
 
 class TestVoiceTTSPlayback:
     """TTS playback: play_tts in VC, dedup, fallback."""
