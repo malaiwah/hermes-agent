@@ -22,6 +22,7 @@ def _ensure_discord_mock():
     discord_mod.Intents.default.return_value = MagicMock()
     discord_mod.Client = MagicMock
     discord_mod.File = MagicMock
+    discord_mod.AudioSource = object
     discord_mod.DMChannel = type("DMChannel", (), {})
     discord_mod.Thread = type("Thread", (), {})
     discord_mod.ForumChannel = type("ForumChannel", (), {})
@@ -992,6 +993,9 @@ class TestDiscordVoiceChannelMethods:
         adapter._voice_timeout_tasks = {}
         adapter._voice_receivers = {}
         adapter._voice_listen_tasks = {}
+        adapter._voice_play_locks = {}
+        adapter._voice_priming_history = {}
+        adapter._VOICE_PRIMING_MAX_TURNS = 8
         adapter._voice_input_callback = None
         adapter._allowed_user_ids = set()
         adapter._running = True
@@ -1108,7 +1112,7 @@ class TestDiscordVoiceChannelMethods:
         assert adapter._is_allowed_user("42") is False
 
     @pytest.mark.asyncio
-    async def test_process_voice_input_success(self):
+    async def test_process_voice_input_success(self, caplog):
         """Successful voice input: PCM->WAV->STT->callback."""
         adapter = self._make_adapter()
         callback = AsyncMock()
@@ -1120,10 +1124,15 @@ class TestDiscordVoiceChannelMethods:
         with patch("gateway.platforms.discord.VoiceReceiver.pcm_to_wav"), \
              patch("tools.transcription_tools.transcribe_audio",
                    return_value={"success": True, "transcript": "Hello"}), \
-             patch("tools.voice_mode.is_whisper_hallucination", return_value=False):
-            await adapter._process_voice_input(111, 42, pcm_data)
+             patch("tools.transcription_tools.get_stt_model_from_config",
+                   return_value="Qwen/Qwen3-ASR-1.7B"), \
+             patch("tools.voice_mode.is_whisper_hallucination", return_value=False), \
+             caplog.at_level(logging.INFO):
+            await adapter._process_voice_input(111, 42, pcm_data, trace_id="vc_test_1")
 
-        callback.assert_called_once_with(guild_id=111, user_id=42, transcript="Hello")
+        callback.assert_called_once_with(guild_id=111, user_id=42, transcript="Hello", language=None)
+        assert "voice pipeline: vc_stt_complete" in caplog.text
+        assert "vc_test_1" in caplog.text
 
     @pytest.mark.asyncio
     async def test_process_voice_input_hallucination_filtered(self):
@@ -1164,6 +1173,55 @@ class TestDiscordVoiceChannelMethods:
                    side_effect=RuntimeError("ffmpeg not found")):
             await adapter._process_voice_input(111, 42, b"\x00" * 96000)
         # Should not raise
+
+    def test_streaming_pcm_source_logs_first_chunk_and_first_frame(self, caplog):
+        from gateway.platforms.discord import StreamingPCMAudioSource
+
+        source = StreamingPCMAudioSource(
+            trace_id="vcplay_test",
+            trace_meta={"guild_id": 111, "chat_id": "123"},
+        )
+
+        with caplog.at_level(logging.INFO):
+            try:
+                source.feed(b"\x00" * 960)
+            except ModuleNotFoundError:
+                pass
+            source._buffer.extend(b"\x00" * source.DISCORD_FRAME_SIZE)
+            frame = source.read()
+
+        assert frame
+        assert "voice pipeline: vc_pcm_first_chunk" in caplog.text
+        assert "voice pipeline: vc_playback_first_frame" in caplog.text
+        assert "vcplay_test" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_play_pcm_stream_logs_begin_and_complete(self, caplog):
+        from gateway.platforms.discord import StreamingPCMAudioSource
+
+        adapter = self._make_adapter()
+        mock_vc = MagicMock()
+        mock_vc.is_connected.return_value = True
+        mock_vc.is_playing.return_value = False
+
+        def _play(_source, after=None):
+            if after:
+                after(None)
+
+        mock_vc.play = MagicMock(side_effect=_play)
+        adapter._voice_clients[111] = mock_vc
+
+        source = StreamingPCMAudioSource(
+            trace_id="vcplay_test",
+            trace_meta={"guild_id": 111, "chat_id": "123"},
+        )
+
+        with caplog.at_level(logging.INFO):
+            result = await adapter.play_pcm_stream_in_voice_channel(111, source)
+
+        assert result is True
+        assert "voice pipeline: vc_playback_begin" in caplog.text
+        assert "voice pipeline: vc_playback_complete" in caplog.text
 
 
 # =====================================================================

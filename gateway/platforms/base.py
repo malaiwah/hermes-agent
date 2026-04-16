@@ -1614,7 +1614,26 @@ class BasePlatformAdapter(ABC):
                                             from gateway.platforms.discord import (
                                                 StreamingPCMAudioSource, feed_pcm_stream_sync,
                                             )
-                                            _src = StreamingPCMAudioSource()
+                                            _trace_id = f"vcplay_{_gid}_{int(time.time() * 1000)}"
+                                            logger.info(
+                                                "[%s] voice pipeline: vc_tts_request_start trace_id=%s guild=%s "
+                                                "chat=%s chars=%d voice=%s language=%s has_instruct=%s",
+                                                self.name,
+                                                _trace_id,
+                                                _gid,
+                                                event.source.chat_id,
+                                                len(speech_text),
+                                                _voice,
+                                                _tts_language or "unknown",
+                                                bool(_instruct),
+                                            )
+                                            _src = StreamingPCMAudioSource(
+                                                trace_id=_trace_id,
+                                                trace_meta={
+                                                    "guild_id": _gid,
+                                                    "chat_id": event.source.chat_id,
+                                                },
+                                            )
                                             _loop = asyncio.get_running_loop()
                                             _feed_task = _loop.run_in_executor(
                                                 None, feed_pcm_stream_sync, _url, _src, 120.0,

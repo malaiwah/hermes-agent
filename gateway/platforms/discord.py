@@ -109,16 +109,32 @@ class StreamingPCMAudioSource(discord.AudioSource if DISCORD_AVAILABLE else obje
     # or finishing (e.g. network black-hole).
     _STALL_TIMEOUT = 60.0
 
-    def __init__(self):
+    def __init__(self, trace_id: str = "", trace_meta: Optional[Dict[str, Any]] = None):
         self._buffer = bytearray()
         self._cond = threading.Condition()
         self._done = False
         self._cancelled = False
+        self._trace_id = trace_id
+        self._trace_meta = trace_meta or {}
+        self._trace_started_at = time.perf_counter()
+        self._first_feed_logged = False
+        self._first_read_logged = False
 
     def feed(self, pcm_24k_mono: bytes):
         """Feed 24kHz mono int16 PCM data into the buffer."""
         if self._cancelled:
             return
+        if pcm_24k_mono and not self._first_feed_logged:
+            self._first_feed_logged = True
+            logger.info(
+                "voice pipeline: vc_pcm_first_chunk trace_id=%s guild=%s chat=%s "
+                "elapsed_ms=%.1f chunk_bytes=%d",
+                self._trace_id or "-",
+                self._trace_meta.get("guild_id", "-"),
+                self._trace_meta.get("chat_id", "-"),
+                (time.perf_counter() - self._trace_started_at) * 1000.0,
+                len(pcm_24k_mono),
+            )
         import numpy as _np
         samples = _np.frombuffer(pcm_24k_mono, dtype=_np.int16)
         # Upsample 24kHz → 48kHz: repeat each sample twice
@@ -169,6 +185,17 @@ class StreamingPCMAudioSource(discord.AudioSource if DISCORD_AVAILABLE else obje
                 if self._cancelled:
                     return b''
                 if len(self._buffer) >= self.DISCORD_FRAME_SIZE:
+                    if not self._first_read_logged:
+                        self._first_read_logged = True
+                        logger.info(
+                            "voice pipeline: vc_playback_first_frame trace_id=%s guild=%s chat=%s "
+                            "elapsed_ms=%.1f buffered_bytes=%d",
+                            self._trace_id or "-",
+                            self._trace_meta.get("guild_id", "-"),
+                            self._trace_meta.get("chat_id", "-"),
+                            (time.perf_counter() - self._trace_started_at) * 1000.0,
+                            len(self._buffer),
+                        )
                     frame = bytes(self._buffer[:self.DISCORD_FRAME_SIZE])
                     del self._buffer[:self.DISCORD_FRAME_SIZE]
                     return frame
@@ -242,6 +269,16 @@ def feed_pcm_stream_sync(url: str, source: "StreamingPCMAudioSource",
         else:
             logger.warning("PCM stream feed error: %s", e)
     finally:
+        if getattr(source, "_trace_id", ""):
+            logger.info(
+                "voice pipeline: vc_pcm_stream_complete trace_id=%s guild=%s chat=%s "
+                "elapsed_ms=%.1f cancelled=%s",
+                source._trace_id,
+                source._trace_meta.get("guild_id", "-"),
+                source._trace_meta.get("chat_id", "-"),
+                (time.perf_counter() - source._trace_started_at) * 1000.0,
+                source.is_cancelled,
+            )
         source.finish()
 
 
@@ -293,6 +330,7 @@ class VoiceReceiver:
         # Per-user audio buffers
         self._buffers: Dict[int, bytearray] = defaultdict(bytearray)
         self._last_packet_time: Dict[int, float] = {}
+        self._first_packet_time: Dict[int, float] = {}
         # Per-user RMS accumulators for utterance-level energy check
         self._rms_sum: Dict[int, float] = defaultdict(float)
         self._rms_count: Dict[int, int] = defaultdict(int)
@@ -347,6 +385,7 @@ class VoiceReceiver:
         with self._lock:
             self._buffers.clear()
             self._last_packet_time.clear()
+            self._first_packet_time.clear()
             self._decoders.clear()
             self._ssrc_to_user.clear()
         logger.info("VoiceReceiver stopped")
@@ -578,6 +617,8 @@ class VoiceReceiver:
                 return
 
             with self._lock:
+                if len(self._buffers[ssrc]) == 0:
+                    self._first_packet_time[ssrc] = time.monotonic()
                 self._buffers[ssrc].extend(pcm)
                 self._last_packet_time[ssrc] = time.monotonic()
                 self._rms_sum[ssrc] += rms
@@ -657,9 +698,22 @@ class VoiceReceiver:
                         # Infer from allowed users in the voice channel.
                         user_id = self._infer_user_for_ssrc(ssrc)
                     if user_id:
+                        first_time = self._first_packet_time.get(ssrc, last_time)
+                        logger.info(
+                            "voice pipeline: vc_utterance_finalized guild=%s user=%s ssrc=%d "
+                            "pcm_ms=%.1f silence_ms=%.1f capture_ms=%.1f avg_rms=%.1f",
+                            getattr(getattr(self._vc, "guild", None), "id", "-"),
+                            user_id,
+                            ssrc,
+                            buf_duration * 1000.0,
+                            silence_duration * 1000.0,
+                            max(0.0, (last_time - first_time) * 1000.0),
+                            avg_rms,
+                        )
                         completed.append((user_id, bytes(buf)))
                         self._buffers[ssrc] = bytearray()
                         self._last_packet_time.pop(ssrc, None)
+                        self._first_packet_time.pop(ssrc, None)
                         self._rms_sum.pop(ssrc, None)
                         self._rms_count.pop(ssrc, None)
                     else:
@@ -676,6 +730,7 @@ class VoiceReceiver:
                     # Stale buffer with no valid user after extended wait — discard
                     self._buffers.pop(ssrc, None)
                     self._last_packet_time.pop(ssrc, None)
+                    self._first_packet_time.pop(ssrc, None)
                     self._rms_sum.pop(ssrc, None)
                     self._rms_count.pop(ssrc, None)
 
@@ -1473,6 +1528,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 return False
 
             done = asyncio.Event()
+            _play_t0 = time.perf_counter()
 
             def _after(error):
                 if error and not _barge_in_event.is_set():
@@ -1483,6 +1539,12 @@ class DiscordAdapter(BasePlatformAdapter):
             if receiver:
                 receiver.start_playback()
 
+            logger.info(
+                "voice pipeline: vc_playback_begin trace_id=%s guild=%s chat=%s",
+                getattr(pcm_source, "_trace_id", "") or "-",
+                guild_id,
+                getattr(pcm_source, "_trace_meta", {}).get("chat_id", "-"),
+            )
             vc.play(pcm_source, after=_after)
             try:
                 await asyncio.wait_for(done.wait(), timeout=self.PLAYBACK_TIMEOUT)
@@ -1490,6 +1552,15 @@ class DiscordAdapter(BasePlatformAdapter):
                 logger.warning("Voice stream playback timed out")
                 vc.stop()
             self._reset_voice_timeout(guild_id)
+            logger.info(
+                "voice pipeline: vc_playback_complete trace_id=%s guild=%s chat=%s "
+                "elapsed_ms=%.1f barge_in=%s",
+                getattr(pcm_source, "_trace_id", "") or "-",
+                guild_id,
+                getattr(pcm_source, "_trace_meta", {}).get("chat_id", "-"),
+                (time.perf_counter() - _play_t0) * 1000.0,
+                _barge_in_event.is_set(),
+            )
             return not _barge_in_event.is_set()
         finally:
             if receiver:
@@ -1752,14 +1823,24 @@ class DiscordAdapter(BasePlatformAdapter):
                     if not self._is_allowed_user(str(user_id)):
                         logger.info("Voice: dropping utterance from unauthorized user %d (%.1fs)", user_id, buf_dur)
                         continue
+                    trace_id = f"vc_{guild_id}_{user_id}_{int(time.time() * 1000)}"
                     logger.info("Voice: processing utterance from user %d (%.1fs PCM)", user_id, buf_dur)
-                    await self._process_voice_input(guild_id, user_id, pcm_data)
+                    logger.info(
+                        "voice pipeline: vc_turn_dispatch trace_id=%s guild=%s user=%s pcm_ms=%.1f",
+                        trace_id,
+                        guild_id,
+                        user_id,
+                        buf_dur * 1000.0,
+                    )
+                    await self._process_voice_input(guild_id, user_id, pcm_data, trace_id=trace_id)
         except asyncio.CancelledError:
             pass
         except Exception as e:
             logger.error("Voice listen loop error: %s", e, exc_info=True)
 
-    async def _process_voice_input(self, guild_id: int, user_id: int, pcm_data: bytes):
+    async def _process_voice_input(
+        self, guild_id: int, user_id: int, pcm_data: bytes, trace_id: str = ""
+    ):
         """Convert PCM -> WAV -> STT -> callback."""
         from tools.voice_mode import is_whisper_hallucination
 
@@ -1767,15 +1848,19 @@ class DiscordAdapter(BasePlatformAdapter):
         wav_path = tmp_f.name
         tmp_f.close()
         try:
+            _prep_t0 = time.perf_counter()
             await asyncio.to_thread(VoiceReceiver.pcm_to_wav, pcm_data, wav_path)
+            _prep_elapsed_ms = (time.perf_counter() - _prep_t0) * 1000.0
 
             from tools.transcription_tools import transcribe_audio, get_stt_model_from_config
             stt_model = get_stt_model_from_config()
             priming = self._build_voice_priming_context(guild_id)
+            _stt_t0 = time.perf_counter()
             result = await asyncio.to_thread(
                 transcribe_audio, wav_path, model=stt_model,
                 priming_context=priming,
             )
+            _stt_elapsed_ms = (time.perf_counter() - _stt_t0) * 1000.0
 
             if not result.get("success"):
                 logger.info("Voice STT failed for user %d: %s", user_id,
@@ -1790,6 +1875,20 @@ class DiscordAdapter(BasePlatformAdapter):
                 logger.info("Voice STT filtered hallucination for user %d: %r", user_id, transcript)
                 return
 
+            logger.info(
+                "voice pipeline: vc_stt_complete trace_id=%s guild=%s user=%s model=%s "
+                "provider=%s language=%s transcript_chars=%d prep_ms=%.1f stt_ms=%.1f total_ms=%.1f",
+                trace_id or "-",
+                guild_id,
+                user_id,
+                stt_model or "auto",
+                result.get("provider", "unknown"),
+                language or "unknown",
+                len(transcript),
+                _prep_elapsed_ms,
+                _stt_elapsed_ms,
+                _prep_elapsed_ms + _stt_elapsed_ms,
+            )
             logger.info("Voice input from user %d (lang=%s): %s",
                         user_id, language or "?", transcript[:100])
 
