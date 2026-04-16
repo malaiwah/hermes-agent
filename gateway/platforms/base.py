@@ -1591,12 +1591,23 @@ class BasePlatformAdapter(ABC):
                                             _p["language"] = _tts_language
                                         _url = f"{_base_url.rstrip('/')}/v1/audio/speech/pcm-stream?{_ue(_p)}"
 
-                                        # Find guild_id for this chat
+                                        # Find guild_id for this chat.
+                                        # Primary: match registered voice text channel.
+                                        # Fallback: raw_message.guild_id for synthetic
+                                        # voice events (farewell/greeting) dispatched
+                                        # from a different thread than the one that was
+                                        # registered during /voice join.
                                         _gid = None
                                         for gid, tch in getattr(self, "_voice_text_channels", {}).items():
                                             if str(tch) == str(event.source.chat_id):
                                                 _gid = gid
                                                 break
+                                        if _gid is None:
+                                            _rm_gid = getattr(getattr(event, "raw_message", None), "guild_id", None)
+                                            if (_rm_gid is not None
+                                                    and hasattr(self, "is_in_voice_channel")
+                                                    and self.is_in_voice_channel(_rm_gid)):
+                                                _gid = _rm_gid
 
                                         if _gid:
                                             from gateway.platforms.discord import (

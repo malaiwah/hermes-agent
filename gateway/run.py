@@ -5326,13 +5326,18 @@ class GatewayRunner:
             return "Not in a voice channel."
 
         # ---- Farewell agent turn ----------------------------------------
-        # handle_message() spawns a background task and returns immediately,
-        # so awaiting it directly would let leave_voice_channel() run before
-        # the farewell audio plays (same session key = queued + interrupt set).
-        # Mirror the join-greeting pattern: create_task so the farewell runs
-        # after _process_message_background for /voice leave completes and
-        # frees the session.  Disconnect + cleanup happen inside the task so
-        # the voice channel stays open until the farewell TTS finishes.
+        # We must NOT use adapter.handle_message() here: it spawns a background
+        # task and returns immediately.  Worse, the farewell event shares the
+        # same session key as the /voice leave command currently being processed,
+        # so handle_message() queues it as a pending message + sets the interrupt
+        # flag — leaving leave_voice_channel() to fire before the farewell plays.
+        #
+        # Fix: call _process_message_background directly with a unique session
+        # key that doesn't conflict with the active /voice leave session, then
+        # properly await it so the voice channel stays open until TTS finishes.
+        # The guild_id in raw_message lets the PCM-stream lookup find the voice
+        # connection even if this command was processed inside a different thread
+        # than the one registered during /voice join.
         from types import SimpleNamespace as _SNS
         _farewell_event = MessageEvent(
             source=event.source,
@@ -5341,36 +5346,32 @@ class GatewayRunner:
             raw_message=_SNS(guild_id=guild_id, guild=None),
         )
         _chat_id = event.source.chat_id
+        _farewell_sk = f"voice_farewell:{guild_id}"
+        try:
+            await asyncio.wait_for(
+                adapter._process_message_background(_farewell_event, _farewell_sk),
+                timeout=30.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Voice farewell timed out — disconnecting anyway")
+        except Exception as _e:
+            logger.warning("Voice farewell failed: %s", _e)
 
-        async def _do_farewell_and_leave():
-            try:
-                await asyncio.wait_for(
-                    adapter.handle_message(_farewell_event),
-                    timeout=30.0,
-                )
-            except asyncio.TimeoutError:
-                logger.warning("Voice farewell timed out — disconnecting anyway")
-            except Exception as _e:
-                logger.warning("Voice farewell failed: %s", _e)
-            # Disconnect only after farewell has played.
-            try:
-                await adapter.leave_voice_channel(guild_id)
-            except Exception as _le:
-                logger.warning("Error leaving voice channel: %s", _le)
-            # Clean up runner-side state.
-            self._voice_mode[_chat_id] = "off"
-            self._save_voice_modes()
-            self._set_adapter_auto_tts_disabled(adapter, _chat_id, disabled=True)
-            if hasattr(adapter, "_voice_input_callback"):
-                adapter._voice_input_callback = None
-            if hasattr(adapter, "_last_tts_voice"):
-                adapter._last_tts_voice.pop(_chat_id, None)
-            if hasattr(adapter, "_voice_primer_shown"):
-                adapter._voice_primer_shown.discard(_chat_id)
-
-        asyncio.create_task(_do_farewell_and_leave())
-        # Return nothing — the farewell task owns all communication and
-        # will disconnect when it's done.
+        # Disconnect only after farewell has played.
+        try:
+            await adapter.leave_voice_channel(guild_id)
+        except Exception as e:
+            logger.warning("Error leaving voice channel: %s", e)
+        # Always clean up state even if leave raised an exception.
+        self._voice_mode[_chat_id] = "off"
+        self._save_voice_modes()
+        self._set_adapter_auto_tts_disabled(adapter, _chat_id, disabled=True)
+        if hasattr(adapter, "_voice_input_callback"):
+            adapter._voice_input_callback = None
+        if hasattr(adapter, "_last_tts_voice"):
+            adapter._last_tts_voice.pop(_chat_id, None)
+        if hasattr(adapter, "_voice_primer_shown"):
+            adapter._voice_primer_shown.discard(_chat_id)
         return ""
 
     def _handle_voice_timeout_cleanup(self, chat_id: str) -> None:
