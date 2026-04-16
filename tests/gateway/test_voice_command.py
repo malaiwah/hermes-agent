@@ -351,13 +351,16 @@ class TestSendVoiceReply:
     async def test_calls_tts_and_send_voice(self, runner):
         mock_adapter = AsyncMock()
         mock_adapter.send_voice = AsyncMock()
+        mock_adapter._voice_last_language = {}
+        mock_adapter._last_tts_instruct = {}
+        mock_adapter._last_tts_voice = {}
         event = _make_event()
         runner.adapters[event.source.platform] = mock_adapter
 
         tts_result = json.dumps({"success": True, "file_path": "/tmp/test.ogg"})
 
         with patch("tools.tts_tool.text_to_speech_tool", return_value=tts_result), \
-             patch("tools.tts_tool._preprocess_tts_text", side_effect=lambda t: t), \
+             patch("tools.tts_tool._preprocess_tts_text", side_effect=lambda t, language="English": t), \
              patch("os.path.isfile", return_value=True), \
              patch("os.unlink"), \
              patch("os.makedirs"):
@@ -381,11 +384,14 @@ class TestSendVoiceReply:
     async def test_tts_failure_no_crash(self, runner):
         event = _make_event()
         mock_adapter = AsyncMock()
+        mock_adapter._voice_last_language = {}
+        mock_adapter._last_tts_instruct = {}
+        mock_adapter._last_tts_voice = {}
         runner.adapters[event.source.platform] = mock_adapter
         tts_result = json.dumps({"success": False, "error": "API error"})
 
         with patch("tools.tts_tool.text_to_speech_tool", return_value=tts_result), \
-             patch("tools.tts_tool._preprocess_tts_text", side_effect=lambda t: t), \
+             patch("tools.tts_tool._preprocess_tts_text", side_effect=lambda t, language="English": t), \
              patch("os.path.isfile", return_value=False), \
              patch("os.makedirs"):
             await runner._send_voice_reply(event, "Hello")
@@ -396,7 +402,7 @@ class TestSendVoiceReply:
     async def test_exception_caught(self, runner):
         event = _make_event()
         with patch("tools.tts_tool.text_to_speech_tool", side_effect=RuntimeError("boom")), \
-             patch("tools.tts_tool._preprocess_tts_text", side_effect=lambda t: t), \
+             patch("tools.tts_tool._preprocess_tts_text", side_effect=lambda t, language="English": t), \
              patch("os.makedirs"):
             # Should not raise
             await runner._send_voice_reply(event, "Hello")
@@ -405,6 +411,9 @@ class TestSendVoiceReply:
     async def test_logs_tts_and_send_timings(self, runner, caplog):
         mock_adapter = AsyncMock()
         mock_adapter.send_voice = AsyncMock()
+        mock_adapter._voice_last_language = {}
+        mock_adapter._last_tts_instruct = {}
+        mock_adapter._last_tts_voice = {}
         event = _make_event(message_type=MessageType.VOICE)
         runner.adapters[event.source.platform] = mock_adapter
 
@@ -416,7 +425,7 @@ class TestSendVoiceReply:
         })
 
         with patch("tools.tts_tool.text_to_speech_tool", return_value=tts_result), \
-             patch("tools.tts_tool._preprocess_tts_text", side_effect=lambda t: t), \
+             patch("tools.tts_tool._preprocess_tts_text", side_effect=lambda t, language="English": t), \
              patch("os.path.isfile", return_value=True), \
              patch("os.unlink"), \
              patch("os.makedirs"), \
@@ -425,6 +434,35 @@ class TestSendVoiceReply:
 
         assert "voice pipeline: tts_generated" in caplog.text
         assert "voice pipeline: voice_send_complete" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_strips_tts_and_voice_directives_before_tts(self, runner):
+        mock_adapter = AsyncMock()
+        mock_adapter.send_voice = AsyncMock()
+        mock_adapter._voice_last_language = {}
+        mock_adapter._last_tts_instruct = {}
+        mock_adapter._last_tts_voice = {}
+        event = _make_event(message_type=MessageType.VOICE)
+        runner.adapters[event.source.platform] = mock_adapter
+
+        tts_result = json.dumps({"success": True, "file_path": "/tmp/test.ogg"})
+
+        with patch("tools.tts_tool.text_to_speech_tool", return_value=tts_result) as mock_tts, \
+             patch("tools.tts_tool._preprocess_tts_text", side_effect=lambda t, language="English": t), \
+             patch("os.path.isfile", return_value=True), \
+             patch("os.unlink"), \
+             patch("os.makedirs"):
+            await runner._send_voice_reply(
+                event,
+                "[voice: vivian]\n[tts: relaxed, friendly]\n\nNice, couch time is the best time.",
+            )
+
+        mock_tts.assert_called_once()
+        assert mock_tts.call_args.kwargs["text"] == "Nice, couch time is the best time."
+        assert mock_tts.call_args.kwargs["voice"] == "vivian"
+        assert mock_tts.call_args.kwargs["instruct"] == "relaxed, friendly"
+        assert mock_adapter._last_tts_voice["123"] == "vivian"
+        assert mock_adapter._last_tts_instruct["123"] == "relaxed, friendly"
 
 
 # =====================================================================

@@ -315,6 +315,7 @@ logger = logging.getLogger(__name__)
 _AGENT_PENDING_SENTINEL = object()
 _SELF_NUDGE_NO_REPLY = "NO_REPLY"
 _GATEWAY_SILENT_MARKER = "[SILENT]"
+_VOICE_TAG_VALUE_RE = re.compile(r"vc_[0-9a-f]{8,}|[a-z][a-z0-9_]{0,31}", re.IGNORECASE)
 
 
 def _is_gateway_silent_response(content: str) -> bool:
@@ -342,6 +343,41 @@ def _strip_gateway_silent_response(
         if _is_gateway_silent_response(last_content):
             messages.pop()
     return "", True
+
+
+def _extract_voice_reply_directives(
+    text: str,
+    *,
+    adapter=None,
+    chat_id: str | None = None,
+) -> tuple[str, str, str]:
+    """Strip [tts:] / [voice:] directives and persist their state when possible."""
+    if not isinstance(text, str) or not text:
+        return "", "", ""
+
+    cleaned = text
+    extracted_instruct = ""
+    extracted_voice = ""
+
+    tts_tag = re.search(r"\[tts:\s*(.+?)\]", cleaned, flags=re.IGNORECASE)
+    if tts_tag:
+        extracted_instruct = tts_tag.group(1).strip()
+        cleaned = re.sub(r"\[tts:\s*.+?\]\s*", "", cleaned, flags=re.IGNORECASE).strip()
+        if adapter and chat_id and extracted_instruct and hasattr(adapter, "_last_tts_instruct"):
+            adapter._last_tts_instruct[chat_id] = extracted_instruct
+
+    voice_tag = re.search(r"\[voice:\s*(\S+?)\]", cleaned, flags=re.IGNORECASE)
+    if voice_tag:
+        candidate = voice_tag.group(1).strip()
+        if _VOICE_TAG_VALUE_RE.fullmatch(candidate):
+            extracted_voice = candidate
+            if adapter and chat_id and hasattr(adapter, "_last_tts_voice"):
+                adapter._last_tts_voice[chat_id] = extracted_voice
+        else:
+            logger.warning("Ignored malformed [voice:] tag value in runner TTS path: %r", candidate)
+        cleaned = re.sub(r"\[voice:\s*\S+?\]\s*", "", cleaned, flags=re.IGNORECASE).strip()
+
+    return cleaned, extracted_instruct, extracted_voice
 _SELF_NUDGE_MAX_DELAY_SECONDS = 86400
 
 
@@ -5568,10 +5604,20 @@ class GatewayRunner:
         audio_path = None
         actual_path = None
         _voice_total_t0 = time.perf_counter()
+        adapter = self.adapters.get(event.source.platform)
         try:
             from tools.tts_tool import text_to_speech_tool, _preprocess_tts_text
 
-            tts_text = _preprocess_tts_text(text[:4000])
+            cleaned_text, extracted_instruct, extracted_voice = _extract_voice_reply_directives(
+                text,
+                adapter=adapter,
+                chat_id=event.source.chat_id,
+            )
+            _detected_lang = (
+                getattr(adapter, "_voice_last_language", {}).get(event.source.chat_id, "English")
+                if adapter else "English"
+            )
+            tts_text = _preprocess_tts_text(cleaned_text[:4000], language=_detected_lang)
             if not tts_text:
                 return
 
@@ -5584,8 +5630,22 @@ class GatewayRunner:
             os.makedirs(os.path.dirname(audio_path), exist_ok=True)
 
             _tts_t0 = time.perf_counter()
+            _effective_voice = (
+                extracted_voice
+                or getattr(adapter, "_last_tts_voice", {}).get(event.source.chat_id)
+                or None
+            )
+            _effective_instruct = (
+                extracted_instruct
+                or getattr(adapter, "_last_tts_instruct", {}).get(event.source.chat_id)
+                or None
+            )
             result_json = await asyncio.to_thread(
-                text_to_speech_tool, text=tts_text, output_path=audio_path
+                text_to_speech_tool,
+                text=tts_text,
+                output_path=audio_path,
+                voice=_effective_voice,
+                instruct=_effective_instruct,
             )
             _tts_elapsed_ms = (time.perf_counter() - _tts_t0) * 1000.0
             result = json.loads(result_json)
@@ -5607,8 +5667,6 @@ class GatewayRunner:
                 _tts_elapsed_ms,
                 actual_path,
             )
-
-            adapter = self.adapters.get(event.source.platform)
 
             # If connected to a voice channel, play there instead of sending a file
             guild_id = self._get_guild_id(event)
