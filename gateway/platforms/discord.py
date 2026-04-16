@@ -841,26 +841,6 @@ class VoiceReceiver:
         if ext_data_len and len(decrypted) > ext_data_len:
             decrypted = decrypted[ext_data_len:]
 
-        # --- DAVE E2EE decrypt ---
-        if self._dave_session:
-            with self._lock:
-                user_id = self._ssrc_to_user.get(ssrc, 0)
-            if user_id:
-                try:
-                    import davey
-                    decrypted = self._dave_session.decrypt(
-                        user_id, davey.MediaType.audio, decrypted
-                    )
-                except Exception as e:
-                    # Unencrypted passthrough — use NaCl-decrypted data as-is
-                    if "Unencrypted" not in str(e):
-                        if self._packet_debug_count <= 10:
-                            logger.warning("DAVE decrypt failed for ssrc=%d: %s", ssrc, e)
-                        return
-            # If SSRC unknown (no SPEAKING event yet), skip DAVE and try
-            # Opus decode directly — audio may be in passthrough mode.
-            # Buffer will get a user_id when SPEAKING event arrives later.
-
         with self._lock:
             user_id_snapshot = self._ssrc_to_user.get(ssrc, 0)
             sample = {
@@ -877,6 +857,48 @@ class VoiceReceiver:
                 "ext_data_len": ext_data_len,
                 "has_dave_session": bool(self._dave_session),
             }
+
+        # --- DAVE E2EE decrypt ---
+        if self._dave_session:
+            user_id = user_id_snapshot
+            if not user_id:
+                user_id = self._infer_user_for_ssrc(ssrc)
+                user_id_snapshot = user_id
+                sample["mapped_user_id"] = user_id
+
+            if user_id:
+                try:
+                    import davey
+                    decrypted = self._dave_session.decrypt(
+                        user_id, davey.MediaType.audio, decrypted
+                    )
+                    sample["decoded_payload_b64"] = base64.b64encode(decrypted).decode("ascii")
+                except Exception as e:
+                    # Unencrypted passthrough — use NaCl-decrypted data as-is
+                    if "Unencrypted" not in str(e):
+                        if self._packet_debug_count <= 10:
+                            logger.warning("DAVE decrypt failed for ssrc=%d user=%s: %s", ssrc, user_id, e)
+                        with self._lock:
+                            self._remember_packet_sample(ssrc, sample)
+                            self._append_packet_trace(ssrc, sample)
+                        return
+            else:
+                # With DAVE enabled, an unmapped SSRC means the inner media
+                # payload is still encrypted. Do not feed it to Opus yet.
+                if self._packet_debug_count <= 20:
+                    logger.info(
+                        "Voice packet waiting for SSRC mapping: guild=%s ssrc=%s seq=%s ts=%s",
+                        getattr(getattr(self._vc, "guild", None), "id", "-"),
+                        ssrc,
+                        seq,
+                        timestamp,
+                    )
+                with self._lock:
+                    self._remember_packet_sample(ssrc, sample)
+                    self._append_packet_trace(ssrc, sample)
+                return
+
+        with self._lock:
             self._remember_packet_sample(ssrc, sample)
             self._append_packet_trace(ssrc, sample)
 

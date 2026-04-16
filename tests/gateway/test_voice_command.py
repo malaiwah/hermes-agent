@@ -2599,19 +2599,41 @@ class TestVoiceReception:
         assert len(receiver._buffers[100]) > 0
         dave.decrypt.assert_called_once()
 
-    def test_on_packet_dave_unknown_ssrc_passthrough(self):
-        """Unknown SSRC + DAVE → skip DAVE, attempt Opus decode (passthrough)."""
+    def test_on_packet_dave_unknown_ssrc_automaps_sole_allowed_user(self):
+        """Unknown SSRC + DAVE should auto-map before media decrypt when only one user fits."""
         dave = MagicMock()
+        dave.decrypt.return_value = b"\xf8\xff\xfe"
         receiver = self._make_receiver_with_nacl(dave_session=dave)
+        receiver._allowed_user_ids = {"42"}
+        receiver._vc.channel.members = [
+            SimpleNamespace(id=9999, name="Bot"),
+            SimpleNamespace(id=42, name="Alice"),
+        ]
         self._inject_mock_decoder(receiver, 100)
 
         with patch("nacl.secret.Aead") as mock_aead:
-            mock_aead.return_value.decrypt.return_value = b"\xf8\xff\xfe"
+            mock_aead.return_value.decrypt.return_value = b"\x01" * 32
+            receiver._on_packet(self._build_rtp_packet(ssrc=100))
+
+        assert receiver._ssrc_to_user[100] == 42
+        dave.decrypt.assert_called_once()
+        assert 100 in receiver._buffers
+        assert len(receiver._buffers[100]) > 0
+
+    def test_on_packet_dave_unknown_ssrc_waits_for_mapping(self):
+        """Unknown SSRC + DAVE should not Opus-decode still-encrypted media."""
+        dave = MagicMock()
+        receiver = self._make_receiver_with_nacl(dave_session=dave)
+
+        with patch("gateway.platforms.discord.discord.opus.Decoder") as decoder_ctor, \
+             patch("nacl.secret.Aead") as mock_aead:
+            mock_aead.return_value.decrypt.return_value = b"\x01" * 32
             receiver._on_packet(self._build_rtp_packet(ssrc=100))
 
         dave.decrypt.assert_not_called()
-        assert 100 in receiver._buffers
-        assert len(receiver._buffers[100]) > 0
+        decoder_ctor.assert_not_called()
+        assert 100 not in receiver._buffers
+        assert 100 not in receiver._decoders
 
     def test_on_packet_dave_unencrypted_error_passthrough(self):
         """DAVE decrypt 'Unencrypted' error → use data as-is, don't drop."""
