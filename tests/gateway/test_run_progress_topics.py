@@ -63,6 +63,7 @@ class DiscordVoiceProgressAdapter(ProgressCaptureAdapter):
         self._last_tts_voice = {"voice-chat": "vc_test_voice"}
         self._last_tts_instruct = {"voice-chat": "warm and steady"}
         self.play_calls = []
+        self.tts_play_calls = []
 
     def is_in_voice_channel(self, guild_id: int) -> bool:
         return guild_id == 111
@@ -79,6 +80,16 @@ class DiscordVoiceProgressAdapter(ProgressCaptureAdapter):
         if callable(callback):
             callback()
         return True
+
+    async def play_tts(self, chat_id: str, audio_path: str, **kwargs) -> SendResult:
+        self.tts_play_calls.append(
+            {
+                "chat_id": chat_id,
+                "audio_path": audio_path,
+                "kwargs": kwargs,
+            }
+        )
+        return SendResult(success=True, message_id="tts-play-1")
 
 
 class FakeAgent:
@@ -138,6 +149,21 @@ class VoiceAckAgent:
     def run_conversation(self, message, conversation_history=None, task_id=None):
         if self.message_callback:
             self.message_callback("Still checking that now.")
+        return {
+            "final_response": "[SILENT]",
+            "messages": [{"role": "assistant", "content": "[SILENT]"}],
+            "api_calls": 1,
+        }
+
+
+class VoiceMediaSidebandAgent:
+    def __init__(self, **kwargs):
+        self.media_message_callback = kwargs.get("media_message_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        if self.media_message_callback:
+            self.media_message_callback([("/tmp/sideband.ogg", True)])
         return {
             "final_response": "[SILENT]",
             "messages": [{"role": "assistant", "content": "[SILENT]"}],
@@ -574,6 +600,72 @@ async def test_run_agent_send_user_message_plays_spoken_ack_in_live_discord_vc(m
     assert "voice=vc_test_voice" in pcm_requests[0]["url"]
     assert "instruct=warm+and+steady" in pcm_requests[0]["url"]
     assert pcm_requests[0]["trace_meta"]["turn_kind"] == "ack"
+
+
+@pytest.mark.asyncio
+async def test_run_agent_media_sideband_prefers_play_tts_in_live_discord_vc(monkeypatch, tmp_path):
+    fake_dotenv = types.ModuleType("dotenv")
+    fake_dotenv.load_dotenv = lambda *args, **kwargs: None
+    monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
+
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = VoiceMediaSidebandAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+
+    adapter = DiscordVoiceProgressAdapter()
+    runner = _make_runner(adapter)
+    gateway_run = importlib.import_module("gateway.run")
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"})
+
+    source = SessionSource(
+        platform=Platform.DISCORD,
+        chat_id="voice-chat",
+        chat_type="group",
+        thread_id=None,
+    )
+
+    result = await runner._run_agent(
+        message="hello",
+        context_prompt="",
+        history=[],
+        source=source,
+        session_id="sess-voice-media-sideband",
+        session_key="agent:main:discord:group:voice-chat",
+    )
+
+    await asyncio.sleep(0)
+
+    assert result["final_response"] == ""
+    assert adapter.tts_play_calls
+    assert adapter.tts_play_calls[0]["chat_id"] == "voice-chat"
+    assert adapter.tts_play_calls[0]["audio_path"] == "/tmp/sideband.ogg"
+
+
+@pytest.mark.asyncio
+async def test_deliver_media_from_response_prefers_play_tts_for_audio(monkeypatch, tmp_path):
+    adapter = DiscordVoiceProgressAdapter()
+    runner = _make_runner(adapter)
+    gateway_run = importlib.import_module("gateway.run")
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+
+    source = SessionSource(
+        platform=Platform.DISCORD,
+        chat_id="voice-chat",
+        chat_type="group",
+        thread_id=None,
+    )
+    event = SimpleNamespace(source=source)
+
+    await runner._deliver_media_from_response(
+        "[[audio_as_voice]]\nMEDIA:/tmp/final-reply.ogg",
+        event,
+        adapter,
+    )
+
+    assert adapter.tts_play_calls
+    assert adapter.tts_play_calls[0]["chat_id"] == "voice-chat"
+    assert adapter.tts_play_calls[0]["audio_path"] == "/tmp/final-reply.ogg"
 
 
 # ---------------------------------------------------------------------------

@@ -3984,6 +3984,12 @@ class GatewayRunner:
                         "    Example: '[voice: vc_e87c8ed1]\\nGreat, speaking in your "
                         "cloned voice now.'\n"
                         "Call list_voice_clones to see all available voices with gender info.\n"
+                        "LIVE VOICE CHANNEL REPLIES: For a normal final spoken answer in an active "
+                        "Discord voice channel, do NOT call text_to_speech or send_tts_message. "
+                        "Just answer naturally in plain text and Hermes will speak it in-channel. "
+                        "Reserve send_user_message for quick spoken acknowledgements while you work. "
+                        "Only use send_tts_message when the user explicitly wants separate sideband "
+                        "audio or dual-modality delivery.\n"
                         "VOICE FEEDBACK: When using tools, call send_user_message "
                         "in PARALLEL with your first tool call to acknowledge the "
                         "user. In a live Discord voice channel this becomes a quick spoken acknowledgement "
@@ -4011,6 +4017,7 @@ class GatewayRunner:
                         "[Voice mode. "
                         f"{_lang_hint}"
                         f"Current voice direction: {_last_instruct}. "
+                        "For normal final live voice replies, prefer plain text over TTS tools so Hermes speaks in-channel. "
                         "Keep quick acknowledgements and final spoken answers tonally continuous unless the situation changes.]\n\n"
                         + message_text
                     )
@@ -6219,11 +6226,18 @@ class GatewayRunner:
                     ext = Path(media_path).suffix.lower()
                     if ext in _AUDIO_EXTS:
                         _send_t0 = time.perf_counter()
-                        await adapter.send_voice(
-                            chat_id=event.source.chat_id,
-                            audio_path=media_path,
-                            metadata=_thread_meta,
-                        )
+                        if hasattr(adapter, "play_tts"):
+                            await adapter.play_tts(
+                                chat_id=event.source.chat_id,
+                                audio_path=media_path,
+                                metadata=_thread_meta,
+                            )
+                        else:
+                            await adapter.send_voice(
+                                chat_id=event.source.chat_id,
+                                audio_path=media_path,
+                                metadata=_thread_meta,
+                            )
                         logger.info(
                             "voice pipeline: media_send_complete platform=%s chat=%s ext=%s "
                             "elapsed_ms=%.1f",
@@ -8686,7 +8700,14 @@ class GatewayRunner:
                 try:
                     ext = Path(media_path).suffix.lower()
                     if ext in _AUDIO_EXTS:
-                        coro = _status_adapter.send_voice(chat_id=_status_chat_id, audio_path=media_path, metadata=_status_thread_metadata)
+                        if hasattr(_status_adapter, "play_tts"):
+                            coro = _status_adapter.play_tts(
+                                chat_id=_status_chat_id,
+                                audio_path=media_path,
+                                metadata=_status_thread_metadata,
+                            )
+                        else:
+                            coro = _status_adapter.send_voice(chat_id=_status_chat_id, audio_path=media_path, metadata=_status_thread_metadata)
                     elif ext in _VIDEO_EXTS:
                         coro = _status_adapter.send_video(chat_id=_status_chat_id, video_path=media_path, metadata=_status_thread_metadata)
                     elif ext in _IMAGE_EXTS:
