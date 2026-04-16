@@ -5,8 +5,10 @@ instead of the OpenAI JSON body format.
 """
 
 import io
+import json
 import os
 import tempfile
+from pathlib import Path
 from unittest.mock import MagicMock, patch, call
 
 import pytest
@@ -172,3 +174,28 @@ class TestGenerateQwen3TTS:
         from tools.tts_tool import _get_provider
         config = {"provider": "qwen3"}
         assert _get_provider(config) == "qwen3"
+
+
+class TestTextToSpeechTool:
+    def test_qwen3_direct_ogg_marks_voice_compatible(self, tmp_path, monkeypatch):
+        """Direct qwen3 .ogg output should keep the native-voice marker."""
+        from tools.tts_tool import text_to_speech_tool
+
+        monkeypatch.setenv("HERMES_SESSION_PLATFORM", "discord")
+        output = tmp_path / "speech.ogg"
+
+        def _fake_generate(_text, output_path, _tts_config, **_kwargs):
+            Path(output_path).write_bytes(b"fake-ogg-audio")
+            return output_path
+
+        with patch("tools.tts_tool._load_tts_config", return_value={"provider": "qwen3"}), \
+             patch("tools.tts_tool._generate_qwen3_tts", side_effect=_fake_generate), \
+             patch("tools.tts_tool._convert_to_opus") as mock_convert:
+            result = json.loads(text_to_speech_tool("hello", output_path=str(output)))
+
+        assert result["success"] is True
+        assert result["provider"] == "qwen3"
+        assert result["voice_compatible"] is True
+        assert result["media_tag"].startswith("[[audio_as_voice]]\nMEDIA:")
+        assert result["file_path"].endswith(".ogg")
+        mock_convert.assert_not_called()

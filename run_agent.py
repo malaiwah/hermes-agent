@@ -1953,6 +1953,10 @@ class AIAgent:
                         quiet_mode=True,
                         platform=self.platform,
                         provider=self.provider,
+                        base_url=getattr(self, "base_url", None),
+                        api_key=getattr(self, "api_key", None),
+                        api_mode=getattr(self, "api_mode", None),
+                        extra_headers=getattr(self, "extra_headers", None),
                     )
                     review_agent._memory_store = self._memory_store
                     review_agent._memory_enabled = self._memory_enabled
