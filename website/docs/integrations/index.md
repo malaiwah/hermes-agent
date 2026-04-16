@@ -56,14 +56,15 @@ See [Browser Automation](/docs/user-guide/features/browser) for setup and usage.
 Text-to-speech and speech-to-text across all messaging platforms:
 
 | Provider | Quality | Cost | API Key |
-||----------|---------|------|---------|
-|| **Edge TTS** (default) | Good | Free | None needed |
-|| **ElevenLabs** | Excellent | Paid | `ELEVENLABS_API_KEY` |
-|| **OpenAI TTS** | Good | Paid | `VOICE_TOOLS_OPENAI_KEY` |
-|| **MiniMax** | Good | Paid | `MINIMAX_API_KEY` |
-|| **NeuTTS** | Good | Free | None needed |
+|----------|---------|------|---------|
+| **Edge TTS** (default) | Good | Free | None needed |
+| **ElevenLabs** | Excellent | Paid | `ELEVENLABS_API_KEY` |
+| **OpenAI TTS** | Good | Paid | `VOICE_TOOLS_OPENAI_KEY` |
+| **Qwen3-TTS** | Excellent | Self-hosted | None by default |
+| **MiniMax** | Good | Paid | `MINIMAX_API_KEY` |
+| **NeuTTS** | Good | Free | None needed |
 
-Speech-to-text supports three providers: local Whisper (free, runs on-device), Groq (fast cloud), and OpenAI Whisper API. Voice message transcription works across Telegram, Discord, WhatsApp, and other messaging platforms. See [Voice & TTS](/docs/user-guide/features/tts) and [Voice Mode](/docs/user-guide/features/voice-mode) for details.
+Speech-to-text supports local Whisper, Groq, and OpenAI-compatible STT endpoints. Voice message transcription works across Telegram, Discord, WhatsApp, and other messaging platforms. See [Voice & TTS](/docs/user-guide/features/tts), [Voice Mode](/docs/user-guide/features/voice-mode), and [Use qwen3 ASR and TTS with Hermes](/docs/guides/use-qwen3-asr-and-tts-with-hermes) for details.
 
 ## IDE & Editor Integration
 

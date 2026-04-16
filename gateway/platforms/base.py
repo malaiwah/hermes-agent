@@ -12,6 +12,7 @@ import random
 import re
 import subprocess
 import sys
+import time
 import uuid
 from abc import ABC, abstractmethod
 from urllib.parse import urlsplit
@@ -1743,10 +1744,19 @@ class BasePlatformAdapter(ABC):
                     try:
                         ext = Path(media_path).suffix.lower()
                         if ext in _AUDIO_EXTS:
+                            _voice_send_t0 = time.perf_counter()
                             media_result = await self.send_voice(
                                 chat_id=event.source.chat_id,
                                 audio_path=media_path,
                                 metadata=_thread_metadata,
+                            )
+                            logger.info(
+                                "[%s] voice pipeline: media_send_complete chat=%s ext=%s success=%s elapsed_ms=%.1f",
+                                self.name,
+                                event.source.chat_id,
+                                ext,
+                                getattr(media_result, "success", None),
+                                (time.perf_counter() - _voice_send_t0) * 1000.0,
                             )
                         elif ext in _VIDEO_EXTS:
                             media_result = await self.send_video(

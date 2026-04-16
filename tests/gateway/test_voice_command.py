@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import logging
 import os
 import queue
 import sys
@@ -76,6 +77,7 @@ def _make_runner(tmp_path):
     from gateway.run import GatewayRunner
     runner = object.__new__(GatewayRunner)
     runner.adapters = {}
+    runner.config = SimpleNamespace(stt_enabled=True)
     runner._voice_mode = {}
     runner._VOICE_MODE_PATH = tmp_path / "gateway_voice_mode.json"
     runner._session_db = None
@@ -399,6 +401,31 @@ class TestSendVoiceReply:
             # Should not raise
             await runner._send_voice_reply(event, "Hello")
 
+    @pytest.mark.asyncio
+    async def test_logs_tts_and_send_timings(self, runner, caplog):
+        mock_adapter = AsyncMock()
+        mock_adapter.send_voice = AsyncMock()
+        event = _make_event(message_type=MessageType.VOICE)
+        runner.adapters[event.source.platform] = mock_adapter
+
+        tts_result = json.dumps({
+            "success": True,
+            "file_path": "/tmp/test.ogg",
+            "provider": "qwen3",
+            "voice_compatible": True,
+        })
+
+        with patch("tools.tts_tool.text_to_speech_tool", return_value=tts_result), \
+             patch("tools.tts_tool._preprocess_tts_text", side_effect=lambda t: t), \
+             patch("os.path.isfile", return_value=True), \
+             patch("os.unlink"), \
+             patch("os.makedirs"), \
+             caplog.at_level(logging.INFO):
+            await runner._send_voice_reply(event, "Hello world")
+
+        assert "voice pipeline: tts_generated" in caplog.text
+        assert "voice pipeline: voice_send_complete" in caplog.text
+
 
 # =====================================================================
 # Discord play_tts skip when in voice channel
@@ -462,6 +489,38 @@ class TestDiscordPlayTtsSkip:
         result = await adapter.play_tts(chat_id="123", audio_path="/tmp/test.ogg")
         # Different channel — should NOT skip, falls through to send_voice (fails)
         assert result.success is False
+
+
+class TestGatewayVoiceMessageTranscription:
+    @pytest.fixture
+    def runner(self, tmp_path):
+        return _make_runner(tmp_path)
+
+    @pytest.mark.asyncio
+    async def test_logs_stt_timing_on_success(self, runner, caplog):
+        source = SessionSource(chat_id="123", user_id="user1", platform=MagicMock())
+        source.platform.value = "discord"
+
+        with patch(
+            "tools.transcription_tools.transcribe_audio",
+            return_value={
+                "success": True,
+                "transcript": "Hello from voice",
+                "provider": "openai",
+                "language": "English",
+            },
+        ), patch(
+            "tools.transcription_tools.get_stt_model_from_config",
+            return_value="Qwen/Qwen3-ASR-1.7B",
+        ), caplog.at_level(logging.INFO):
+            text = await runner._enrich_message_with_transcription(
+                user_text="",
+                audio_paths=["/tmp/audio_abc123def456.ogg"],
+                source=source,
+            )
+
+        assert "Hello from voice" in text
+        assert "voice pipeline: stt_complete" in caplog.text
 
 
 # =====================================================================

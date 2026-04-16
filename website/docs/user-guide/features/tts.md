@@ -10,13 +10,14 @@ Hermes Agent supports both text-to-speech output and voice message transcription
 
 ## Text-to-Speech
 
-Convert text to speech with five providers:
+Convert text to speech with six providers:
 
 | Provider | Quality | Cost | API Key |
 |----------|---------|------|---------|
 | **Edge TTS** (default) | Good | Free | None needed |
 | **ElevenLabs** | Excellent | Paid | `ELEVENLABS_API_KEY` |
 | **OpenAI TTS** | Good | Paid | `VOICE_TOOLS_OPENAI_KEY` |
+| **Qwen3-TTS** | Excellent | Self-hosted | None by default |
 | **MiniMax TTS** | Excellent | Paid | `MINIMAX_API_KEY` |
 | **NeuTTS** | Good | Free | None needed |
 
@@ -25,7 +26,7 @@ Convert text to speech with five providers:
 | Platform | Delivery | Format |
 |----------|----------|--------|
 | Telegram | Voice bubble (plays inline) | Opus `.ogg` |
-| Discord | Voice bubble (Opus/OGG), falls back to file attachment | Opus/MP3 |
+| Discord | Native voice bubble (Opus/OGG), falls back to file attachment | Opus/OGG |
 | WhatsApp | Audio file attachment | MP3 |
 | CLI | Saved to `~/.hermes/audio_cache/` | MP3 |
 
@@ -34,7 +35,7 @@ Convert text to speech with five providers:
 ```yaml
 # In ~/.hermes/config.yaml
 tts:
-  provider: "edge"              # "edge" | "elevenlabs" | "openai" | "minimax" | "neutts"
+  provider: "edge"              # "edge" | "elevenlabs" | "openai" | "qwen3" | "minimax" | "neutts"
   edge:
     voice: "en-US-AriaNeural"   # 322 voices, 74 languages
   elevenlabs:
@@ -44,6 +45,17 @@ tts:
     model: "gpt-4o-mini-tts"
     voice: "alloy"              # alloy, echo, fable, onyx, nova, shimmer
     base_url: "https://api.openai.com/v1"  # Override for OpenAI-compatible TTS endpoints
+  qwen3:
+    base_url: "http://localhost:8001"
+    voice: "ryan"               # preset voice, OpenAI alias, or vc_<clone_id>
+    instruct: "Speak warmly."   # optional style / emotion hint
+    timeout: 120
+    languages:
+      English:
+        voice: "ryan"
+      French:
+        voice: "vc_1234abcd"
+        instruct: "Parle naturellement en français."
   minimax:
     model: "speech-2.8-hd"     # speech-2.8-hd (default), speech-2.8-turbo
     voice_id: "English_Graceful_Lady"  # See https://platform.minimax.io/faq/system-voice-id
@@ -80,7 +92,7 @@ sudo dnf install ffmpeg
 Without ffmpeg, Edge TTS, MiniMax TTS, and NeuTTS audio are sent as regular audio files (playable, but shown as a rectangular player instead of a voice bubble).
 
 :::tip
-If you want voice bubbles without installing ffmpeg, switch to the OpenAI or ElevenLabs provider.
+If you want native Discord voice bubbles without local conversion, use a provider that can return direct `.ogg` output such as OpenAI, ElevenLabs, or Qwen3-TTS.
 :::
 
 ## Voice Message Transcription (STT)
@@ -91,7 +103,7 @@ Voice messages sent on Telegram, Discord, WhatsApp, Slack, or Signal are automat
 |----------|---------|------|---------| 
 | **Local Whisper** (default) | Good | Free | None needed |
 | **Groq Whisper API** | Good–Best | Free tier | `GROQ_API_KEY` |
-| **OpenAI Whisper API** | Good–Best | Paid | `VOICE_TOOLS_OPENAI_KEY` or `OPENAI_API_KEY` |
+| **OpenAI-compatible STT** | Good–Best | Varies | `VOICE_TOOLS_OPENAI_KEY` / config key |
 
 :::info Zero Config
 Local transcription works out of the box when `faster-whisper` is installed. If that's unavailable, Hermes can also use a local `whisper` CLI from common install locations (like `/opt/homebrew/bin`) or a custom command via `HERMES_LOCAL_STT_COMMAND`.
@@ -105,8 +117,11 @@ stt:
   provider: "local"           # "local" | "groq" | "openai" | "mistral"
   local:
     model: "base"             # tiny, base, small, medium, large-v3
+  model: "whisper-1"          # top-level STT model used by gateway voice paths
   openai:
-    model: "whisper-1"        # whisper-1, gpt-4o-mini-transcribe, gpt-4o-transcribe
+    base_url: "https://api.openai.com/v1"
+    api_key: ""               # optional; config key or VOICE_TOOLS_OPENAI_KEY
+    language: "en"            # optional language hint
   mistral:
     model: "voxtral-mini-latest"  # voxtral-mini-latest, voxtral-mini-2602
 ```
@@ -125,7 +140,11 @@ stt:
 
 **Groq API** — Requires `GROQ_API_KEY`. Good cloud fallback when you want a free hosted STT option.
 
-**OpenAI API** — Accepts `VOICE_TOOLS_OPENAI_KEY` first and falls back to `OPENAI_API_KEY`. Supports `whisper-1`, `gpt-4o-mini-transcribe`, and `gpt-4o-transcribe`.
+**OpenAI-compatible STT** — Hermes uses the OpenAI speech API shape for this provider. It accepts `VOICE_TOOLS_OPENAI_KEY` first and falls back to `OPENAI_API_KEY`, but you can also set `stt.openai.api_key` and `stt.openai.base_url` in config to point Hermes at a self-hosted OpenAI-compatible STT backend such as qwen3-asr-server.
+
+:::tip Qwen3 Voice Stack
+If you want a fully local OpenAI-compatible voice loop with qwen3-asr-server and qwen3-tts-server, see [Use qwen3 ASR and TTS with Hermes](/docs/guides/use-qwen3-asr-and-tts-with-hermes).
+:::
 
 **Mistral API (Voxtral Transcribe)** — Requires `MISTRAL_API_KEY`. Uses Mistral's [Voxtral Transcribe](https://docs.mistral.ai/capabilities/audio/speech_to_text/) models. Supports 13 languages, speaker diarization, and word-level timestamps. Install with `pip install hermes-agent[mistral]`.
 

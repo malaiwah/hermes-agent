@@ -5533,6 +5533,7 @@ class GatewayRunner:
         import uuid as _uuid
         audio_path = None
         actual_path = None
+        _voice_total_t0 = time.perf_counter()
         try:
             from tools.tts_tool import text_to_speech_tool, _preprocess_tts_text
 
@@ -5548,9 +5549,11 @@ class GatewayRunner:
             )
             os.makedirs(os.path.dirname(audio_path), exist_ok=True)
 
+            _tts_t0 = time.perf_counter()
             result_json = await asyncio.to_thread(
                 text_to_speech_tool, text=tts_text, output_path=audio_path
             )
+            _tts_elapsed_ms = (time.perf_counter() - _tts_t0) * 1000.0
             result = json.loads(result_json)
 
             # Use the actual file path from result (may differ after opus conversion)
@@ -5558,6 +5561,18 @@ class GatewayRunner:
             if not result.get("success") or not os.path.isfile(actual_path):
                 logger.warning("Auto voice reply TTS failed: %s", result.get("error"))
                 return
+
+            logger.info(
+                "voice pipeline: tts_generated platform=%s chat=%s provider=%s "
+                "voice_compatible=%s chars=%d elapsed_ms=%.1f file=%s",
+                getattr(event.source.platform, "value", event.source.platform),
+                event.source.chat_id,
+                result.get("provider", "unknown"),
+                result.get("voice_compatible"),
+                len(tts_text),
+                _tts_elapsed_ms,
+                actual_path,
+            )
 
             adapter = self.adapters.get(event.source.platform)
 
@@ -5567,7 +5582,16 @@ class GatewayRunner:
                     and hasattr(adapter, "play_in_voice_channel")
                     and hasattr(adapter, "is_in_voice_channel")
                     and adapter.is_in_voice_channel(guild_id)):
+                _send_t0 = time.perf_counter()
                 await adapter.play_in_voice_channel(guild_id, actual_path)
+                logger.info(
+                    "voice pipeline: voice_send_complete platform=%s chat=%s mode=voice_channel "
+                    "elapsed_ms=%.1f total_ms=%.1f",
+                    getattr(event.source.platform, "value", event.source.platform),
+                    event.source.chat_id,
+                    (time.perf_counter() - _send_t0) * 1000.0,
+                    (time.perf_counter() - _voice_total_t0) * 1000.0,
+                )
             elif adapter and hasattr(adapter, "send_voice"):
                 send_kwargs: Dict[str, Any] = {
                     "chat_id": event.source.chat_id,
@@ -5576,7 +5600,16 @@ class GatewayRunner:
                 }
                 if event.source.thread_id:
                     send_kwargs["metadata"] = {"thread_id": event.source.thread_id}
+                _send_t0 = time.perf_counter()
                 await adapter.send_voice(**send_kwargs)
+                logger.info(
+                    "voice pipeline: voice_send_complete platform=%s chat=%s mode=message_attachment "
+                    "elapsed_ms=%.1f total_ms=%.1f",
+                    getattr(event.source.platform, "value", event.source.platform),
+                    event.source.chat_id,
+                    (time.perf_counter() - _send_t0) * 1000.0,
+                    (time.perf_counter() - _voice_total_t0) * 1000.0,
+                )
         except Exception as e:
             logger.warning("Auto voice reply failed: %s", e, exc_info=True)
         finally:
@@ -5615,10 +5648,19 @@ class GatewayRunner:
                 try:
                     ext = Path(media_path).suffix.lower()
                     if ext in _AUDIO_EXTS:
+                        _send_t0 = time.perf_counter()
                         await adapter.send_voice(
                             chat_id=event.source.chat_id,
                             audio_path=media_path,
                             metadata=_thread_meta,
+                        )
+                        logger.info(
+                            "voice pipeline: media_send_complete platform=%s chat=%s ext=%s "
+                            "elapsed_ms=%.1f",
+                            getattr(event.source.platform, "value", event.source.platform),
+                            event.source.chat_id,
+                            ext,
+                            (time.perf_counter() - _send_t0) * 1000.0,
                         )
                     elif ext in _VIDEO_EXTS:
                         await adapter.send_video(
@@ -7276,7 +7318,9 @@ class GatewayRunner:
         for path in audio_paths:
             try:
                 logger.debug("Transcribing user voice: %s", path)
+                _stt_t0 = time.perf_counter()
                 result = await asyncio.to_thread(transcribe_audio, path, model=stt_model)
+                _stt_elapsed_ms = (time.perf_counter() - _stt_t0) * 1000.0
                 if result["success"]:
                     transcript = result["transcript"]
                     # Extract opaque audio_id from the cached filename so the
@@ -7302,8 +7346,30 @@ class GatewayRunner:
                         _adapter = self.adapters.get(source.platform)
                         if _adapter and hasattr(_adapter, "_voice_last_language"):
                             _adapter._voice_last_language[source.chat_id] = _detected_lang
+                    logger.info(
+                        "voice pipeline: stt_complete platform=%s chat=%s model=%s provider=%s "
+                        "language=%s transcript_chars=%d elapsed_ms=%.1f file=%s",
+                        getattr(getattr(source, "platform", None), "value", getattr(source, "platform", "unknown")),
+                        getattr(source, "chat_id", "unknown"),
+                        stt_model or "auto",
+                        result.get("provider", "unknown"),
+                        _detected_lang or "unknown",
+                        len(transcript),
+                        _stt_elapsed_ms,
+                        path,
+                    )
                 else:
                     error = result.get("error", "unknown error")
+                    logger.info(
+                        "voice pipeline: stt_failed platform=%s chat=%s model=%s "
+                        "elapsed_ms=%.1f error=%s file=%s",
+                        getattr(getattr(source, "platform", None), "value", getattr(source, "platform", "unknown")),
+                        getattr(source, "chat_id", "unknown"),
+                        stt_model or "auto",
+                        _stt_elapsed_ms,
+                        error,
+                        path,
+                    )
                     if (
                         "No STT provider" in error
                         or error.startswith("Neither VOICE_TOOLS_OPENAI_KEY nor OPENAI_API_KEY is set")

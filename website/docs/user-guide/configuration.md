@@ -784,7 +784,7 @@ When enabled, the system prompt includes guidance reminding the model to make ac
 
 ```yaml
 tts:
-  provider: "edge"              # "edge" | "elevenlabs" | "openai" | "neutts"
+  provider: "edge"              # "edge" | "elevenlabs" | "openai" | "qwen3" | "neutts"
   edge:
     voice: "en-US-AriaNeural"   # 322 voices, 74 languages
   elevenlabs:
@@ -794,6 +794,17 @@ tts:
     model: "gpt-4o-mini-tts"
     voice: "alloy"              # alloy, echo, fable, onyx, nova, shimmer
     base_url: "https://api.openai.com/v1"  # Override for OpenAI-compatible TTS endpoints
+  qwen3:
+    base_url: "http://localhost:8001"
+    voice: "ryan"
+    instruct: "Speak naturally."
+    timeout: 120
+    languages:
+      English:
+        voice: "ryan"
+      French:
+        voice: "vc_ab12cd34"
+        instruct: "Parle naturellement en français."
   neutts:
     ref_audio: ''
     ref_text: ''
@@ -871,18 +882,20 @@ Hashes are deterministic — the same user always maps to the same hash, so the 
 ```yaml
 stt:
   provider: "local"            # "local" | "groq" | "openai"
+  model: "whisper-1"           # top-level model used by gateway voice-message paths
   local:
     model: "base"              # tiny, base, small, medium, large-v3
   openai:
-    model: "whisper-1"         # whisper-1 | gpt-4o-mini-transcribe | gpt-4o-transcribe
-  # model: "whisper-1"         # Legacy fallback key still respected
+    base_url: "https://api.openai.com/v1"
+    api_key: ""                # optional; config key beats env var
+    language: "en"             # optional ISO language hint
 ```
 
 Provider behavior:
 
 - `local` uses `faster-whisper` running on your machine. Install it separately with `pip install faster-whisper`.
 - `groq` uses Groq's Whisper-compatible endpoint and reads `GROQ_API_KEY`.
-- `openai` uses the OpenAI speech API and reads `VOICE_TOOLS_OPENAI_KEY`.
+- `openai` uses the OpenAI speech API shape. It reads `VOICE_TOOLS_OPENAI_KEY` by default, but you can also point it at a self-hosted OpenAI-compatible STT backend with `stt.openai.base_url` and `stt.openai.api_key`.
 
 If the requested provider is unavailable, Hermes falls back automatically in this order: `local` → `groq` → `openai`.
 
@@ -894,6 +907,8 @@ STT_OPENAI_MODEL=whisper-1
 GROQ_BASE_URL=https://api.groq.com/openai/v1
 STT_OPENAI_BASE_URL=https://api.openai.com/v1
 ```
+
+For a full local voice loop example using qwen3-asr-server and qwen3-tts-server, see [Use qwen3 ASR and TTS with Hermes](/docs/guides/use-qwen3-asr-and-tts-with-hermes).
 
 ## Voice Mode (CLI)
 

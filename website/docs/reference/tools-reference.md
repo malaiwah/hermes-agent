@@ -158,6 +158,5 @@ In addition to built-in tools, Hermes can load tools dynamically from MCP server
 
 | Tool | Description | Requires environment |
 |------|-------------|----------------------|
-| `text_to_speech` | Convert text to speech audio. Returns a MEDIA: path that the platform delivers as a voice message. On Telegram it plays as a voice bubble, on Discord/WhatsApp as an audio attachment. In CLI mode, saves to ~/voice-memos/. Voice and provider… | — |
-
+| `text_to_speech` | Convert text to speech audio. Returns a MEDIA: path that the platform delivers as a voice message. On Telegram it plays as a voice bubble; on Discord Hermes attempts a native voice bubble with Opus/OGG and falls back to a normal audio attachment if needed. In CLI mode, saves to ~/voice-memos/. Voice and provider… | — |
 

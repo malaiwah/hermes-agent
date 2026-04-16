@@ -465,13 +465,14 @@ Replace the ID with the actual channel ID (right-click → Copy Channel ID with 
 
 Hermes Agent supports Discord voice messages:
 
-- **Incoming voice messages** are automatically transcribed using the configured STT provider: local `faster-whisper` (no key), Groq Whisper (`GROQ_API_KEY`), or OpenAI Whisper (`VOICE_TOOLS_OPENAI_KEY`).
-- **Text-to-speech**: Use `/voice tts` to have the bot send spoken audio responses alongside text replies.
+- **Incoming voice messages** are automatically transcribed using the configured STT provider: local `faster-whisper` (no key), Groq Whisper (`GROQ_API_KEY`), or any OpenAI-compatible STT backend configured through the `openai` provider.
+- **Text-to-speech**: Use `/voice tts` to have the bot send spoken audio responses alongside text replies. Hermes attempts a native Discord voice bubble with Opus/OGG and falls back to a regular audio attachment if Discord rejects the native path.
 - **Discord voice channels**: Hermes can also join a voice channel, listen to users speaking, and talk back in the channel.
 
 For the full setup and operational guide, see:
 - [Voice Mode](/docs/user-guide/features/voice-mode)
 - [Use Voice Mode with Hermes](/docs/guides/use-voice-mode-with-hermes)
+- [Use qwen3 ASR and TTS with Hermes](/docs/guides/use-qwen3-asr-and-tts-with-hermes)
 
 ## Troubleshooting
 
@@ -530,6 +531,5 @@ Always set `DISCORD_ALLOWED_USERS` to restrict who can interact with the bot. Wi
 :::
 
 For more information on securing your Hermes Agent deployment, see the [Security Guide](../security.md).
-
 
 

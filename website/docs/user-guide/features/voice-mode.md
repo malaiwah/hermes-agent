@@ -8,7 +8,7 @@ description: "Real-time voice conversations with Hermes Agent — CLI, Telegram,
 
 Hermes Agent supports full voice interaction across CLI and messaging platforms. Talk to the agent using your microphone, hear spoken replies, and have live voice conversations in Discord voice channels.
 
-If you want a practical setup walkthrough with recommended configurations and real usage patterns, see [Use Voice Mode with Hermes](/docs/guides/use-voice-mode-with-hermes).
+If you want a practical setup walkthrough with recommended configurations and real usage patterns, see [Use Voice Mode with Hermes](/docs/guides/use-voice-mode-with-hermes). If you want a fully self-hosted OpenAI-compatible voice stack, see [Use qwen3 ASR and TTS with Hermes](/docs/guides/use-qwen3-asr-and-tts-with-hermes).
 
 ## Prerequisites
 
@@ -58,6 +58,8 @@ pip install "hermes-agent[all]"
 | `tts-premium` | `elevenlabs` | ElevenLabs TTS provider |
 
 Optional local TTS provider: install `neutts` separately with `python -m pip install -U neutts[all]`. On first use it downloads the model automatically.
+
+For self-hosted `qwen3-tts-server`, Hermes talks to it directly over HTTP. No extra Python package is required beyond Hermes itself; configure the `tts.qwen3` block in `config.yaml`.
 
 :::info
 `discord.py[voice]` installs **PyNaCl** (for voice encryption) and **opus bindings** automatically. This is required for Discord voice channel support.
@@ -314,7 +316,7 @@ DISCORD_ALLOWED_USERS=your-user-id
 
 # TTS — optional. Edge TTS and NeuTTS need no key.
 # ELEVENLABS_API_KEY=***      # Premium quality
-# VOICE_TOOLS_OPENAI_KEY=***  # OpenAI TTS / Whisper
+# VOICE_TOOLS_OPENAI_KEY=***  # OpenAI-compatible STT/TTS if your backend requires auth
 ```
 
 ### Start the Gateway
@@ -349,6 +351,8 @@ When the bot joins a voice channel, it:
 3. **Transcribes** the audio via Whisper STT (local, Groq, or OpenAI)
 4. **Processes** through the full agent pipeline (session, tools, memory)
 5. **Speaks** the reply back in the voice channel via TTS
+
+For the lowest-latency self-hosted setup, Hermes can pair `qwen3-asr-server` with `qwen3-tts-server`. The async voice-message path still uses full-file TTS, while the live Discord voice-channel path uses qwen3 token-level `/pcm-stream`.
 
 ### Text Channel Integration
 
@@ -389,13 +393,17 @@ voice:
 # Speech-to-Text
 stt:
   provider: "local"                  # "local" (free) | "groq" | "openai"
+  model: "whisper-1"                 # top-level model used by gateway voice-message paths
   local:
     model: "base"                    # tiny, base, small, medium, large-v3
-  # model: "whisper-1"              # Legacy: used when provider is not set
+  openai:
+    base_url: "https://api.openai.com/v1"  # OpenAI-compatible STT endpoint
+    api_key: ""                      # optional; config key beats env var
+    language: "en"                   # optional language hint
 
 # Text-to-Speech
 tts:
-  provider: "edge"                 # "edge" (free) | "elevenlabs" | "openai" | "neutts" | "minimax"
+  provider: "edge"                 # "edge" (free) | "elevenlabs" | "openai" | "qwen3" | "neutts" | "minimax"
   edge:
     voice: "en-US-AriaNeural"      # 322 voices, 74 languages
   elevenlabs:
@@ -405,6 +413,10 @@ tts:
     model: "gpt-4o-mini-tts"
     voice: "alloy"                 # alloy, echo, fable, onyx, nova, shimmer
     base_url: "https://api.openai.com/v1"  # optional: override for self-hosted or OpenAI-compatible endpoints
+  qwen3:
+    base_url: "http://localhost:8001"
+    voice: "ryan"
+    instruct: "Speak naturally and warmly."
   neutts:
     ref_audio: ''
     ref_text: ''
@@ -418,17 +430,17 @@ tts:
 # Speech-to-Text providers (local needs no key)
 # pip install faster-whisper        # Free local STT — no API key needed
 GROQ_API_KEY=...                    # Groq Whisper (fast, free tier)
-VOICE_TOOLS_OPENAI_KEY=...         # OpenAI Whisper (paid)
+VOICE_TOOLS_OPENAI_KEY=...         # OpenAI-compatible STT/TTS when auth is required
 
 # STT advanced overrides (optional)
 STT_GROQ_MODEL=whisper-large-v3-turbo    # Override default Groq STT model
 STT_OPENAI_MODEL=whisper-1               # Override default OpenAI STT model
 GROQ_BASE_URL=https://api.groq.com/openai/v1     # Custom Groq endpoint
-STT_OPENAI_BASE_URL=https://api.openai.com/v1    # Custom OpenAI STT endpoint
+STT_OPENAI_BASE_URL=https://api.openai.com/v1    # Custom OpenAI-compatible STT endpoint
 
 # Text-to-Speech providers (Edge TTS and NeuTTS need no key)
 ELEVENLABS_API_KEY=***             # ElevenLabs (premium quality)
-# VOICE_TOOLS_OPENAI_KEY above also enables OpenAI TTS
+# VOICE_TOOLS_OPENAI_KEY above also enables OpenAI-compatible TTS when needed
 
 # Discord voice channel
 DISCORD_BOT_TOKEN=...
@@ -456,9 +468,10 @@ Provider priority (automatic fallback): **local** > **groq** > **openai**
 | **Edge TTS** | Good | Free | ~1s | No |
 | **ElevenLabs** | Excellent | Paid | ~2s | Yes |
 | **OpenAI TTS** | Good | Paid | ~1.5s | Yes |
+| **Qwen3-TTS** | Excellent | Self-hosted | ~0.13s first PCM chunk / ~1.2-1.4s file generation | No by default |
 | **NeuTTS** | Good | Free | Depends on CPU/GPU | No |
 
-NeuTTS uses the `tts.neutts` config block above.
+Qwen3-TTS uses the `tts.qwen3` config block above. NeuTTS uses `tts.neutts`.
 
 ---
 
