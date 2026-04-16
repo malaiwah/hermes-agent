@@ -1603,7 +1603,21 @@ class AIAgent:
                     self.status_callback("agent_message", text)
                 if has_media and media_callback:
                     media_callback(media_files)
-                return json.dumps({"sent": True, "message": text, "media": len(media_files)}, ensure_ascii=False)
+                return json.dumps(
+                    {
+                        "sent": True,
+                        "already_sent": True,
+                        "delivery": "immediate_sideband",
+                        "message": text,
+                        "media": len(media_files),
+                        "next_step_hint": (
+                            "The user already received this sideband message immediately. "
+                            "If nothing else needs to be sent this turn, finish with exact [SILENT] "
+                            "instead of repeating yourself."
+                        ),
+                    },
+                    ensure_ascii=False,
+                )
             except Exception as exc:
                 return json.dumps(
                     {"error": f"Failed to send user message: {exc}"},
@@ -1686,12 +1700,19 @@ class AIAgent:
             return json.dumps(
                 {
                     "sent": True,
+                    "already_sent": True,
+                    "delivery": "immediate_tts_sideband",
                     "message": sideband_text,
                     "message_sent": message_sent if sideband_text else True,
                     "media": len(media_files),
                     "file_path": result.get("file_path"),
                     "provider": result.get("provider"),
                     "voice_compatible": result.get("voice_compatible"),
+                    "next_step_hint": (
+                        "The user already received this sideband audio immediately. "
+                        "If no additional visible reply is needed, finish with exact [SILENT] "
+                        "instead of repeating the spoken content."
+                    ),
                     "warning": (
                         "Audio delivered, but the optional text message could not be sent in this execution context."
                         if sideband_text and not message_sent

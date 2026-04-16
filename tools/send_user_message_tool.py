@@ -15,11 +15,15 @@ from tools.registry import registry
 SEND_USER_MESSAGE_SCHEMA = {
     "name": "send_user_message",
     "description": (
-        "Send a natural-language message to the current user in the current "
-        "session without ending your turn. Use this for concise progress "
-        "updates before or between tool calls, such as briefly stating your "
-        "plan, reporting what you are doing, or flagging an important status "
-        "change while you continue working. Keep messages short and useful."
+        "Send a natural-language sideband message to the current user in the "
+        "current session without ending your turn. The user receives it "
+        "immediately, before your turn is finished, so use it to improve "
+        "responsiveness when you still need time to keep working. Prefer it "
+        "for concise acknowledgements, progress updates, or short status "
+        "changes before or between tool calls. Keep messages short and useful. "
+        "Do not wait for your final assistant reply to say the same thing "
+        "again. If this sideband message fully covers what the user should "
+        "see for now, finish the turn with the exact token [SILENT]."
     ),
     "parameters": {
         "type": "object",
@@ -27,7 +31,7 @@ SEND_USER_MESSAGE_SCHEMA = {
             "message": {
                 "type": "string",
                 "description": (
-                    "The message to send to the current user in natural "
+                    "The short message to send to the current user in natural "
                     "language. Example: 'I found the relevant files and I am "
                     "patching the config path next.'"
                 ),

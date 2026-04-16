@@ -1512,6 +1512,9 @@ class TestConcurrentToolExecution:
 
         cb.assert_called_once_with("agent_message", "Still working through the patch.")
         assert result["sent"] is True
+        assert result["already_sent"] is True
+        assert result["delivery"] == "immediate_sideband"
+        assert "exact [SILENT]" in result["next_step_hint"]
 
     def test_invoke_tool_send_user_message_errors_without_callback(self, agent):
         agent.message_callback = None
@@ -1554,9 +1557,12 @@ class TestConcurrentToolExecution:
         media_cb.assert_called_once_with([("/tmp/reply.ogg", True)])
         message_cb.assert_called_once_with("Sent now.")
         assert result["sent"] is True
+        assert result["already_sent"] is True
+        assert result["delivery"] == "immediate_tts_sideband"
         assert result["message_sent"] is True
         assert result["provider"] == "qwen3"
         assert result["voice_compatible"] is True
+        assert "exact [SILENT]" in result["next_step_hint"]
 
     def test_invoke_tool_send_tts_message_errors_without_media_callback(self, agent):
         agent.media_message_callback = None
@@ -1597,8 +1603,10 @@ class TestConcurrentToolExecution:
 
         media_cb.assert_called_once_with([("/tmp/reply.ogg", True)])
         assert result["sent"] is True
+        assert result["already_sent"] is True
         assert result["message_sent"] is False
         assert "could not be sent" in result["warning"]
+        assert "exact [SILENT]" in result["next_step_hint"]
 
     def test_invoke_tool_self_nudge_uses_callback(self, agent):
         cb = MagicMock(return_value={"armed": True, "delay_seconds": 300})

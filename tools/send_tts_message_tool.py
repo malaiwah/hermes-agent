@@ -14,12 +14,16 @@ from tools.registry import registry
 SEND_TTS_MESSAGE_SCHEMA = {
     "name": "send_tts_message",
     "description": (
-        "Send a spoken TTS message to the current user in the current session "
-        "without ending your turn. Use this when you want audio delivery to "
-        "happen immediately instead of waiting for your final assistant reply. "
-        "This is side-effecting. Prefer it for low-latency voice replies or "
-        "spoken sideband updates. Optionally include short text to send "
-        "alongside the audio."
+        "Send a spoken TTS sideband message to the current user in the "
+        "current session without ending your turn. Audio delivery happens "
+        "immediately, before your turn is finished, so prefer this for "
+        "low-latency voice replies and spoken sideband updates when user "
+        "experience matters. This is side-effecting. The audio may reach the "
+        "user while you are still wrapping up the turn. Optionally include "
+        "short text for dual-modality delivery. Do not wait for your final "
+        "assistant reply to repeat the same spoken content. If the sideband "
+        "audio already fully handled the user-visible reply, finish the turn "
+        "with the exact token [SILENT]."
     ),
     "parameters": {
         "type": "object",
@@ -46,7 +50,7 @@ SEND_TTS_MESSAGE_SCHEMA = {
                 "type": "string",
                 "description": (
                     "Optional short text to send alongside the audio in the "
-                    "current session."
+                    "current session for dual-modality delivery."
                 ),
             },
         },
