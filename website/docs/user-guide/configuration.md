@@ -919,9 +919,22 @@ voice:
   auto_tts: false               # Enable spoken replies automatically when /voice on
   silence_threshold: 200        # RMS threshold for speech detection
   silence_duration: 3.0         # Seconds of silence before auto-stop
+  discord_vc:
+    vad_enabled: true           # Discord voice-channel turn detection
+    vad_mode: "silero_hybrid"   # Silero VAD (ONNX CPU) + RMS guardrails
+    vad_min_speech_ms: 250
+    vad_min_silence_ms: 550
+    vad_speech_pad_ms: 150
+    vad_start_prob: 0.55
+    vad_end_prob: 0.35
+    vad_max_utterance_s: 20
+    rms_fallback_threshold: 200
+    min_utterance_rms: 300
+    barge_in_guard: 0.5
+    barge_in_rms: 600
 ```
 
-Use `/voice on` in the CLI to enable microphone mode, `record_key` to start/stop recording, and `/voice tts` to toggle spoken replies. See [Voice Mode](/docs/user-guide/features/voice-mode) for end-to-end setup and platform-specific behavior.
+Use `/voice on` in the CLI to enable microphone mode, `record_key` to start/stop recording, and `/voice tts` to toggle spoken replies. The top-level `voice.silence_threshold` and `voice.silence_duration` settings apply to the CLI microphone loop only. Discord voice channels use the nested `voice.discord_vc` block above when `onnxruntime` and the bundled Silero VAD model are available; otherwise Hermes falls back automatically to the legacy RMS detector. See [Voice Mode](/docs/user-guide/features/voice-mode) for end-to-end setup and platform-specific behavior.
 
 ## Streaming
 

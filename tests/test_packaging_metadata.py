@@ -20,3 +20,12 @@ def test_manifest_includes_bundled_skills():
 
     assert "graft skills" in manifest
     assert "graft optional-skills" in manifest
+    assert "graft gateway/assets" in manifest
+
+
+def test_gateway_onnx_asset_is_packaged():
+    data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    package_data = data["tool"]["setuptools"]["package-data"]
+
+    assert "gateway" in package_data
+    assert "assets/*.onnx" in package_data["gateway"]

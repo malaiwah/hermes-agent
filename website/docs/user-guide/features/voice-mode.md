@@ -366,6 +366,15 @@ When the bot is in a voice channel:
 
 The bot automatically pauses its audio listener while playing TTS replies, preventing it from hearing and re-processing its own output.
 
+### Turn Detection
+
+Discord voice channels use a detector that is separate from the CLI microphone loop.
+
+- CLI voice mode still uses `voice.silence_threshold` and `voice.silence_duration`.
+- Discord VC now prefers `voice.discord_vc.vad_mode: "silero_hybrid"` when `onnxruntime` is installed.
+- In that mode, Hermes uses Silero VAD on CPU for utterance start/end while keeping the existing fast RMS path for barge-in and low-energy rejection.
+- If the ONNX runtime or model is unavailable, Hermes logs a fallback and keeps using the older RMS detector so joining the channel still works.
+
 ### Access Control
 
 Only users listed in `DISCORD_ALLOWED_USERS` can interact via voice. Other users' audio is silently ignored.
@@ -389,6 +398,19 @@ voice:
   auto_tts: false                  # Auto-enable TTS when voice mode starts
   silence_threshold: 200           # RMS level (0-32767) below which counts as silence
   silence_duration: 3.0            # Seconds of silence before auto-stop
+  discord_vc:
+    vad_enabled: true
+    vad_mode: "silero_hybrid"
+    vad_min_speech_ms: 250
+    vad_min_silence_ms: 550
+    vad_speech_pad_ms: 150
+    vad_start_prob: 0.55
+    vad_end_prob: 0.35
+    vad_max_utterance_s: 20
+    rms_fallback_threshold: 200
+    min_utterance_rms: 300
+    barge_in_guard: 0.5
+    barge_in_rms: 600
 
 # Speech-to-Text
 stt:
@@ -446,6 +468,8 @@ ELEVENLABS_API_KEY=***             # ElevenLabs (premium quality)
 DISCORD_BOT_TOKEN=...
 DISCORD_ALLOWED_USERS=...
 ```
+
+Install `hermes-agent[vad]` (or `hermes-agent[all]`) if you want the Discord voice-channel VAD path. Plain `hermes-agent[messaging]` still works, but it will use the legacy RMS detector unless `onnxruntime` is present.
 
 ### STT Provider Comparison
 
@@ -518,4 +542,12 @@ The hallucination filter catches most cases automatically. If you're still getti
 
 - Use a quieter environment
 - Adjust `silence_threshold` in config (higher = less sensitive)
+
+### Discord VC still waits too long before responding
+
+- Verify `voice.discord_vc.vad_enabled: true`
+- Install the VAD extra: `pip install "hermes-agent[messaging,vad]"`
+- Lower `voice.discord_vc.vad_min_silence_ms` if Hermes is too hesitant
+- Raise `voice.discord_vc.vad_min_silence_ms` or `min_utterance_rms` if Hermes cuts in on room noise
+- Do not tune `barge_in_guard` / `barge_in_rms` unless you are specifically adjusting playback interruption behavior
 - Try a different STT model

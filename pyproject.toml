@@ -43,8 +43,9 @@ dependencies = [
 [project.optional-dependencies]
 modal = ["modal>=1.0.0,<2"]
 daytona = ["daytona>=0.148.0,<1"]
-dev = ["debugpy>=1.8.0,<2", "pytest>=9.0.2,<10", "pytest-asyncio>=1.3.0,<2", "pytest-xdist>=3.0,<4", "mcp>=1.2.0,<2"]
+dev = ["debugpy>=1.8.0,<2", "pytest>=9.0.2,<10", "pytest-asyncio>=1.3.0,<2", "pytest-xdist>=3.0,<4", "mcp>=1.2.0,<2", "numpy>=1.24.0,<3"]
 messaging = ["python-telegram-bot[webhooks]>=22.6,<23", "discord.py[voice]>=2.7.1,<3", "aiohttp>=3.13.3,<4", "slack-bolt>=1.18.0,<2", "slack-sdk>=3.27.0,<4"]
+vad = ["onnxruntime>=1.20.0,<2", "numpy>=1.24.0,<3"]
 cron = ["croniter>=6.0.0,<7"]
 slack = ["slack-bolt>=1.18.0,<2", "slack-sdk>=3.27.0,<4"]
 matrix = ["matrix-nio[e2e]>=0.24.0,<1", "Markdown>=3.6,<4"]
@@ -107,6 +108,7 @@ all = [
   "hermes-agent[homeassistant]",
   "hermes-agent[sms]",
   "hermes-agent[acp]",
+  "hermes-agent[vad]",
   "hermes-agent[voice]",
   "hermes-agent[dingtalk]",
   "hermes-agent[feishu]",
@@ -123,6 +125,9 @@ py-modules = ["run_agent", "model_tools", "toolsets", "batch_runner", "trajector
 
 [tool.setuptools.packages.find]
 include = ["agent", "tools", "tools.*", "hermes_cli", "gateway", "gateway.*", "cron", "acp_adapter", "plugins", "plugins.*"]
+
+[tool.setuptools.package-data]
+gateway = ["assets/*.onnx"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

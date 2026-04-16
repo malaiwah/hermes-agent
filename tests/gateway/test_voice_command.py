@@ -1,5 +1,6 @@
 """Tests for the /voice command and auto voice reply in the gateway."""
 
+import asyncio
 import importlib.util
 import json
 import logging
@@ -799,13 +800,14 @@ class TestVoiceChannelCommands:
         mock_adapter = AsyncMock()
         mock_adapter.join_voice_channel = AsyncMock(return_value=True)
         mock_adapter.get_user_voice_channel = AsyncMock(return_value=mock_channel)
+        mock_adapter.handle_message = AsyncMock(return_value=None)
         mock_adapter._voice_text_channels = {}
         mock_adapter._voice_input_callback = None
         event = self._make_discord_event()
         runner.adapters[event.source.platform] = mock_adapter
         result = await runner._handle_voice_channel_join(event)
-        assert "joined" in result.lower()
-        assert "General" in result
+        await asyncio.sleep(0)
+        assert result == ""
         assert runner._voice_mode["123"] == "all"
 
     @pytest.mark.asyncio
@@ -884,7 +886,7 @@ class TestVoiceChannelCommands:
         runner.adapters[event.source.platform] = mock_adapter
         runner._voice_mode["123"] = "all"
         result = await runner._handle_voice_channel_leave(event)
-        assert "left" in result.lower()
+        assert result == ""
         assert runner._voice_mode["123"] == "off"
         mock_adapter.leave_voice_channel.assert_called_once_with(111)
 
@@ -1268,20 +1270,22 @@ class TestVoiceReceiverThreadSafety:
         )
 
     def test_on_packet_buffer_write_holds_lock(self):
-        """_on_packet must hold lock when writing to buffers."""
+        """_on_packet must hold lock while dispatching buffer mutations."""
         import ast, inspect, textwrap
         from gateway.platforms.discord import VoiceReceiver
         source = textwrap.dedent(inspect.getsource(VoiceReceiver._on_packet))
         tree = ast.parse(source)
-        # Find 'with self._lock:' that contains buffer extend
-        found_lock_with_extend = False
+        # Find 'with self._lock:' that contains the frame handler call
+        found_lock_with_handler = False
         for node in ast.walk(tree):
             if isinstance(node, ast.With):
                 src_fragment = ast.dump(node)
-                if "lock" in src_fragment and "extend" in src_fragment:
-                    found_lock_with_extend = True
-        assert found_lock_with_extend, (
-            "_on_packet must hold self._lock when extending buffers"
+                if "lock" in src_fragment and (
+                    "_handle_vad_frame" in src_fragment or "_handle_legacy_frame" in src_fragment
+                ):
+                    found_lock_with_handler = True
+        assert found_lock_with_handler, (
+            "_on_packet must hold self._lock while mutating receiver buffers"
         )
 
     def test_concurrent_buffer_access_safe(self):
@@ -1411,7 +1415,7 @@ class TestLeaveExceptionHandling:
         runner._voice_mode["123"] = "all"
 
         result = await runner._handle_voice_channel_leave(event)
-        assert "left" in result.lower()
+        assert result == ""
         assert runner._voice_mode["123"] == "off"
         assert mock_adapter._voice_input_callback is None
 

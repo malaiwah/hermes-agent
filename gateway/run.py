@@ -5438,10 +5438,12 @@ class GatewayRunner:
         self._set_adapter_auto_tts_disabled(adapter, _chat_id, disabled=True)
         if hasattr(adapter, "_voice_input_callback"):
             adapter._voice_input_callback = None
-        if hasattr(adapter, "_last_tts_voice"):
-            adapter._last_tts_voice.pop(_chat_id, None)
-        if hasattr(adapter, "_voice_primer_shown"):
-            adapter._voice_primer_shown.discard(_chat_id)
+        _last_tts_voice = getattr(adapter, "_last_tts_voice", None)
+        if isinstance(_last_tts_voice, dict):
+            _last_tts_voice.pop(_chat_id, None)
+        _voice_primer_shown = getattr(adapter, "_voice_primer_shown", None)
+        if isinstance(_voice_primer_shown, set):
+            _voice_primer_shown.discard(_chat_id)
         return ""
 
     def _handle_voice_timeout_cleanup(self, chat_id: str) -> None:
@@ -5454,10 +5456,13 @@ class GatewayRunner:
         adapter = self.adapters.get(Platform.DISCORD)
         self._set_adapter_auto_tts_disabled(adapter, chat_id, disabled=True)
         # Clear per-session voice state (mirrors /voice leave cleanup).
-        if adapter and hasattr(adapter, "_last_tts_voice"):
-            adapter._last_tts_voice.pop(chat_id, None)
-        if adapter and hasattr(adapter, "_voice_primer_shown"):
-            adapter._voice_primer_shown.discard(chat_id)
+        if adapter:
+            _last_tts_voice = getattr(adapter, "_last_tts_voice", None)
+            if isinstance(_last_tts_voice, dict):
+                _last_tts_voice.pop(chat_id, None)
+            _voice_primer_shown = getattr(adapter, "_voice_primer_shown", None)
+            if isinstance(_voice_primer_shown, set):
+                _voice_primer_shown.discard(chat_id)
 
     async def _handle_voice_channel_input(
         self, guild_id: int, user_id: int, transcript: str, language: str = None

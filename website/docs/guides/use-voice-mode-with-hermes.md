@@ -66,6 +66,14 @@ pip install "hermes-agent[voice]"
 pip install "hermes-agent[messaging]"
 ```
 
+### Discord VC VAD
+
+```bash
+pip install "hermes-agent[messaging,vad]"
+```
+
+This adds the CPU `onnxruntime` dependency used by the Discord voice-channel Silero VAD path. Without it, Discord VC still works, but Hermes falls back to the older RMS-only silence detector.
+
 ### Premium ElevenLabs TTS
 
 ```bash
@@ -165,6 +173,19 @@ voice:
   auto_tts: false
   silence_threshold: 200
   silence_duration: 3.0
+  discord_vc:
+    vad_enabled: true
+    vad_mode: "silero_hybrid"
+    vad_min_speech_ms: 250
+    vad_min_silence_ms: 550
+    vad_speech_pad_ms: 150
+    vad_start_prob: 0.55
+    vad_end_prob: 0.35
+    vad_max_utterance_s: 20
+    rms_fallback_threshold: 200
+    min_utterance_rms: 300
+    barge_in_guard: 0.5
+    barge_in_rms: 600
 
 stt:
   provider: "local"
@@ -178,6 +199,14 @@ tts:
 ```
 
 This is a good conservative default for most people.
+
+If Discord VC is your main target, this setup is intentionally split:
+
+- CLI microphone mode still uses `voice.silence_threshold` and `voice.silence_duration`
+- Discord voice channels use `voice.discord_vc.*`
+- Barge-in stays on the fast RMS path, so tuning `barge_in_guard` and `barge_in_rms` changes interruption behavior without changing end-of-speech detection
+
+For noisy rooms, raise `min_utterance_rms` or `vad_min_silence_ms`. For a snappier feel, lower `vad_min_silence_ms` a bit before touching anything else.
 
 If you want local TTS instead, switch the `tts` block to:
 

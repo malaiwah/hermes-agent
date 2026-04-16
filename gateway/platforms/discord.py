@@ -55,6 +55,11 @@ from gateway.platforms.base import (
     cache_document_from_bytes,
     SUPPORTED_DOCUMENT_TYPES,
 )
+from gateway.platforms.discord_vad import (
+    DiscordVCVADConfig,
+    DiscordVCVADState,
+    SileroOnnxVAD,
+)
 from tools.url_safety import is_safe_url
 
 
@@ -313,10 +318,15 @@ class VoiceReceiver:
     # via voice.barge_in_guard in config.yaml.
     BARGE_IN_GUARD = 0.5
 
-    def __init__(self, voice_client, allowed_user_ids: set = None):
+    def __init__(self, voice_client, allowed_user_ids: set = None, voice_config: Optional[Dict[str, Any]] = None):
         self._vc = voice_client
         self._allowed_user_ids = allowed_user_ids or set()
         self._running = False
+        self._vad_config = (
+            DiscordVCVADConfig(vad_enabled=False)
+            if voice_config is None
+            else DiscordVCVADConfig.from_voice_config(voice_config)
+        )
 
         # Decryption
         self._secret_key: Optional[bytes] = None
@@ -334,6 +344,10 @@ class VoiceReceiver:
         # Per-user RMS accumulators for utterance-level energy check
         self._rms_sum: Dict[int, float] = defaultdict(float)
         self._rms_count: Dict[int, int] = defaultdict(int)
+        self._vad_states: Dict[int, DiscordVCVADState] = {}
+        self._vad_model: Optional[SileroOnnxVAD] = None
+        self._vad_enabled = False
+        self._vad_fallback_reason: Optional[str] = None
 
         # Opus decoder per SSRC (each user needs own decoder state)
         self._decoders: Dict[int, object] = {}
@@ -358,6 +372,12 @@ class VoiceReceiver:
         self._start_time: float = 0.0
         self._grace_ended = False
 
+        # Load tunables from the Discord VC config block.
+        self.RMS_THRESHOLD = self._vad_config.rms_fallback_threshold
+        self.MIN_UTTERANCE_RMS = self._vad_config.min_utterance_rms
+        self.BARGE_IN_GUARD = self._vad_config.barge_in_guard
+        self.BARGE_IN_RMS = self._vad_config.barge_in_rms
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -372,6 +392,7 @@ class VoiceReceiver:
 
         self._install_speaking_hook(conn)
         conn.add_socket_listener(self._on_packet)
+        self._init_vad()
         self._running = True
         logger.info("VoiceReceiver started (bot_ssrc=%d)", self._bot_ssrc)
 
@@ -388,7 +409,102 @@ class VoiceReceiver:
             self._first_packet_time.clear()
             self._decoders.clear()
             self._ssrc_to_user.clear()
+            self._vad_states.clear()
         logger.info("VoiceReceiver stopped")
+
+    def _log_vad_fallback(self, reason: str):
+        if self._vad_fallback_reason == reason:
+            return
+        self._vad_fallback_reason = reason
+        logger.warning(
+            "voice pipeline: vc_vad_fallback guild=%s mode=rms reason=%s",
+            getattr(getattr(self._vc, "guild", None), "id", "-"),
+            reason,
+        )
+
+    def _init_vad(self):
+        self._vad_enabled = False
+        if not self._vad_config.vad_enabled:
+            return
+        if self._vad_config.vad_mode != "silero_hybrid":
+            self._log_vad_fallback(f"unsupported_mode:{self._vad_config.vad_mode}")
+            return
+        try:
+            self._vad_model = SileroOnnxVAD()
+            self._vad_enabled = True
+        except Exception as e:
+            self._vad_model = None
+            self._log_vad_fallback(f"{type(e).__name__}:{e}")
+
+    def _new_trace_id(self, prefix: str, ssrc: int) -> str:
+        guild_id = getattr(getattr(self._vc, "guild", None), "id", "noguild")
+        return f"{prefix}_{guild_id}_{ssrc}_{int(time.time() * 1000)}"
+
+    def _get_vad_state(self, ssrc: int) -> Optional[DiscordVCVADState]:
+        if not self._vad_enabled or not self._vad_model:
+            return None
+        state = self._vad_states.get(ssrc)
+        if state is None:
+            state = DiscordVCVADState(self._vad_model, self._vad_config)
+            self._vad_states[ssrc] = state
+        return state
+
+    def _buffer_active_pcm(self, ssrc: int, pcm: bytes, frame_time: float, rms: int):
+        if len(self._buffers[ssrc]) == 0:
+            self._first_packet_time[ssrc] = frame_time
+        self._buffers[ssrc].extend(pcm)
+        self._last_packet_time[ssrc] = frame_time
+        self._rms_sum[ssrc] += rms
+        self._rms_count[ssrc] += 1
+
+    def _handle_vad_frame(self, ssrc: int, pcm: bytes, rms: int, frame_time: float):
+        state = self._get_vad_state(ssrc)
+        if state is None:
+            self._handle_legacy_frame(ssrc, pcm, rms, frame_time)
+            return
+
+        was_active = state.speech_active
+        if was_active:
+            self._buffer_active_pcm(ssrc, pcm, frame_time, rms)
+
+        events = state.push_pcm_frame(pcm, frame_time, rms)
+        for event in events:
+            if event["type"] == "speech_start":
+                if not state.utterance_trace_id:
+                    state.utterance_trace_id = self._new_trace_id("vcvad", ssrc)
+                self._buffers[ssrc] = bytearray(state.pre_roll_pcm)
+                self._first_packet_time[ssrc] = max(0.0, frame_time - state.pre_roll_duration())
+                self._last_packet_time[ssrc] = frame_time
+                self._rms_sum[ssrc] += rms
+                self._rms_count[ssrc] += 1
+                logger.info(
+                    "voice pipeline: vc_vad_speech_start trace_id=%s guild=%s ssrc=%d "
+                    "prob=%.3f pre_roll_ms=%.1f",
+                    state.utterance_trace_id,
+                    getattr(getattr(self._vc, "guild", None), "id", "-"),
+                    ssrc,
+                    event["prob"],
+                    state.pre_roll_duration() * 1000.0,
+                )
+            elif event["type"] == "speech_end_candidate":
+                trace_id = state.utterance_trace_id or self._new_trace_id("vcvad", ssrc)
+                state.utterance_trace_id = trace_id
+                logger.info(
+                    "voice pipeline: vc_vad_speech_end_candidate trace_id=%s guild=%s ssrc=%d "
+                    "prob=%.3f elapsed_ms=%.1f",
+                    trace_id,
+                    getattr(getattr(self._vc, "guild", None), "id", "-"),
+                    ssrc,
+                    event["prob"],
+                    max(0.0, frame_time - state.speech_started_at) * 1000.0,
+                )
+
+    def _handle_legacy_frame(self, ssrc: int, pcm: bytes, rms: int, frame_time: float):
+        if rms < self.RMS_THRESHOLD:
+            if ssrc in self._buffers and len(self._buffers[ssrc]) > 0:
+                self._last_packet_time[ssrc] = frame_time
+            return
+        self._buffer_active_pcm(ssrc, pcm, frame_time, rms)
 
     def pause(self):
         """Fully pause — no packets processed at all."""
@@ -477,8 +593,10 @@ class VoiceReceiver:
                     self._decoders.clear()
                     self._buffers.clear()
                     self._last_packet_time.clear()
+                    self._first_packet_time.clear()
                     self._rms_sum.clear()
                     self._rms_count.clear()
+                    self._vad_states.clear()
                 self._grace_ended = True
                 logger.info("Voice: startup grace period ended, decoders reset")
 
@@ -608,21 +726,8 @@ class VoiceReceiver:
                 self._playback_active = False
                 # Fall through to buffer this packet normally
 
-            if rms < self.RMS_THRESHOLD:
-                # Below energy threshold — treat as silence, don't buffer.
-                # Still update last_packet_time so silence detection works.
-                with self._lock:
-                    if ssrc in self._buffers and len(self._buffers[ssrc]) > 0:
-                        self._last_packet_time[ssrc] = time.monotonic()
-                return
-
             with self._lock:
-                if len(self._buffers[ssrc]) == 0:
-                    self._first_packet_time[ssrc] = time.monotonic()
-                self._buffers[ssrc].extend(pcm)
-                self._last_packet_time[ssrc] = time.monotonic()
-                self._rms_sum[ssrc] += rms
-                self._rms_count[ssrc] += 1
+                self._handle_vad_frame(ssrc, pcm, rms, time.monotonic())
         except Exception as e:
             logger.debug("Opus decode error for SSRC %s: %s", ssrc, e)
             return
@@ -658,38 +763,48 @@ class VoiceReceiver:
         return 0
 
     def check_silence(self) -> list:
-        """Return list of (user_id, pcm_bytes) for completed utterances."""
+        """Return list of (user_id, pcm_bytes, trace_id) for completed utterances."""
         now = time.monotonic()
         completed = []
 
         with self._lock:
             ssrc_user_map = dict(self._ssrc_to_user)
-            ssrc_list = list(self._buffers.keys())
+            ssrc_list = list(set(self._buffers.keys()) | set(self._vad_states.keys()))
 
             for ssrc in ssrc_list:
+                vad_state = self._vad_states.get(ssrc)
                 last_time = self._last_packet_time.get(ssrc, now)
                 silence_duration = now - last_time
-                buf = self._buffers[ssrc]
+                buf = self._buffers.get(ssrc, bytearray())
                 # 48kHz, 16-bit, stereo = 192000 bytes/sec
                 buf_duration = len(buf) / (self.SAMPLE_RATE * self.CHANNELS * 2)
 
-                if silence_duration >= self.SILENCE_THRESHOLD and buf_duration >= self.MIN_SPEECH_DURATION:
+                finalize_reason = None
+                if self._vad_enabled and vad_state:
+                    finalize_reason = vad_state.should_finalize(now)
+                elif silence_duration >= self.SILENCE_THRESHOLD:
+                    finalize_reason = "rms_silence"
+
+                if finalize_reason and buf_duration >= self.MIN_SPEECH_DURATION:
                     # Check utterance-level average RMS to reject noise bursts
                     avg_rms = 0
                     if self._rms_count.get(ssrc, 0) > 0:
                         avg_rms = self._rms_sum[ssrc] / self._rms_count[ssrc]
 
-                    if avg_rms < self.MIN_UTTERANCE_RMS:
+                    if self._rms_count.get(ssrc, 0) > 0 and avg_rms < self.MIN_UTTERANCE_RMS:
                         # Too quiet overall — likely background noise, discard
                         logger.info(
                             "Discarding low-energy utterance: ssrc=%d, "
                             "avg_rms=%.0f (threshold=%d), duration=%.1fs",
                             ssrc, avg_rms, self.MIN_UTTERANCE_RMS, buf_duration,
                         )
-                        self._buffers[ssrc] = bytearray()
+                        self._buffers.pop(ssrc, None)
                         self._last_packet_time.pop(ssrc, None)
+                        self._first_packet_time.pop(ssrc, None)
                         self._rms_sum.pop(ssrc, None)
                         self._rms_count.pop(ssrc, None)
+                        if vad_state:
+                            vad_state.reset()
                         continue
 
                     user_id = ssrc_user_map.get(ssrc, 0)
@@ -699,9 +814,24 @@ class VoiceReceiver:
                         user_id = self._infer_user_for_ssrc(ssrc)
                     if user_id:
                         first_time = self._first_packet_time.get(ssrc, last_time)
+                        trace_id = ""
+                        if vad_state:
+                            trace_id = vad_state.utterance_trace_id or self._new_trace_id("vcvad", ssrc)
+                            logger.info(
+                                "voice pipeline: vc_vad_finalize trace_id=%s guild=%s user=%s ssrc=%d "
+                                "reason=%s prob=%.3f silence_ms=%.1f utterance_ms=%.1f",
+                                trace_id,
+                                getattr(getattr(self._vc, "guild", None), "id", "-"),
+                                user_id,
+                                ssrc,
+                                finalize_reason,
+                                vad_state.last_prob,
+                                vad_state.silence_duration(now) * 1000.0,
+                                vad_state.utterance_duration(now) * 1000.0,
+                            )
                         logger.info(
                             "voice pipeline: vc_utterance_finalized guild=%s user=%s ssrc=%d "
-                            "pcm_ms=%.1f silence_ms=%.1f capture_ms=%.1f avg_rms=%.1f",
+                            "pcm_ms=%.1f silence_ms=%.1f capture_ms=%.1f avg_rms=%.1f reason=%s",
                             getattr(getattr(self._vc, "guild", None), "id", "-"),
                             user_id,
                             ssrc,
@@ -709,13 +839,19 @@ class VoiceReceiver:
                             silence_duration * 1000.0,
                             max(0.0, (last_time - first_time) * 1000.0),
                             avg_rms,
+                            finalize_reason,
                         )
-                        completed.append((user_id, bytes(buf)))
-                        self._buffers[ssrc] = bytearray()
+                        if trace_id:
+                            completed.append((user_id, bytes(buf), trace_id))
+                        else:
+                            completed.append((user_id, bytes(buf)))
+                        self._buffers.pop(ssrc, None)
                         self._last_packet_time.pop(ssrc, None)
                         self._first_packet_time.pop(ssrc, None)
                         self._rms_sum.pop(ssrc, None)
                         self._rms_count.pop(ssrc, None)
+                        if vad_state:
+                            vad_state.reset()
                     else:
                         # SSRC still unmapped — keep the buffer for one more
                         # cycle so the SPEAKING event has time to arrive.
@@ -733,6 +869,8 @@ class VoiceReceiver:
                     self._first_packet_time.pop(ssrc, None)
                     self._rms_sum.pop(ssrc, None)
                     self._rms_count.pop(ssrc, None)
+                    if vad_state:
+                        vad_state.reset()
 
         return completed
 
@@ -1393,19 +1531,17 @@ class DiscordAdapter(BasePlatformAdapter):
 
         # Start voice receiver (Phase 2: listen to users)
         try:
-            receiver = VoiceReceiver(vc, allowed_user_ids=self._allowed_user_ids)
-            # Load barge-in config from config.yaml (voice.barge_in_*)
+            _voice_cfg = {}
             try:
                 from hermes_cli.config import load_config as _load_cfg
                 _voice_cfg = _load_cfg().get("voice", {})
-                _guard = _voice_cfg.get("barge_in_guard")
-                _rms = _voice_cfg.get("barge_in_rms")
-                if _guard is not None:
-                    receiver.BARGE_IN_GUARD = float(_guard)
-                if _rms is not None:
-                    receiver.BARGE_IN_RMS = int(_rms)
             except Exception:
                 pass
+            receiver = VoiceReceiver(
+                vc,
+                allowed_user_ids=self._allowed_user_ids,
+                voice_config=_voice_cfg,
+            )
             receiver.start()
             self._voice_receivers[guild_id] = receiver
             self._voice_listen_tasks[guild_id] = asyncio.ensure_future(
@@ -1423,14 +1559,16 @@ class DiscordAdapter(BasePlatformAdapter):
         failing step cannot leave the adapter with partial state.
         """
         # Clear all per-guild voice state FIRST — can't throw.
-        self._voice_priming_history.pop(guild_id, None)
-        self._voice_play_locks.pop(guild_id, None)
-        _bound_chat_id = self._voice_text_channels.get(guild_id)
+        getattr(self, "_voice_priming_history", {}).pop(guild_id, None)
+        getattr(self, "_voice_play_locks", {}).pop(guild_id, None)
+        _bound_chat_id = getattr(self, "_voice_text_channels", {}).get(guild_id)
         if _bound_chat_id is not None:
             _cid = str(_bound_chat_id)
-            self._voice_last_language.pop(_cid, None)
-            self._last_tts_instruct.pop(_cid, None)
-            self._voice_primer_shown.discard(_cid)
+            getattr(self, "_voice_last_language", {}).pop(_cid, None)
+            getattr(self, "_last_tts_instruct", {}).pop(_cid, None)
+            _voice_primer_shown = getattr(self, "_voice_primer_shown", None)
+            if hasattr(_voice_primer_shown, "discard"):
+                _voice_primer_shown.discard(_cid)
 
         # Stop the receiver — may throw if NaCl/DAVE cleanup fails.
         receiver = self._voice_receivers.pop(guild_id, None)
@@ -1577,11 +1715,17 @@ class DiscordAdapter(BasePlatformAdapter):
 
         Serialized per-guild (shared lock with PCM stream path) so
         concurrent callers (progress update + main reply) queue.
+
+        asyncio.get_running_loop(), asyncio.wait_for(...), and
+        PLAYBACK_TIMEOUT are enforced in the locked helper below; this
+        wrapper only serializes access per guild.
         """
         vc = self._voice_clients.get(guild_id)
         if not vc or not vc.is_connected():
             return False
 
+        if not hasattr(self, "_voice_play_locks"):
+            self._voice_play_locks = {}
         _play_lock = self._voice_play_locks.setdefault(guild_id, asyncio.Lock())
         async with _play_lock:
             return await self._play_in_voice_channel_locked(guild_id, audio_path, vc)
@@ -1818,12 +1962,18 @@ class DiscordAdapter(BasePlatformAdapter):
                         pass
 
                 completed = receiver.check_silence()
-                for user_id, pcm_data in completed:
+                for completed_item in completed:
+                    if len(completed_item) == 3:
+                        user_id, pcm_data, trace_id = completed_item
+                    else:
+                        user_id, pcm_data = completed_item
+                        trace_id = ""
                     buf_dur = len(pcm_data) / (48000 * 2 * 2)
                     if not self._is_allowed_user(str(user_id)):
                         logger.info("Voice: dropping utterance from unauthorized user %d (%.1fs)", user_id, buf_dur)
                         continue
-                    trace_id = f"vc_{guild_id}_{user_id}_{int(time.time() * 1000)}"
+                    if not trace_id:
+                        trace_id = f"vc_{guild_id}_{user_id}_{int(time.time() * 1000)}"
                     logger.info("Voice: processing utterance from user %d (%.1fs PCM)", user_id, buf_dur)
                     logger.info(
                         "voice pipeline: vc_turn_dispatch trace_id=%s guild=%s user=%s pcm_ms=%.1f",

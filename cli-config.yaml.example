@@ -719,6 +719,31 @@ stt:
   #   model: "voxtral-mini-latest"  # voxtral-mini-latest | voxtral-mini-2602
 
 # =============================================================================
+# Voice Mode
+# =============================================================================
+# CLI microphone mode uses voice.silence_threshold / voice.silence_duration.
+# Discord voice-channel listening uses the nested voice.discord_vc block below.
+voice:
+  record_key: "ctrl+b"
+  max_recording_seconds: 120
+  auto_tts: false
+  silence_threshold: 200
+  silence_duration: 3.0
+  discord_vc:
+    vad_enabled: true
+    vad_mode: "silero_hybrid"     # Current mode: Silero VAD (ONNX CPU) + RMS guardrails
+    vad_min_speech_ms: 250
+    vad_min_silence_ms: 550
+    vad_speech_pad_ms: 150
+    vad_start_prob: 0.55
+    vad_end_prob: 0.35
+    vad_max_utterance_s: 20
+    rms_fallback_threshold: 200   # Also used as the legacy fallback gate
+    min_utterance_rms: 300
+    barge_in_guard: 0.5           # Playback interruption stays on the fast RMS path
+    barge_in_rms: 600
+
+# =============================================================================
 # Response Pacing (Messaging Platforms)
 # =============================================================================
 # Add human-like delays between message chunks.

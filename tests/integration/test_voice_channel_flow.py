@@ -91,6 +91,31 @@ def _make_voice_receiver(secret_key, dave_session=None, bot_ssrc=9999,
     return receiver
 
 
+class _FakeVADStream:
+    def __init__(self, probs):
+        self._original = list(probs)
+        self._probs = list(probs)
+
+    def reset(self):
+        self._probs = list(self._original)
+
+    def process_chunk(self, _chunk):
+        return self._probs.pop(0) if self._probs else 0.0
+
+
+class _FakeVADModel:
+    CHUNK_SAMPLES = 512
+
+    def __init__(self, probs):
+        import numpy as np
+
+        self._np = np
+        self._probs = list(probs)
+
+    def new_stream(self):
+        return _FakeVADStream(self._probs)
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -238,6 +263,52 @@ class TestFullVoiceFlow:
         user_id, pcm_data = completed[0]
         assert user_id == 42
         assert len(pcm_data) > 0
+
+    def test_vad_short_pause_stays_one_utterance(self):
+        key = _make_secret_key()
+        receiver = _make_voice_receiver(key)
+        receiver.map_ssrc(100, 42)
+        receiver._vad_enabled = True
+        receiver._vad_model = _FakeVADModel([0.9, 0.9, 0.1, 0.9, 0.9])
+        receiver._vad_states.clear()
+        receiver.RMS_THRESHOLD = 0
+        receiver._vad_config.rms_fallback_threshold = 0
+        receiver._vad_config.vad_min_speech_ms = 64
+        receiver._vad_config.vad_min_silence_ms = 300
+
+        for seq in range(1, 9):
+            packet = _build_encrypted_rtp_packet(
+                key, b'\xf8\xff\xfe', ssrc=100, seq=seq, timestamp=960 * seq
+            )
+            receiver._on_packet(packet)
+
+        completed = receiver.check_silence()
+        assert completed == []
+        assert receiver._vad_states[100].speech_active is True
+        assert receiver._vad_states[100].silence_started_at is None
+
+    def test_vad_true_pause_splits_utterance(self):
+        key = _make_secret_key()
+        receiver = _make_voice_receiver(key)
+        receiver.map_ssrc(100, 42)
+        receiver._vad_enabled = True
+        receiver._vad_model = _FakeVADModel([0.9, 0.9, 0.1, 0.1, 0.1])
+        receiver._vad_states.clear()
+        receiver.RMS_THRESHOLD = 0
+        receiver._vad_config.rms_fallback_threshold = 0
+        receiver._vad_config.vad_min_speech_ms = 64
+        receiver._vad_config.vad_min_silence_ms = 300
+
+        for seq in range(1, 9):
+            packet = _build_encrypted_rtp_packet(
+                key, b'\xf8\xff\xfe', ssrc=100, seq=seq, timestamp=960 * seq
+            )
+            receiver._on_packet(packet)
+
+        receiver._vad_states[100].silence_started_at = time.monotonic() - 0.5
+        completed = receiver.check_silence()
+        assert len(completed) == 1
+        assert completed[0][0] == 42
 
     def test_utterance_with_ssrc_automap(self):
         """No SPEAKING event → auto-map sole allowed user → utterance processed."""
