@@ -1,5 +1,6 @@
 """Tests for topic-aware gateway progress updates."""
 
+import asyncio
 import importlib
 import sys
 import time
@@ -54,6 +55,32 @@ class ProgressCaptureAdapter(BasePlatformAdapter):
         return {"id": chat_id}
 
 
+class DiscordVoiceProgressAdapter(ProgressCaptureAdapter):
+    def __init__(self):
+        super().__init__(platform=Platform.DISCORD)
+        self._voice_text_channels = {111: "voice-chat"}
+        self._voice_last_language = {"voice-chat": "English"}
+        self._last_tts_voice = {"voice-chat": "vc_test_voice"}
+        self._last_tts_instruct = {"voice-chat": "warm and steady"}
+        self.play_calls = []
+
+    def is_in_voice_channel(self, guild_id: int) -> bool:
+        return guild_id == 111
+
+    async def play_pcm_stream_in_voice_channel(self, guild_id: int, source) -> bool:
+        self.play_calls.append(
+            {
+                "guild_id": guild_id,
+                "trace_id": getattr(source, "trace_id", ""),
+                "trace_meta": dict(getattr(source, "_trace_meta", {}) or {}),
+            }
+        )
+        callback = getattr(source, "_trace_meta", {}).get("on_playback_begin")
+        if callable(callback):
+            callback()
+        return True
+
+
 class FakeAgent:
     def __init__(self, **kwargs):
         self.tool_progress_callback = kwargs.get("tool_progress_callback")
@@ -95,6 +122,22 @@ class SilentFinalAgent:
         self.tools = []
 
     def run_conversation(self, message, conversation_history=None, task_id=None):
+        return {
+            "final_response": "[SILENT]",
+            "messages": [{"role": "assistant", "content": "[SILENT]"}],
+            "api_calls": 1,
+        }
+
+
+class VoiceAckAgent:
+    def __init__(self, **kwargs):
+        self.tool_progress_callback = kwargs.get("tool_progress_callback")
+        self.message_callback = kwargs.get("message_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        if self.message_callback:
+            self.message_callback("Still checking that now.")
         return {
             "final_response": "[SILENT]",
             "messages": [{"role": "assistant", "content": "[SILENT]"}],
@@ -361,6 +404,92 @@ async def test_run_agent_silent_marker_returns_empty_final_response(monkeypatch,
 
     assert result["final_response"] == ""
     assert result["messages"] == []
+
+
+@pytest.mark.asyncio
+async def test_run_agent_send_user_message_plays_spoken_ack_in_live_discord_vc(monkeypatch, tmp_path):
+    fake_dotenv = types.ModuleType("dotenv")
+    fake_dotenv.load_dotenv = lambda *args, **kwargs: None
+    monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
+
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = VoiceAckAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+
+    adapter = DiscordVoiceProgressAdapter()
+    runner = _make_runner(adapter)
+    gateway_run = importlib.import_module("gateway.run")
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"})
+
+    fake_tts_tool = types.ModuleType("tools.tts_tool")
+    fake_tts_tool._load_tts_config = lambda: {"tts": {"provider": "qwen3"}}
+    fake_tts_tool._get_provider = lambda cfg: "qwen3"
+    fake_tts_tool._preprocess_tts_text = lambda text, language=None: text.strip()
+    fake_tts_tool._resolve_qwen3_config = lambda cfg, lang: {
+        "base_url": "http://tts.local",
+        "voice": "cfg_voice",
+        "instruct": "cfg_instruct",
+    }
+    monkeypatch.setitem(sys.modules, "tools.tts_tool", fake_tts_tool)
+
+    pcm_requests = []
+
+    class FakeStreamingPCMAudioSource:
+        def __init__(self, trace_id="", trace_meta=None):
+            self.trace_id = trace_id
+            self._trace_meta = trace_meta or {}
+            self.cancelled = False
+
+        def cancel(self):
+            self.cancelled = True
+
+    def fake_feed_pcm_stream_sync(url, source, timeout):
+        pcm_requests.append(
+            {
+                "url": url,
+                "trace_id": source.trace_id,
+                "trace_meta": dict(source._trace_meta),
+                "timeout": timeout,
+            }
+        )
+
+    fake_discord_platform = types.ModuleType("gateway.platforms.discord")
+    fake_discord_platform.StreamingPCMAudioSource = FakeStreamingPCMAudioSource
+    fake_discord_platform.feed_pcm_stream_sync = fake_feed_pcm_stream_sync
+    monkeypatch.setitem(sys.modules, "gateway.platforms.discord", fake_discord_platform)
+
+    source = SessionSource(
+        platform=Platform.DISCORD,
+        chat_id="voice-chat",
+        chat_type="group",
+        thread_id=None,
+    )
+
+    result = await runner._run_agent(
+        message="hello",
+        context_prompt="",
+        history=[],
+        source=source,
+        session_id="sess-voice-ack",
+        session_key="agent:main:discord:group:voice-chat",
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert result["final_response"] == ""
+    assert adapter.sent
+    assert adapter.sent[0]["content"] == "💬 Still checking that now."
+    assert len(adapter.play_calls) == 1
+    assert adapter.play_calls[0]["guild_id"] == 111
+    assert adapter.play_calls[0]["trace_id"].endswith("_ack") or adapter.play_calls[0]["trace_id"].startswith("ack_")
+    assert adapter.play_calls[0]["trace_meta"]["turn_kind"] == "ack"
+    assert adapter.play_calls[0]["trace_meta"]["chat_id"] == "voice-chat"
+    assert len(pcm_requests) == 1
+    assert "text=Still+checking+that+now." in pcm_requests[0]["url"]
+    assert "voice=vc_test_voice" in pcm_requests[0]["url"]
+    assert "instruct=warm+and+steady" in pcm_requests[0]["url"]
+    assert pcm_requests[0]["trace_meta"]["turn_kind"] == "ack"
 
 
 # ---------------------------------------------------------------------------
