@@ -116,13 +116,13 @@ On the **Bot** page, scroll down to **Privileged Gateway Intents**. You'll see t
 | Intent | Purpose | Required? |
 |--------|---------|-----------| 
 | **Presence Intent** | See user online/offline status | Optional |
-| **Server Members Intent** | Access the member list, resolve usernames | **Required** |
+| **Server Members Intent** | Resolve usernames to user IDs in `DISCORD_ALLOWED_USERS` | Conditional — only if your allowlist contains usernames |
 | **Message Content Intent** | Read the text content of messages | **Required** |
 
-**Enable both Server Members Intent and Message Content Intent** by toggling them **ON**.
+**Enable Message Content Intent** by toggling it **ON**. Enable **Server Members Intent** as well if you plan to list people in `DISCORD_ALLOWED_USERS` by username instead of by numeric user ID.
 
 - Without **Message Content Intent**, your bot receives message events but the message text is empty — the bot literally cannot see what you typed.
-- Without **Server Members Intent**, the bot cannot resolve usernames for the allowed users list and may fail to identify who is messaging it.
+- **Server Members Intent** is only needed when the allowlist contains usernames (e.g. `DISCORD_ALLOWED_USERS=alice,bob`). If you use numeric user IDs throughout (e.g. `DISCORD_ALLOWED_USERS=284102345871466496`), the gateway skips requesting this intent on startup, and you can leave it OFF. Enabling an intent you don't need is harmless; requesting an intent that isn't enabled in the Developer Portal will block the bot from coming online.
 
 :::warning[This is the #1 reason Discord bots don't work]
 If your bot is online but never responds to messages, the **Message Content Intent** is almost certainly disabled. Go back to the [Developer Portal](https://discord.com/developers/applications), select your application → Bot → Privileged Gateway Intents, and make sure **Message Content Intent** is toggled ON. Click **Save Changes**.
@@ -283,6 +283,8 @@ Discord behavior is controlled through two files: **`~/.hermes/.env`** for crede
 | `DISCORD_IGNORED_CHANNELS` | No | — | Comma-separated channel IDs where the bot **never** responds, even when `@mentioned`. Takes priority over all other channel settings. |
 | `DISCORD_NO_THREAD_CHANNELS` | No | — | Comma-separated channel IDs where the bot responds directly in the channel instead of creating a thread. Only relevant when `DISCORD_AUTO_THREAD` is `true`. |
 | `DISCORD_REPLY_TO_MODE` | No | `"first"` | Controls reply-reference behavior: `"off"` — never reply to the original message, `"first"` — reply-reference on the first message chunk only (default), `"all"` — reply-reference on every chunk. |
+| `DISCORD_PROXY` | No | — | Proxy URL for all Discord traffic (gateway websocket, REST, and attachment downloads). Accepts `http://`, `https://`, and `socks5://` schemes (SOCKS requires `aiohttp_socks`). Overrides the generic `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` env vars, and on macOS overrides auto-detection from `scutil --proxy`. |
+| `HERMES_DISCORD_VOICE_PACKET_DUMP` | No | `"errors"` | Debug knob for the Discord voice-channel packet handler. `"errors"` (default) writes a JSON dump only when the decode circuit breaker trips; `"all"` appends every packet to a per-SSRC JSONL trace file under `~/.hermes/logs/voice-packets/`; `"off"` disables all dumps. Unknown values fall back to `"errors"`. |
 
 ### Config File (`config.yaml`)
 

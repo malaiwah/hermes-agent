@@ -196,6 +196,8 @@ For cloud sandbox backends, persistence is filesystem-oriented. `TERMINAL_LIFETI
 | `DISCORD_IGNORED_CHANNELS` | Comma-separated channel IDs where the bot never responds |
 | `DISCORD_NO_THREAD_CHANNELS` | Comma-separated channel IDs where bot responds without auto-threading |
 | `DISCORD_REPLY_TO_MODE` | Reply-reference behavior: `off`, `first` (default), or `all` |
+| `DISCORD_PROXY` | Proxy URL for all Discord traffic (gateway websocket, REST, and attachment downloads). Overrides `HTTPS_PROXY`. Supports `http://`, `https://`, `socks5://` (SOCKS requires `aiohttp_socks`). |
+| `HERMES_DISCORD_VOICE_PACKET_DUMP` | Debug knob for the Discord voice-channel packet handler. `"errors"` (default) dumps on circuit-breaker trip; `"all"` traces every packet to `~/.hermes/logs/voice-packets/`; `"off"` disables dumps. |
 | `SLACK_BOT_TOKEN` | Slack bot token (`xoxb-...`) |
 | `SLACK_APP_TOKEN` | Slack app-level token (`xapp-...`, required for Socket Mode) |
 | `SLACK_ALLOWED_USERS` | Comma-separated Slack user IDs |

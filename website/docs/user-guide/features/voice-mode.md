@@ -279,10 +279,10 @@ In the [Developer Portal](https://discord.com/developers/applications) → your 
 | Intent | Purpose |
 |--------|---------|
 | **Presence Intent** | Detect user online/offline status |
-| **Server Members Intent** | Map voice SSRC identifiers to Discord user IDs |
+| **Server Members Intent** | Resolve usernames in `DISCORD_ALLOWED_USERS` to numeric IDs (conditional) |
 | **Message Content Intent** | Read text message content in channels |
 
-All three are required for full voice channel functionality. **Server Members Intent** is especially critical — without it, the bot cannot identify who is speaking in the voice channel.
+**Message Content Intent** is required. **Server Members Intent** is only needed if your `DISCORD_ALLOWED_USERS` list uses usernames — if you use numeric user IDs, you can leave it OFF. Voice-channel SSRC → user_id mapping comes from Discord's SPEAKING opcode on the voice websocket and does **not** require the Server Members Intent.
 
 #### 3. Opus Codec
 
@@ -336,6 +336,8 @@ Use these in the Discord text channel where the bot is present:
 /voice status    Show voice mode and connected channel
 ```
 
+Both `/voice join` and `/voice channel` appear in Discord's slash-command autocomplete and route to the same handler.
+
 :::info
 You must be in a voice channel before running `/voice join`. The bot joins the same VC you're in.
 :::
@@ -358,9 +360,11 @@ When the bot is in a voice channel:
 - Agent responses are sent as text in the channel AND spoken in the VC
 - The text channel is the one where `/voice join` was issued
 
-### Echo Prevention
+### Echo Prevention and Barge-In
 
-The bot automatically pauses its audio listener while playing TTS replies, preventing it from hearing and re-processing its own output.
+While the bot is playing a TTS reply, its listener does not fully pause — it switches to a higher energy threshold (**barge-in mode**) after a brief guard window. Quiet echo residual from the bot's own voice is ignored, but if a user speaks clearly the bot stops its playback and captures what was said. In practice this gives the conversational feel of being able to interrupt the bot mid-sentence without losing the rest of your turn.
+
+You can tune the guard window and the barge-in threshold under `voice.discord_vc` in `config.yaml` — `barge_in_guard` (seconds) and `barge_in_rms` (int16 RMS, higher = less sensitive).
 
 ### Access Control
 
