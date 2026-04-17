@@ -14,13 +14,14 @@ If you have a paid [Nous Portal](https://portal.nousresearch.com) subscription, 
 
 ## Text-to-Speech
 
-Convert text to speech with seven providers:
+Convert text to speech with eight providers:
 
 | Provider | Quality | Cost | API Key |
 |----------|---------|------|---------|
 | **Edge TTS** (default) | Good | Free | None needed |
 | **ElevenLabs** | Excellent | Paid | `ELEVENLABS_API_KEY` |
 | **OpenAI TTS** | Good | Paid | `VOICE_TOOLS_OPENAI_KEY` |
+| **Qwen3-TTS** | Excellent | Self-hosted | None by default |
 | **MiniMax TTS** | Excellent | Paid | `MINIMAX_API_KEY` |
 | **Mistral (Voxtral TTS)** | Excellent | Paid | `MISTRAL_API_KEY` |
 | **Google Gemini TTS** | Excellent | Free tier | `GEMINI_API_KEY` |
@@ -40,7 +41,7 @@ Convert text to speech with seven providers:
 ```yaml
 # In ~/.hermes/config.yaml
 tts:
-  provider: "edge"              # "edge" | "elevenlabs" | "openai" | "minimax" | "mistral" | "gemini" | "neutts"
+  provider: "edge"              # "edge" | "elevenlabs" | "openai" | "qwen3" | "minimax" | "mistral" | "gemini" | "neutts"
   speed: 1.0                    # Global speed multiplier (provider-specific settings override this)
   edge:
     voice: "en-US-AriaNeural"   # 322 voices, 74 languages
@@ -53,6 +54,17 @@ tts:
     voice: "alloy"              # alloy, echo, fable, onyx, nova, shimmer
     base_url: "https://api.openai.com/v1"  # Override for OpenAI-compatible TTS endpoints
     speed: 1.0                  # 0.25 - 4.0
+  qwen3:
+    base_url: "http://localhost:8001"  # Self-hosted Qwen3-TTS server
+    voice: "ryan"               # preset voice, OpenAI alias, or vc_<clone_id>
+    instruct: "Speak warmly."   # optional speaking-style hint
+    timeout: 120
+    languages:                   # optional per-language overrides
+      English:
+        voice: "ryan"
+      French:
+        voice: "vc_1234abcd"
+        instruct: "Parle naturellement en français."
   minimax:
     model: "speech-2.8-hd"     # speech-2.8-hd (default), speech-2.8-turbo
     voice_id: "English_Graceful_Lady"  # See https://platform.minimax.io/faq/system-voice-id
@@ -78,7 +90,7 @@ tts:
 
 Telegram voice bubbles require Opus/OGG audio format:
 
-- **OpenAI, ElevenLabs, and Mistral** produce Opus natively — no extra setup
+- **OpenAI, ElevenLabs, Mistral, and Qwen3** produce Opus natively — no extra setup
 - **Edge TTS** (default) outputs MP3 and needs **ffmpeg** to convert:
 - **MiniMax TTS** outputs MP3 and needs **ffmpeg** to convert for Telegram voice bubbles
 - **Google Gemini TTS** outputs raw PCM and uses **ffmpeg** to encode Opus directly for Telegram voice bubbles
