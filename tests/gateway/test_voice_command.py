@@ -54,6 +54,7 @@ def _ensure_discord_mock():
 
 _ensure_discord_mock()
 
+from gateway.config import Platform
 from gateway.platforms.base import MessageEvent, MessageType, SessionSource
 
 
@@ -839,6 +840,29 @@ class TestVoiceChannelCommands:
         runner.adapters[event.source.platform] = mock_adapter
         result = await runner._handle_voice_channel_join(event)
         assert "need to be in a voice channel" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_join_falls_back_to_discord_adapter_key(self, runner):
+        """Join should recover when the event platform is Discord by value but not by enum key."""
+        mock_channel = MagicMock()
+        mock_channel.name = "General"
+        mock_adapter = AsyncMock()
+        mock_adapter.join_voice_channel = AsyncMock(return_value=True)
+        mock_adapter.get_user_voice_channel = AsyncMock(return_value=mock_channel)
+        mock_adapter.handle_message = AsyncMock(return_value=None)
+        mock_adapter._voice_text_channels = {}
+        mock_adapter._voice_input_callback = None
+
+        event = self._make_discord_event()
+        runner.adapters[Platform.DISCORD] = mock_adapter
+        runner.adapters.pop(event.source.platform, None)
+        event.source.platform = "discord"
+
+        result = await runner._handle_voice_channel_join(event)
+
+        assert result == ""
+        mock_adapter.get_user_voice_channel.assert_awaited_once()
+        mock_adapter.join_voice_channel.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_join_success(self, runner):

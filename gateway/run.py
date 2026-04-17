@@ -5706,6 +5706,10 @@ class GatewayRunner:
         which the agent uses to generate a contextual greeting.
         """
         adapter = self.adapters.get(event.source.platform)
+        if adapter is None:
+            platform_value = getattr(event.source.platform, "value", event.source.platform)
+            if platform_value == Platform.DISCORD.value:
+                adapter = self.adapters.get(Platform.DISCORD)
         if not hasattr(adapter, "join_voice_channel"):
             return "Voice channels are not supported on this platform."
 
