@@ -53,6 +53,12 @@ voice = [
   "sounddevice>=0.4.6,<1",
   "numpy>=1.24.0,<3",
 ]
+vad = [
+  # Optional: Silero VAD for Discord voice channels. The ONNX model itself
+  # is downloaded on first use (~2.3 MB, SHA-256 verified), not bundled.
+  "onnxruntime>=1.16,<2",
+  "numpy>=1.24.0,<3",
+]
 pty = [
   "ptyprocess>=0.7.0,<1; sys_platform != 'win32'",
   "pywinpty>=2.0.0,<3; sys_platform == 'win32'",
@@ -107,6 +113,7 @@ all = [
   "hermes-agent[sms]",
   "hermes-agent[acp]",
   "hermes-agent[voice]",
+  "hermes-agent[vad]",
   "hermes-agent[dingtalk]",
   "hermes-agent[feishu]",
   "hermes-agent[mistral]",

@@ -887,3 +887,24 @@ display:
 #   # Names and usernames are NOT affected (user-chosen, publicly visible).
 #   # Routing/delivery still uses the original values internally.
 #   redact_pii: false
+
+# =============================================================================
+# Voice — Discord voice-channel VAD (optional)
+# =============================================================================
+# Enable Silero VAD on Discord voice receive to finalise utterances as soon
+# as the speaker stops talking, instead of waiting for the 1.5s silence timer.
+# Requires `pip install hermes-agent[vad]` (onnxruntime + numpy). The Silero
+# model (~2.3 MB) is downloaded on first use and SHA-256 verified.
+#
+# voice:
+#   discord_vc:
+#     vad_enabled: false              # default off — opt in here
+#     vad_mode: silero_hybrid         # only mode currently supported
+#     vad_min_speech_ms: 250          # minimum continuous speech to trigger speech_start
+#     vad_min_silence_ms: 550         # silence held this long -> finalise utterance
+#     vad_speech_pad_ms: 150          # pre-roll captured before speech_start
+#     vad_start_prob: 0.55            # Silero probability above which a frame is "speech"
+#     vad_end_prob: 0.35              # below this, a frame is silence
+#     vad_max_utterance_s: 20.0       # hard cap on a single utterance
+#     rms_fallback_threshold: 200     # skip VAD on near-silent frames before speech starts
+#     min_utterance_rms: 300          # discard utterances below this RMS

@@ -87,14 +87,24 @@ class VoiceReceiver:
     (NaCl transport + DAVE E2EE), decodes Opus to PCM, and buffers
     per-user audio.  A polling loop detects silence and delivers
     completed utterances via a callback.
+
+    When ``voice_config['discord_vc']['vad_enabled']`` is true and
+    ``onnxruntime`` + ``numpy`` are installed, Silero VAD is used to
+    finalise utterances as soon as the speaker stops talking, replacing
+    the fixed silence timer for opted-in deployments.
     """
 
-    SILENCE_THRESHOLD = 1.5    # seconds of silence → end of utterance
+    SILENCE_THRESHOLD = 1.5    # seconds of silence → end of utterance (timer fallback)
     MIN_SPEECH_DURATION = 0.5  # minimum seconds to process (skip noise)
     SAMPLE_RATE = 48000        # Discord native rate
     CHANNELS = 2               # Discord sends stereo
 
-    def __init__(self, voice_client, allowed_user_ids: set = None):
+    def __init__(
+        self,
+        voice_client,
+        allowed_user_ids: set = None,
+        voice_config: Optional[Dict[str, Any]] = None,
+    ):
         self._vc = voice_client
         self._allowed_user_ids = allowed_user_ids or set()
         self._running = False
@@ -120,6 +130,15 @@ class VoiceReceiver:
 
         # Debug logging counter (instance-level to avoid cross-instance races)
         self._packet_debug_count = 0
+
+        # Optional Silero VAD — opt-in via config, off by default to preserve
+        # upstream behaviour. Requires onnxruntime + numpy.
+        from gateway.platforms.discord_vad import DiscordVCVADConfig
+        self._vad_config = DiscordVCVADConfig.from_voice_config(voice_config)
+        self._vad_states: Dict[int, Any] = {}
+        self._vad_model: Optional[Any] = None
+        self._vad_enabled = False
+        self._init_vad()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -149,7 +168,76 @@ class VoiceReceiver:
             self._last_packet_time.clear()
             self._decoders.clear()
             self._ssrc_to_user.clear()
+            self._vad_states.clear()
         logger.info("VoiceReceiver stopped")
+
+    # ------------------------------------------------------------------
+    # Silero VAD (opt-in)
+    # ------------------------------------------------------------------
+
+    def _init_vad(self):
+        """Load the Silero VAD model when enabled. Falls back silently."""
+        if not self._vad_config.vad_enabled:
+            return
+        if self._vad_config.vad_mode != "silero_hybrid":
+            logger.warning(
+                "voice pipeline: vad_disabled reason=unsupported_mode mode=%s",
+                self._vad_config.vad_mode,
+            )
+            return
+        try:
+            from gateway.platforms.discord_vad import SileroOnnxVAD
+            self._vad_model = SileroOnnxVAD()
+            self._vad_enabled = True
+            logger.info("voice pipeline: vad_enabled mode=silero_hybrid")
+        except Exception as e:
+            self._vad_model = None
+            logger.warning(
+                "voice pipeline: vad_disabled reason=%s:%s — falling back to silence timer",
+                type(e).__name__, e,
+            )
+
+    def _get_or_create_vad_state(self, ssrc: int):
+        """Return the VAD state for an SSRC, creating it under the lock."""
+        if not self._vad_enabled or not self._vad_model:
+            return None
+        from gateway.platforms.discord_vad import DiscordVCVADState
+        with self._lock:
+            state = self._vad_states.get(ssrc)
+            if state is None:
+                state = DiscordVCVADState(self._vad_model, self._vad_config)
+                self._vad_states[ssrc] = state
+            return state
+
+    def _feed_vad(self, ssrc: int, pcm: bytes, frame_time: float):
+        """Feed a decoded PCM frame to the per-SSRC VAD stream."""
+        state = self._get_or_create_vad_state(ssrc)
+        if state is None:
+            return
+        # Cheap RMS for the early-skip path inside the VAD state machine.
+        try:
+            import numpy as _np
+            samples = _np.frombuffer(pcm, dtype=_np.int16)
+            rms = int(_np.sqrt(_np.mean(samples.astype(_np.float32) ** 2))) if samples.size else 0
+        except Exception:
+            rms = 0
+        try:
+            state.push_pcm_frame(pcm, frame_time, rms)
+        except Exception as e:
+            logger.debug("VAD push_pcm_frame failed for ssrc=%d: %s", ssrc, e)
+
+    def _vad_finalize_reasons(self) -> Dict[int, str]:
+        """Return SSRCs whose VAD says the current utterance is complete."""
+        if not self._vad_enabled:
+            return {}
+        now = time.monotonic()
+        out: Dict[int, str] = {}
+        with self._lock:
+            for ssrc, state in self._vad_states.items():
+                reason = state.should_finalize(now)
+                if reason:
+                    out[ssrc] = reason
+        return out
 
     def pause(self):
         self._paused = True
@@ -329,12 +417,18 @@ class VoiceReceiver:
             if ssrc not in self._decoders:
                 self._decoders[ssrc] = discord.opus.Decoder()
             pcm = self._decoders[ssrc].decode(decrypted)
+            now = time.monotonic()
             with self._lock:
                 self._buffers[ssrc].extend(pcm)
-                self._last_packet_time[ssrc] = time.monotonic()
+                self._last_packet_time[ssrc] = now
         except Exception as e:
             logger.debug("Opus decode error for SSRC %s: %s", ssrc, e)
             return
+
+        # Feed the decoded frame to the VAD stream when enabled.
+        # Cheap no-op when VAD is disabled (the common upstream path).
+        if self._vad_enabled:
+            self._feed_vad(ssrc, pcm, now)
 
     # ------------------------------------------------------------------
     # Silence detection
@@ -367,9 +461,16 @@ class VoiceReceiver:
         return 0
 
     def check_silence(self) -> list:
-        """Return list of (user_id, pcm_bytes) for completed utterances."""
+        """Return list of (user_id, pcm_bytes) for completed utterances.
+
+        When Silero VAD is enabled, an utterance can be finalised early —
+        as soon as VAD reports a continuous silence run ≥ ``vad_min_silence_ms``
+        or the utterance hits ``vad_max_utterance_s``. Otherwise we fall back
+        to the original 1.5s post-packet silence timer.
+        """
         now = time.monotonic()
         completed = []
+        vad_finalize = self._vad_finalize_reasons() if self._vad_enabled else {}
 
         with self._lock:
             ssrc_user_map = dict(self._ssrc_to_user)
@@ -382,7 +483,13 @@ class VoiceReceiver:
                 # 48kHz, 16-bit, stereo = 192000 bytes/sec
                 buf_duration = len(buf) / (self.SAMPLE_RATE * self.CHANNELS * 2)
 
-                if silence_duration >= self.SILENCE_THRESHOLD and buf_duration >= self.MIN_SPEECH_DURATION:
+                vad_says_done = ssrc in vad_finalize
+                timer_says_done = (
+                    silence_duration >= self.SILENCE_THRESHOLD
+                    and buf_duration >= self.MIN_SPEECH_DURATION
+                )
+
+                if vad_says_done or timer_says_done:
                     user_id = ssrc_user_map.get(ssrc, 0)
                     if not user_id:
                         # SSRC not mapped (SPEAKING event missing after bot rejoin).
@@ -390,8 +497,19 @@ class VoiceReceiver:
                         user_id = self._infer_user_for_ssrc(ssrc)
                     if user_id:
                         completed.append((user_id, bytes(buf)))
+                        if vad_says_done:
+                            logger.debug(
+                                "voice pipeline: vad_finalize ssrc=%d reason=%s buf_ms=%.0f",
+                                ssrc, vad_finalize[ssrc], buf_duration * 1000,
+                            )
                     self._buffers[ssrc] = bytearray()
                     self._last_packet_time.pop(ssrc, None)
+                    state = self._vad_states.get(ssrc)
+                    if state is not None:
+                        try:
+                            state.reset()
+                        except Exception:
+                            pass
                 elif silence_duration >= self.SILENCE_THRESHOLD * 2:
                     # Stale buffer with no valid user — discard
                     self._buffers.pop(ssrc, None)
