@@ -7322,7 +7322,7 @@ class HermesCLI:
             _ptt_key = _raw_ptt.lower().replace("ctrl+", "c-").replace("alt+", "a-")
         except Exception:
             _ptt_key = "c-b"
-        _ptt_display = _ptt_key.replace("c-", "Ctrl+").upper()
+        _ptt_display = _ptt_key.replace("c-", "Ctrl+").replace("a-", "Alt+").upper()
         _cprint(f"\n{_ACCENT}Voice mode enabled{tts_status}{_RST}")
         _cprint(f"  {_DIM}{_ptt_display} to start/stop recording{_RST}")
         _cprint(f"  {_DIM}/voice tts  to toggle speech output{_RST}")
@@ -8995,11 +8995,15 @@ class HermesCLI:
         try:
             from hermes_cli.config import load_config
             _raw_key = load_config().get("voice", {}).get("record_key", "ctrl+b")
-            _voice_key = _raw_key.lower().replace("ctrl+", "c-").replace("alt+", "a-")
+            _raw_lower = _raw_key.lower()
+            if _raw_lower.startswith("alt+"):
+                _voice_key_parts: tuple[str, ...] = ("escape", _raw_lower[4:])
+            else:
+                _voice_key_parts = (_raw_lower.replace("ctrl+", "c-"),)
         except Exception:
-            _voice_key = "c-b"
+            _voice_key_parts = ("c-b",)
 
-        @kb.add(_voice_key)
+        @kb.add(*_voice_key_parts)
         def handle_voice_record(event):
             """Toggle voice recording when voice mode is active.
 
