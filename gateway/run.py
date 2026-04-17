@@ -332,6 +332,91 @@ logger = logging.getLogger(__name__)
 _AGENT_PENDING_SENTINEL = object()
 
 
+# ---------------------------------------------------------------------------
+# Voice reply directives — [tts: ...] and [voice: ...]
+# ---------------------------------------------------------------------------
+# The model can emit two inline directives at the start of a voice reply to
+# steer the TTS layer for that turn:
+#
+#   [tts: warm and friendly, slow]   -> instruct override (Qwen3-TTS only)
+#   [voice: vc_e87c8ed1]             -> voice override (preset name or clone ID)
+#
+# Both are stripped from the spoken/displayed text before TTS. The parsed
+# values are stored on the runner so subsequent turns in the same chat
+# inherit them until the model emits a new directive.
+#
+# Voice tag values must match this regex: a custom clone ID (vc_ + 8+ hex
+# chars) or a short preset name that does NOT start with the `vc_` prefix.
+# Anything else is ignored with a warning to surface accidental hallucinations.
+_VOICE_TAG_VALUE_RE = re.compile(
+    r"vc_[0-9a-f]{8,}|(?!vc_)[a-z][a-z0-9_]{0,31}",
+    re.IGNORECASE,
+)
+
+# Match `[tts: ...]` and `[voice: ...]` permissively (any chars except `]`)
+# so a malformed directive is still STRIPPED from the spoken text — we then
+# validate the captured value separately and discard invalid voice candidates.
+# Permissive matching also defends against nested-bracket cases like
+# `[tts: foo[bar]baz]`: the first `]` terminates the tag, leaving `baz]` in
+# the cleaned text rather than passing the literal directive through to TTS.
+_TTS_TAG_RE = re.compile(r"\[tts:\s*([^\]]*)\]\s*", re.IGNORECASE)
+_VOICE_TAG_RE = re.compile(r"\[voice:\s*([^\]]*)\]\s*", re.IGNORECASE)
+
+
+def _extract_voice_reply_directives(
+    text: str,
+    *,
+    runner=None,
+    platform=None,
+    chat_id: Optional[str] = None,
+) -> tuple[str, str, str]:
+    """Strip [tts:] / [voice:] directives from ``text``; persist them on ``runner``.
+
+    Returns ``(cleaned_text, instruct, voice)``. Empty strings indicate "not
+    present in this turn"; the caller should fall back to any previously
+    persisted value.
+
+    The runner-level state (``runner._last_tts_voice`` /
+    ``runner._last_tts_instruct``, both ``Dict[(platform, chat_id), str]``)
+    lets a `[voice: ...]` set early in a session apply to later replies until
+    the model emits a new directive.
+    """
+    if not isinstance(text, str) or not text:
+        return "", "", ""
+
+    cleaned = text
+    extracted_instruct = ""
+    extracted_voice = ""
+
+    can_persist = runner is not None and platform is not None and chat_id is not None
+
+    tts_match = _TTS_TAG_RE.search(cleaned)
+    if tts_match:
+        extracted_instruct = tts_match.group(1).strip()
+        cleaned = _TTS_TAG_RE.sub("", cleaned, count=1).strip()
+        if extracted_instruct and can_persist:
+            if not hasattr(runner, "_last_tts_instruct"):
+                runner._last_tts_instruct = {}
+            runner._last_tts_instruct[(platform, chat_id)] = extracted_instruct
+
+    voice_match = _VOICE_TAG_RE.search(cleaned)
+    if voice_match:
+        candidate = voice_match.group(1).strip()
+        if _VOICE_TAG_VALUE_RE.fullmatch(candidate):
+            extracted_voice = candidate
+            if can_persist:
+                if not hasattr(runner, "_last_tts_voice"):
+                    runner._last_tts_voice = {}
+                runner._last_tts_voice[(platform, chat_id)] = extracted_voice
+        else:
+            logger.warning(
+                "Ignored malformed [voice:] tag value in voice reply: %r", candidate
+            )
+        cleaned = _VOICE_TAG_RE.sub("", cleaned, count=1).strip()
+
+    return cleaned, extracted_instruct, extracted_voice
+
+
 def _resolve_runtime_agent_kwargs() -> dict:
     """Resolve provider credentials for gateway-created AIAgent instances."""
     from hermes_cli.runtime_provider import (
@@ -616,6 +701,13 @@ class GatewayRunner:
         self._running_agents_ts: Dict[str, float] = {}  # start timestamp per session
         self._pending_messages: Dict[str, str] = {}  # Queued messages during interrupt
         self._busy_ack_ts: Dict[str, float] = {}  # last busy-ack timestamp per session (debounce)
+
+        # Voice-reply directive carry-forward (see _extract_voice_reply_directives).
+        # Keyed by (platform, chat_id). A [tts:] / [voice:] directive emitted in
+        # one turn applies to subsequent voice replies until the model emits a
+        # new one. Cleared when /voice off is called or the gateway restarts.
+        self._last_tts_voice: Dict[tuple, str] = {}
+        self._last_tts_instruct: Dict[tuple, str] = {}
 
         # Cache AIAgent instances per session to preserve prompt caching.
         # Without this, a new AIAgent is created per message, rebuilding the
@@ -5474,7 +5566,16 @@ class GatewayRunner:
         try:
             from tools.tts_tool import text_to_speech_tool, _strip_markdown_for_tts
 
-            tts_text = _strip_markdown_for_tts(text[:4000])
+            # Strip [tts:] / [voice:] directives before TTS and persist them
+            # for future turns in the same chat.
+            cleaned_text, extracted_instruct, extracted_voice = _extract_voice_reply_directives(
+                text,
+                runner=self,
+                platform=event.source.platform,
+                chat_id=event.source.chat_id,
+            )
+
+            tts_text = _strip_markdown_for_tts(cleaned_text[:4000])
             if not tts_text:
                 return
 
@@ -5486,9 +5587,28 @@ class GatewayRunner:
             )
             os.makedirs(os.path.dirname(audio_path), exist_ok=True)
 
-            result_json = await asyncio.to_thread(
-                text_to_speech_tool, text=tts_text, output_path=audio_path
-            )
+            # Effective voice / instruct: directive in this turn wins; otherwise
+            # the carry-forward from the most recent directive in this chat.
+            # Use getattr defensively so partial GatewayRunner instances (test
+            # fixtures that bypass __init__) don't trip an AttributeError.
+            _key = (event.source.platform, event.source.chat_id)
+            _carry_voice = getattr(self, "_last_tts_voice", {})
+            _carry_instruct = getattr(self, "_last_tts_instruct", {})
+            effective_voice = extracted_voice or _carry_voice.get(_key) or None
+            effective_instruct = extracted_instruct or _carry_instruct.get(_key) or None
+
+            # voice / instruct kwargs are accepted by providers that support
+            # them (Qwen3-TTS) and ignored by older signatures. Inspect the
+            # tool's signature to stay compatible with both.
+            import inspect as _inspect
+            _tts_kwargs: Dict[str, Any] = {"text": tts_text, "output_path": audio_path}
+            _tts_sig = _inspect.signature(text_to_speech_tool).parameters
+            if "voice" in _tts_sig and effective_voice:
+                _tts_kwargs["voice"] = effective_voice
+            if "instruct" in _tts_sig and effective_instruct:
+                _tts_kwargs["instruct"] = effective_instruct
+
+            result_json = await asyncio.to_thread(text_to_speech_tool, **_tts_kwargs)
             result = json.loads(result_json)
 
             # Use the actual file path from result (may differ after opus conversion)
