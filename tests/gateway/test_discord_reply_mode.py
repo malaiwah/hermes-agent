@@ -108,6 +108,11 @@ def _make_discord_adapter(reply_to_mode: str = "first"):
     # Mock the Discord client and channel
     mock_channel = AsyncMock()
     ref_message = MagicMock()
+    # send() calls ref_message.to_reference(fail_if_not_exists=False) so the
+    # reference degrades gracefully when the target is deleted. For tests we
+    # let that return the same MagicMock so existing assertions like
+    # `call.kwargs.get("reference") is ref_message` still hold.
+    ref_message.to_reference = MagicMock(return_value=ref_message)
     mock_channel.fetch_message = AsyncMock(return_value=ref_message)
 
     sent_msg = MagicMock()
@@ -211,6 +216,108 @@ class TestSendWithReplyToMode:
         assert len(calls) == 2
         assert calls[0].kwargs.get("reference") is ref_msg
         assert calls[1].kwargs.get("reference") is None
+
+
+class TestReplyReferenceRobustness:
+    """S2: deleted / rejected reply targets must not lose the response."""
+
+    @pytest.mark.asyncio
+    async def test_reference_built_with_fail_if_not_exists_false(self):
+        """A reply target that is later deleted should NOT 400 the whole send.
+
+        discord.py's ``MessageReference`` defaults ``fail_if_not_exists=True``
+        so a deleted target raises ``HTTPException(400, 10008)``. We wrap the
+        fetched message via ``to_reference(fail_if_not_exists=False)`` which
+        degrades that to a normal send.
+        """
+        adapter, channel, ref_msg = _make_discord_adapter("first")
+        adapter.truncate_message = lambda content, max_len: ["only chunk"]
+
+        await adapter.send("12345", "test", reply_to="999")
+
+        ref_msg.to_reference.assert_called_once_with(fail_if_not_exists=False)
+
+    @pytest.mark.asyncio
+    async def test_10008_unknown_message_retries_without_reference(self):
+        """Belt-and-suspenders: if Discord rejects the reference anyway
+        (10008 Unknown Message, despite fail_if_not_exists=False), drop
+        the reference and retry so the chunked response still delivers.
+        """
+        adapter, channel, ref_msg = _make_discord_adapter("all")
+        adapter.truncate_message = lambda content, max_len: ["a", "b", "c"]
+
+        sent_msg = MagicMock()
+        sent_msg.id = 99
+        call_count = {"n": 0}
+
+        async def fake_send(*args, **kwargs):
+            call_count["n"] += 1
+            # First call fails with 10008, subsequent succeed
+            if call_count["n"] == 1 and kwargs.get("reference") is ref_msg:
+                raise Exception(
+                    "400 Bad Request (error code: 10008): Unknown Message"
+                )
+            return sent_msg
+
+        channel.send = AsyncMock(side_effect=fake_send)
+
+        result = await adapter.send("12345", "test", reply_to="999")
+
+        assert result.success is True
+        # First attempt (with ref) failed, then retried (no ref), plus 2 more chunks
+        assert call_count["n"] == 4
+        calls = channel.send.call_args_list
+        assert calls[0].kwargs.get("reference") is ref_msg   # initial attempt
+        assert calls[1].kwargs.get("reference") is None      # retry without ref
+        # Remaining chunks are sent without reference too — no point repeating
+        # the reject-and-retry dance for every chunk.
+        assert calls[2].kwargs.get("reference") is None
+        assert calls[3].kwargs.get("reference") is None
+
+    @pytest.mark.asyncio
+    async def test_50035_system_message_retries_without_reference(self):
+        """Regression: the existing 50035 fallback still works."""
+        adapter, channel, ref_msg = _make_discord_adapter("first")
+        adapter.truncate_message = lambda content, max_len: ["only chunk"]
+
+        sent_msg = MagicMock()
+        sent_msg.id = 77
+        call_count = {"n": 0}
+
+        async def fake_send(*args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1 and kwargs.get("reference") is ref_msg:
+                raise Exception(
+                    "400 Bad Request (error code: 50035): Invalid Form Body\n"
+                    "message_reference: Cannot reply to a system message"
+                )
+            return sent_msg
+
+        channel.send = AsyncMock(side_effect=fake_send)
+
+        result = await adapter.send("12345", "test", reply_to="999")
+
+        assert result.success is True
+        assert call_count["n"] == 2
+        calls = channel.send.call_args_list
+        assert calls[0].kwargs.get("reference") is ref_msg
+        assert calls[1].kwargs.get("reference") is None
+
+    @pytest.mark.asyncio
+    async def test_non_reference_errors_still_propagate(self):
+        """A real error unrelated to the reply reference must still raise
+        so the send() wrapper returns success=False with the real cause,
+        rather than silently swallowing it.
+        """
+        adapter, channel, ref_msg = _make_discord_adapter("first")
+        adapter.truncate_message = lambda content, max_len: ["only chunk"]
+
+        channel.send = AsyncMock(side_effect=Exception("403 Forbidden (error code: 50013): Missing Permissions"))
+
+        result = await adapter.send("12345", "test", reply_to="999")
+
+        assert result.success is False
+        assert "50013" in (result.error or "")
 
 
 class TestConfigSerialization:

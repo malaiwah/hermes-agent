@@ -48,7 +48,14 @@ from gateway.platforms.discord import DiscordAdapter  # noqa: E402
 async def test_send_retries_without_reference_when_reply_target_is_system_message():
     adapter = DiscordAdapter(PlatformConfig(enabled=True, token="***"))
 
+    # send() now calls ref_msg.to_reference(fail_if_not_exists=False) so the
+    # reference degrades gracefully when the target is deleted; route it back
+    # to the same namespace so `send_calls[0]["reference"] is ref_msg` still
+    # holds. Test-only — real discord.py's to_reference returns a distinct
+    # MessageReference object, but identity comparison isn't observable to
+    # the adapter either way.
     ref_msg = SimpleNamespace(id=99)
+    ref_msg.to_reference = MagicMock(return_value=ref_msg)
     sent_msg = SimpleNamespace(id=1234)
     send_calls = []
 

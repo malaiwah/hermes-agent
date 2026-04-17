@@ -833,7 +833,12 @@ class DiscordAdapter(BasePlatformAdapter):
             if reply_to and self._reply_to_mode != "off":
                 try:
                     ref_msg = await channel.fetch_message(int(reply_to))
-                    reference = ref_msg
+                    # fail_if_not_exists=False degrades a deleted/vanished
+                    # target into a normal (non-reply) send instead of a
+                    # 400 Invalid Form Body (error code 10008). Without
+                    # this, deleting the message between fetch and send
+                    # throws away the whole chunked response.
+                    reference = ref_msg.to_reference(fail_if_not_exists=False)
                 except Exception as e:
                     logger.debug("Could not fetch reply-to message: %s", e)
 
@@ -848,21 +853,33 @@ class DiscordAdapter(BasePlatformAdapter):
                         reference=chunk_reference,
                     )
                 except Exception as e:
+                    # Defense in depth: fail_if_not_exists=False should have
+                    # prevented 10008 "Unknown Message" from the reference,
+                    # but if Discord ever rejects it for another reason
+                    # (50035 system-message target, legacy bots, etc.)
+                    # drop the reference and retry so the remaining chunks
+                    # still get delivered rather than losing the whole
+                    # response.
                     err_text = str(e)
-                    if (
-                        chunk_reference is not None
-                        and "error code: 50035" in err_text
-                        and "Cannot reply to a system message" in err_text
+                    _retryable_codes = ("error code: 10008", "error code: 50035")
+                    _retryable_msgs = ("Unknown Message", "Cannot reply to a system message")
+                    if chunk_reference is not None and (
+                        any(code in err_text for code in _retryable_codes)
+                        or any(m in err_text for m in _retryable_msgs)
                     ):
                         logger.warning(
-                            "[%s] Reply target %s is a Discord system message; retrying send without reply reference",
+                            "[%s] Reply target %s rejected by Discord (%s); retrying without reply reference",
                             self.name,
                             reply_to,
+                            err_text[:200],
                         )
                         msg = await channel.send(
                             content=chunk,
                             reference=None,
                         )
+                        # Downgrade for remaining chunks too — no point
+                        # repeating the same reject-and-retry dance.
+                        reference = None
                     else:
                         raise
                 message_ids.append(str(msg.id))
