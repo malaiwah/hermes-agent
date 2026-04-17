@@ -277,6 +277,40 @@ class TestIncomingDocumentHandling:
         assert event.message_type == MessageType.DOCUMENT
 
     @pytest.mark.asyncio
+    async def test_unsafe_url_blocked_by_ssrf_guard(self, adapter, monkeypatch):
+        """A document attachment whose URL resolves to a private/internal
+        address must be dropped before the aiohttp download runs.
+
+        Discord's CDN always signs outbound URLs (ex=/is=/hm=), but the
+        adapter should still match the defense-in-depth check already
+        applied to image/audio attachments — so a payload-schema surprise
+        never becomes an SSRF into the internal network.
+        """
+        # Patch the adapter's is_safe_url reference — simulate the URL
+        # being rejected (private IP, metadata endpoint, etc.).
+        monkeypatch.setattr(discord_platform, "is_safe_url", lambda _u: False)
+
+        # If the download still runs, ClientSession will fail — we assert
+        # the guard short-circuits BEFORE aiohttp is even touched.
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(side_effect=AssertionError(
+            "SSRF guard must block the document download before aiohttp runs"
+        ))
+
+        with patch("aiohttp.ClientSession", return_value=session):
+            msg = make_message([
+                make_attachment(filename="report.pdf", content_type="application/pdf")
+            ])
+            await adapter._handle_message(msg)
+
+        # Handler is still called — the unsafe attachment is skipped
+        # gracefully, not propagated as an exception.
+        adapter.handle_message.assert_called_once()
+        event = adapter.handle_message.call_args[0][0]
+        assert event.media_urls == []
+        assert event.media_types == []
+
+    @pytest.mark.asyncio
     async def test_download_error_handled(self, adapter):
         """If the HTTP download raises, the handler should not crash."""
         resp = AsyncMock()

@@ -2636,6 +2636,17 @@ class DiscordAdapter(BasePlatformAdapter):
                             "[Discord] Document too large (%s bytes), skipping: %s",
                             att.size, att.filename,
                         )
+                    elif not is_safe_url(att.url):
+                        # att.url is always a cdn.discordapp.com signed URL
+                        # today, but cache_image_from_url/cache_audio_from_url
+                        # already gate on is_safe_url for the same input — we
+                        # apply the same defense-in-depth check here to match,
+                        # and to close the door on any future Discord payload
+                        # schema drift that could surface non-CDN URLs.
+                        logger.warning(
+                            "[Discord] Blocked unsafe document URL for %s (SSRF guard)",
+                            att.filename,
+                        )
                     else:
                         try:
                             import aiohttp
