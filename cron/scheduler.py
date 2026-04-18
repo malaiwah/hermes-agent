@@ -657,11 +657,28 @@ def _build_job_prompt(job: dict) -> str:
 def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
     """
     Execute a single cron job.
-    
+
     Returns:
         Tuple of (success, full_output_doc, final_response, error_message)
     """
-    from run_agent import AIAgent
+    # Preflight: ensure Hermes dependencies are importable.  If run_agent
+    # (which imports openai and other third-party libs at module level) cannot
+    # be imported, it almost always means cron is executing under a Python
+    # interpreter that does not have the Hermes venv installed (#11610).
+    # Catch the ImportError early and surface a clear, actionable message
+    # instead of a cryptic ModuleNotFoundError deep in the stack.
+    try:
+        from run_agent import AIAgent
+    except ImportError as _import_err:
+        _err_msg = (
+            f"Cannot load Hermes agent module: {_import_err}\n"
+            f"This usually means cron is running under a Python interpreter "
+            f"({sys.executable}) that does not have Hermes dependencies installed.\n"
+            f"Ensure Hermes is invoked from within its virtual environment, or "
+            f"use the installed 'hermes' command which bundles the correct Python."
+        )
+        logger.error("Job '%s' preflight failed: %s", job.get("id", "?"), _err_msg)
+        return False, "", "", _err_msg
     
     # Initialize SQLite session store so cron job messages are persisted
     # and discoverable via session_search (same pattern as gateway/run.py).
